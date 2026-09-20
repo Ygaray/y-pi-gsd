@@ -70,6 +70,15 @@ for (const result of results) {
   if (verdict !== "PASS" && verdict !== "FAIL") {
     reject(`result for "${criterion}" has a verdict that is not exactly "PASS" or "FAIL"`);
   }
+  if (typeof result.evidence !== "string") {
+    reject(`result for "${criterion}" has non-string evidence`);
+  }
+  if (result.rootCause !== undefined && typeof result.rootCause !== "string") {
+    reject(`result for "${criterion}" has non-string rootCause`);
+  }
+  if (result.gapClosureRoute !== undefined && typeof result.gapClosureRoute !== "string") {
+    reject(`result for "${criterion}" has non-string gapClosureRoute`);
+  }
 }
 
 // Computed here, never accepted from the payload, so a written log's

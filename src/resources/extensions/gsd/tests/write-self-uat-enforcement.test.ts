@@ -202,6 +202,34 @@ describe("write-self-uat.mjs — real subprocess enforcement", () => {
     assertRejectedNoWrite(inv);
   });
 
+  it("rejects a result with a non-string (numeric) evidence and writes nothing, no stack trace", () => {
+    const inv = invoke({
+      target: "S07",
+      surface: "cli",
+      results: [{ criterion: "login works", verdict: "PASS", evidence: 123 }],
+    });
+    assertRejectedNoWrite(inv);
+    assert.ok(
+      !/at .*\(.*write-self-uat\.mjs/.test(inv.stderr) && !inv.stderr.includes("verify-agentic-log.ts"),
+      `expected no stack trace in stderr; got:\n${inv.stderr}`,
+    );
+  });
+
+  it("rejects a FAIL with a non-string (boolean) rootCause and writes nothing, no stack trace", () => {
+    const inv = invoke({
+      target: "S07",
+      surface: "cli",
+      results: [
+        { criterion: "logout works", verdict: "FAIL", evidence: "exit 1", rootCause: false },
+      ],
+    });
+    assertRejectedNoWrite(inv);
+    assert.ok(
+      !/at .*\(.*write-self-uat\.mjs/.test(inv.stderr) && !inv.stderr.includes("verify-agentic-log.ts"),
+      `expected no stack trace in stderr; got:\n${inv.stderr}`,
+    );
+  });
+
   it("writes the real renderSelfUat output for a conforming payload, byte-identical to an in-process call", () => {
     const results: SelfUatCriterionResult[] = [
       { criterion: "login works", verdict: "PASS", evidence: "exit 0" },
