@@ -139,6 +139,10 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "min", desc: "Minimal widget display" },
     { cmd: "off", desc: "Hide widget" },
   ],
+  "verify-agentic": [
+    { cmd: "--criteria", desc: "State the acceptance criteria to verify" },
+    { cmd: "--surface", desc: "cli | browser | android" },
+  ],
   mode: [
     { cmd: "global", desc: "Edit global workflow mode" },
     { cmd: "project", desc: "Edit project-specific workflow mode" },
