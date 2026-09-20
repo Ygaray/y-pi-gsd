@@ -229,10 +229,13 @@ never permitted on the personal handset, which was never targeted by any command
 - **AR-07-02 / T-07-11 backstop is closed by observation for the CLI and Android surfaces only.**
   Both surfaces' dispatched children wrote genuine, uncontrolled model-generated PASS/FAIL content
   through the guarded `write-self-uat.mjs` → `renderSelfUat` path (44 and 50 stream occurrences of
-  `write-self-uat.mjs` respectively, both confirmed as real `bash` tool_call invocations, not
-  narration). The backstop remains **open** for the browser surface: its child never reached the
-  guarded write path at all — its halt log went through the separate, SKILL.md-documented
-  halt-persistence `write` tool, which was never exercised by Phase 7's own tests.
+  `write-self-uat.mjs` respectively). For CLI and Android, this rests on the existence of a genuine
+  PASS/FAIL SELF-UAT log on disk — which could only be produced by the guarded script actually
+  running — not on the explicit `toolName=="bash"` stream filtering performed for the browser
+  surface's narration-only occurrences (08-01-SUMMARY.md, 08-03-SUMMARY.md). The backstop remains
+  **open** for the browser surface: its child never reached the guarded write path at all — its
+  halt log went through the separate, SKILL.md-documented halt-persistence `write` tool, which was
+  never exercised by Phase 7's own tests.
 - **TEST-09 is not fully satisfied.** CLI and Android are proven end to end (known-good PASS,
   known-bad FAIL with a tight root cause, guarded write confirmed, zero diagnose-only drift, zero
   credential leakage). The browser surface is genuinely blocked: `browser-tools` extension tools
