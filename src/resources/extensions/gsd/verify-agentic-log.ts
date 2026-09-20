@@ -174,7 +174,12 @@ function slugifyTarget(target: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return slug.length > 0 ? slug : target;
+  // Fall back to a fixed literal, never the raw input -- a target composed
+  // entirely of non-alphanumeric characters (e.g. "..." or "---") would
+  // otherwise produce a "slug" that violates the lowercase-alphanumeric-
+  // and-dashes invariant this function guarantees, and could start with a
+  // "." in the resulting filename.
+  return slug.length > 0 ? slug : "target";
 }
 
 /** Strips the fractional-seconds group and replaces colons with dashes. */
