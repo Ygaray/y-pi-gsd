@@ -13,8 +13,24 @@
 
 export const SELF_UAT_LOG_DIR_RELATIVE = ".gsd/verify-agentic/";
 export const SELF_UAT_SUFFIX = "-SELF-UAT.md";
-// TODO(Task 2): implement.
-export const PATCH_MARKER_PATTERN = /$^/;
+
+/**
+ * Matches any patch/diff marker that would let a rendered gap-closure route
+ * or root cause read as a ready-to-apply change (D-02). Built from an array
+ * of alternation sources so each marker is individually readable and
+ * individually testable:
+ *   - a fenced code-block opener tagged `diff` or `patch`
+ *   - a unified-diff file header line (`+++ `/`--- `)
+ *   - a hunk-range line (`@@ `)
+ *   - an `Index: ` header line
+ */
+const PATCH_MARKER_SOURCES = [
+  "^```(?:diff|patch)\\b",
+  "^(?:\\+\\+\\+|---) ",
+  "^@@ ",
+  "^Index: ",
+];
+export const PATCH_MARKER_PATTERN = new RegExp(PATCH_MARKER_SOURCES.join("|"), "im");
 
 /** One evaluated criterion's verdict, evidence, and (for FAIL) diagnosis. */
 export interface SelfUatCriterionResult {
@@ -40,9 +56,56 @@ export class SelfUatRenderError extends Error {
   }
 }
 
-// TODO(Task 2): implement the four rejection guards ahead of any rendering.
-function validateResults(_results: SelfUatCriterionResult[]): void {
-  // no-op until Task 2
+/**
+ * The four rejection guards, run over every result BEFORE any string
+ * building so a single bad entry can never produce a half-rendered
+ * document:
+ *   1. Evidence guard — every result, regardless of verdict, must carry
+ *      structurally non-empty evidence. A verdict with no evidence reads as
+ *      authoritative while resting on nothing.
+ *   2. Root-cause presence guard — a FAIL must carry a structurally
+ *      non-empty root cause.
+ *   3. Rubber-stamp guard — a FAIL's root cause may not merely restate its
+ *      criterion (SKILL.md Step 5's named unacceptable shape).
+ *   4. Prose-only guard — neither rootCause nor gapClosureRoute may match
+ *      {@link PATCH_MARKER_PATTERN} (D-02): the route is a pointer and a
+ *      diagnosis, never a ready-to-apply change.
+ */
+function validateResults(results: SelfUatCriterionResult[]): void {
+  for (const result of results) {
+    const evidence = result.evidence ?? "";
+    if (evidence.trim().length === 0) {
+      throw new SelfUatRenderError(
+        `renderSelfUat: result for "${result.criterion}" has empty evidence — a verdict with no evidence cannot render`,
+      );
+    }
+
+    if (result.verdict === "FAIL") {
+      const rootCause = result.rootCause ?? "";
+      const trimmedRootCause = rootCause.trim();
+      if (trimmedRootCause.length === 0) {
+        throw new SelfUatRenderError(
+          `renderSelfUat: FAIL for "${result.criterion}" has no root cause — a FAIL cannot render without one`,
+        );
+      }
+      if (trimmedRootCause.toLowerCase() === result.criterion.trim().toLowerCase()) {
+        throw new SelfUatRenderError(
+          `renderSelfUat: FAIL for "${result.criterion}" has a root cause that merely restates the criterion`,
+        );
+      }
+    }
+
+    if (result.rootCause && PATCH_MARKER_PATTERN.test(result.rootCause)) {
+      throw new SelfUatRenderError(
+        `renderSelfUat: root cause for "${result.criterion}" contains a patch/diff marker — the route must stay prose-only`,
+      );
+    }
+    if (result.gapClosureRoute && PATCH_MARKER_PATTERN.test(result.gapClosureRoute)) {
+      throw new SelfUatRenderError(
+        `renderSelfUat: gap-closure route for "${result.criterion}" contains a patch/diff marker — the route must stay prose-only`,
+      );
+    }
+  }
 }
 
 /**
