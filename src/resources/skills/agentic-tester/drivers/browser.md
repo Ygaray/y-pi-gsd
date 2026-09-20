@@ -2,6 +2,8 @@
 
 ## Preconditions
 
+Spine Step 2.
+
 - The `browser-tools` extension is enabled and its tools are callable in this session. The
   extension manifest at `src/resources/extensions/browser-tools/extension-manifest.json` declares
   `requires.platform` at `>=2.29.0`, so the running pi-coding-agent platform version must satisfy
@@ -18,6 +20,8 @@
 
 ## Build
 
+Spine Step 3.
+
 - The page under test is served from the current tree, not from a stale process left running from
   an earlier session.
 - Build and start the target app per its own documented command. Read the startup output rather
@@ -29,7 +33,7 @@
 
 ## Drive
 
-All interaction goes through the registered `browser-tools` extension tool names — never a
+Spine Step 4. All interaction goes through the registered `browser-tools` extension tool names — never a
 hand-rolled browser-automation script, and never a shelled-out browser binary. The tool names are
 the entire browser surface this driver uses.
 
@@ -54,7 +58,7 @@ observation produces no evidence, and an unobserved action cannot support a verd
 
 ## Observe
 
-Three evidence layers, each produced by its own tool set:
+Spine Step 4. Three evidence layers, each produced by its own tool set:
 
 - **Log, request, and status-code evidence** — `browser_get_console_logs` and
   `browser_get_network_logs`.

@@ -7,8 +7,9 @@ invocation contract (`ARCHITECTURE.md` §"How to run it") rather than in remembe
 
 ## Preconditions
 
-Check these, read-only, before driving anything. An unmet precondition is reported and the run
-halts — it is never worked around by substituting a different runtime, package manager, or model.
+Spine Step 2. Check these, read-only, before driving anything. An unmet precondition is reported
+and the run halts — it is never worked around by substituting a different runtime, package
+manager, or model.
 
 - `node --version` satisfies the `engines.node` floor of `22.18.0` declared in the root
   `package.json`.
@@ -20,7 +21,7 @@ halts — it is never worked around by substituting a different runtime, package
 
 ## Build
 
-The recipe, run from the repository root against the current tree:
+Spine Step 3. The recipe, run from the repository root against the current tree:
 
 ```bash
 pnpm install --frozen-lockfile
@@ -34,7 +35,7 @@ state and is therefore invalid evidence.
 
 ## Drive
 
-The invocation contract is `node dist/bootstrap.js` invoked directly — there is no self-symlinked
+Spine Step 4. The invocation contract is `node dist/bootstrap.js` invoked directly — there is no self-symlinked
 `bin` for this package's own CLI. Flags that matter:
 
 - `--print` (alias `-p`) — single-shot non-interactive mode.
@@ -59,7 +60,7 @@ repository — the tester reads this file from a synced skills tree where such p
 
 ## Observe
 
-Four capture layers, each settling a different claim:
+Spine Step 4. Four capture layers, each settling a different claim:
 
 - **Exit status** — settles whether the invocation succeeded or failed.
 - **Captured stdout** — settles output-content claims.
