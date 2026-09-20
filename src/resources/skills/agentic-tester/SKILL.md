@@ -153,8 +153,15 @@ Four facts about this write:
 4. The write happens from inside this spawned child using its own `write` tool, because the
    parent process has no callback into an already-exited child.
 
-The canonical rendering of this log now ships as `src/resources/extensions/gsd/verify-agentic-log.ts`,
-whose `renderSelfUat` export produces exactly the per-criterion shape below and rejects a FAIL with no root cause, a root cause that restates its criterion, a verdict with no evidence, or routing text carrying a ready-to-apply change (D-02).
+The reference shape for this log ships as `src/resources/extensions/gsd/verify-agentic-log.ts`,
+whose `renderSelfUat` export documents exactly the per-criterion shape below and, as a
+contract/reference implementation validated by that file's own unit tests, describes a FAIL with no
+root cause, a root cause that restates its criterion, a verdict with no evidence, or routing text
+carrying a ready-to-apply change (D-02) as invalid. **This module is not invoked by the actual
+write below** — you (the spawned agent) write the log yourself with your own `write` tool by
+following the template that follows, so YOU are the one enforcing these four rules by hand: never
+write a FAIL with no root cause, a root cause that restates its criterion, a verdict with no
+evidence, or a gap-closure route carrying a ready-to-apply patch.
 
 **Write-scope boundary:** the SELF-UAT log path is the ONLY location this run may write to.
 Scratch files, helper scripts, and configuration tweaks anywhere in the repository are prohibited,

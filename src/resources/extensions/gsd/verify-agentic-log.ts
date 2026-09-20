@@ -9,6 +9,19 @@
  * inside the spawned `agentic-tester` child, via its own `write` tool, never
  * here. `renderSelfUat` and `selfUatLogFileName` are pure functions: plain
  * data in, a string out.
+ *
+ * IMPORTANT — this is a contract/reference implementation, not a runtime
+ * enforcement mechanism: nothing in the actual `/gsd verify-agentic` dispatch
+ * path calls `renderSelfUat` or `selfUatLogFileName`. The spawned
+ * `agentic-tester` child's tool surface (`read, bash, write, grep, find, ls,
+ * browser_*`) writes the real SELF-UAT log as freeform markdown by following
+ * the plain-text template in `SKILL.md` Step 6, not by invoking this module.
+ * The four rejection guards below (`validateResults`) are exercised only by
+ * this file's own unit tests — they describe what a compliant log looks like
+ * and are a reference a future enforcement pass (e.g. a post-write
+ * `/gsd verify-agentic --check <path>` step) could call, but today they do
+ * not reject anything the agent actually writes. Do not read test coverage
+ * of these functions as evidence that a bad real-world log gets rejected.
  */
 
 export const SELF_UAT_LOG_DIR_RELATIVE = ".gsd/verify-agentic/";
