@@ -186,7 +186,13 @@ export function resolveTarget(basePath: string, milestoneId: string, explicit?: 
   try {
     const entries = readdirSync(slicesDir, { withFileTypes: true })
       .filter((e) => e.isDirectory() && /^S\d+$/.test(e.name))
-      .sort((a, b) => b.name.localeCompare(a.name)); // reverse order — latest first
+      .sort((a, b) => {
+        // Numeric sort on the slice number, not lexicographic — a raw string
+        // sort puts "S9" ahead of "S10" once a milestone has 10+ slices.
+        const numA = parseInt(a.name.slice(1), 10);
+        const numB = parseInt(b.name.slice(1), 10);
+        return numB - numA; // descending — latest first
+      });
 
     for (const entry of entries) {
       const summaryPath = join(slicesDir, entry.name, `${entry.name}-SUMMARY.md`);
