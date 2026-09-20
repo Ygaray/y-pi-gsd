@@ -8,8 +8,8 @@ outcome rather than a merely requested one.
 
 ## Device identity gate
 
-This gate runs fresh before any device-affecting command, in every run — never once per session,
-and never from a cached listing.
+This gate runs fresh once per run, at Step 2 — never carried over from a previous session or run,
+and never read from a cached listing.
 
 ```bash
 TESTER="R5CT10XNKQN"
