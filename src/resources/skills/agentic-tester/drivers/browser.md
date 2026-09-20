@@ -33,7 +33,9 @@ One complete happy path, navigate to close:
 
 1. `browser_navigate` to the target URL.
 2. `browser_wait_for` on the condition that means the page is actually ready to interact with —
-   never a fixed delay.
+   never a fixed delay. Never use `condition: "network_idle"` — it hangs indefinitely against dev
+   servers that keep persistent connections open (Vite HMR, WebSocket). Prefer `selector_visible`
+   or `text_visible`; use `delay` only as a last resort.
 3. The interaction tool that matches the control under test:
    - `browser_click` for buttons and links
    - `browser_type` for text inputs
