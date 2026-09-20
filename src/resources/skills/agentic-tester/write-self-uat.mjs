@@ -29,6 +29,14 @@ const REJECTION_PREFIX = "SELF_UAT_ENFORCEMENT_REJECTED:";
 function reject(reason) {
   process.stderr.write(`${REJECTION_PREFIX} ${reason}\n`);
   process.exit(1);
+  // Unreachable in real execution — process.exit() halts the process
+  // synchronously. This throw is a defensive backstop: it makes the control
+  // flow explicit rather than relying solely on every call site's reader
+  // knowing that process.exit() never returns, so a future refactor (e.g.
+  // wrapping this logic in a function, or a test harness stubbing
+  // process.exit to not actually terminate) cannot silently fall through
+  // into code that assumes rejection already happened.
+  throw new Error("unreachable: process.exit() did not terminate the process");
 }
 
 let raw;
