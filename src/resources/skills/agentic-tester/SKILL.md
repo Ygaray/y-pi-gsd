@@ -58,7 +58,8 @@ the `bootstrap_driver` rung here: if the resolved playbook is absent, halt and r
 improvising a driver or inventing platform mechanics from memory.
 
 **Exit condition:** a named driver playbook is loaded, or the run has halted and reported the
-missing playbook.
+missing playbook — a halt here still executes Step 6 to persist the halt (see "Halt persistence"
+below).
 
 ## Step 2: Preflight
 
@@ -70,7 +71,8 @@ masquerade as a behavior failure). Never substitute a different environment or t
 is unavailable — report and halt instead.
 
 **Exit condition:** every precondition the driver names is confirmed present, or the run has
-halted with the missing precondition named.
+halted with the missing precondition named — a halt here still executes Step 6 to persist the halt
+(see "Halt persistence" below).
 
 ## Step 3: Build
 
@@ -79,7 +81,17 @@ Build or install the target using the driver's build recipe (this folds in the c
 success.
 
 **Exit condition:** the build completed and its output was read, or the run reports a build
-blocker and stops.
+blocker and stops — a halt here still executes Step 6 to persist the halt (see "Halt persistence"
+below).
+
+**Halt persistence (Steps 1-3):** "halt and report" always means "halt, persist why, and report" —
+never just the latter. A halt at Step 1, 2, or 3 does not skip Step 6: Step 6 still executes and
+writes the same `.gsd/verify-agentic/<slug>-<timestamp>-SELF-UAT.md` path (per Step 6's naming
+rule), but with a single top-level `halted: true` plus `reason:` block naming the step that halted
+and why, in place of the full per-criterion log. An unreachable target, a missing playbook, or a
+build blocker is evidence the surface itself is broken — losing that as a durable artifact if the
+dispatching turn's context is later lost or summarized would defeat this spine's own core
+principle of resisting rubber-stamping via a durable, fresh-evidence trail.
 
 ## Step 4: Drive and falsify each criterion
 
