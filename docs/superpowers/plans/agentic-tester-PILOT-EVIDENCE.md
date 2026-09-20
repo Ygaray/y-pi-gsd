@@ -97,7 +97,8 @@ it correctly declined to substitute `curl` output or the `gsd-browser` MCP fallb
 itself gated behind interactive trust approval it could not grant from a non-interactive child)
 as rendered-title evidence, and halted rather than fabricate a verdict.
 
-Root cause quoted verbatim from the log's `root_cause:` block: "All three `browser_*` tool
+Root cause reconstructed from the log's `root_cause:` block (its `observed` and `proximate_cause`
+subfields, condensed under one label): "All three `browser_*` tool
 invocations returned "Tool `<name>` not found"; the gsd-browser MCP fallback returned an
 interactive-trust refusal... The spawned agentic-tester session was presented a tool surface that
 omitted the browser-tools extension tools, even though the agent frontmatter `tools:` line
