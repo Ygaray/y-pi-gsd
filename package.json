@@ -100,7 +100,7 @@
     "test:live": "node scripts/with-env.mjs GSD_LIVE_TESTS=1 -- node --experimental-strip-types tests/live/run.ts",
     "test:live-workflow": "node --experimental-strip-types tests/live-workflow/run.ts",
     "test:live-workflow:unit": "tsx --test tests/live-workflow/*.unit.test.ts",
-    "test:browser-tools": "node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/browser-tools/tests/browser-tools-unit.test.cjs src/resources/extensions/browser-tools/tests/browser-engine-selection.test.mjs src/resources/extensions/browser-tools/tests/managed-gsd-browser-tools.test.mjs src/resources/extensions/browser-tools/tests/browser-tools-integration.test.mjs",
+    "test:browser-tools": "node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/browser-tools/tests/browser-tools-unit.test.cjs src/resources/extensions/browser-tools/tests/browser-engine-selection.test.mjs src/resources/extensions/browser-tools/tests/managed-gsd-browser-tools.test.mjs src/resources/extensions/browser-tools/tests/browser-tools-integration.test.mjs src/resources/extensions/browser-tools/tests/session-start-registration.test.mjs",
     "test:native": "pnpm --filter @gsd/native run test",
     "test:secret-scan": "node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/tests/secret-scan.test.ts",
     "secret-scan": "node scripts/secret-scan.mjs",

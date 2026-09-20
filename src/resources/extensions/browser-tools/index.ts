@@ -170,40 +170,74 @@ function withBrowserArtifactCwdScope(pi: ExtensionAPI): ExtensionAPI {
 /** Daemon-connect budget when the probe-resolved managed engine is verified at session start. */
 const PROBE_WARMUP_TIMEOUT_MS = 10_000;
 
-async function registerBrowserTools(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
-  const projectRoot = ctx.cwd || process.cwd();
-  const resolution = resolveAmbientBrowserEngineResolution(projectRoot);
-  let engine = resolution.engine;
-  if (engine === "off") return;
+interface RegisterBrowserToolsOptions {
+  /**
+   * Defer the probe-resolved managed daemon-connect warm-up (and the
+   * registration that depends on its outcome) instead of awaiting it inline.
+   * Only takes effect when the warm-up gate is actually reached (a
+   * probe-resolved gsd-browser engine with nothing registered yet in this
+   * process) — every other path is fast, local, and always awaited
+   * regardless of this option.
+   */
+  deferProbeWarmUp?: boolean;
+}
 
-  // A probe-resolved managed engine is only a prediction that gsd-browser
-  // works — prove it by connecting the daemon before committing the session's
-  // tool registrations to it. Connect failure falls back to legacy Playwright
-  // (the failure mode that made ADR-024 freeze the old default) and commits
-  // the outcome so ambient readers see the engine actually in use. When eager
-  // warm-up is disabled the daemon-connect proof cannot run, so the probe
-  // default treats the managed engine as unprovable and falls back to legacy
-  // rather than registering it unverified. An explicit
-  // GSD_BROWSER_ENGINE=gsd-browser override skips the gate and is honored
-  // verbatim, matching prior behavior.
-  if (engine === "gsd-browser" && resolution.source === "probe" && !registeredEngine) {
-    if (isWarmUpDisabled()) {
-      engine = commitLegacyFallback(projectRoot, "warm-up disabled; managed engine unverifiable; using legacy Playwright");
-    } else {
-      const warmUp = await warmUpManagedGsdBrowser(ctx, AbortSignal.timeout(PROBE_WARMUP_TIMEOUT_MS));
-      if (!warmUp.ok) {
-        engine = commitLegacyFallback(projectRoot, `gsd-browser daemon connect failed (${warmUp.error}); using legacy Playwright`);
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `gsd-browser engine unavailable (${warmUp.error}); using Playwright browser tools for this session.`,
-            "warning",
-          );
-        }
-      } else if (warmUp.coverageWarning && ctx.hasUI) {
-        ctx.ui.notify(warmUp.coverageWarning, "warning");
-      }
-    }
+interface RegisterBrowserToolsResult {
+  /** Present only when the daemon-connect warm-up (and its dependent registration) was deferred. */
+  deferred?: Promise<void>;
+}
+
+/**
+ * Run the daemon-connect warm-up gate for a probe-resolved managed engine:
+ * prove the daemon actually connects before committing the session's tool
+ * registrations to it, falling back to legacy Playwright (the failure mode
+ * that made ADR-024 freeze the old default) and committing the outcome so
+ * ambient readers see the engine actually in use. When eager warm-up is
+ * disabled the daemon-connect proof cannot run, so the probe default treats
+ * the managed engine as unprovable and falls back to legacy rather than
+ * registering it unverified.
+ */
+async function runProbeWarmUpGate(
+  ctx: ExtensionContext,
+  projectRoot: string,
+  engine: Exclude<BrowserEngineMode, "off">,
+): Promise<Exclude<BrowserEngineMode, "off">> {
+  if (isWarmUpDisabled()) {
+    return commitLegacyFallback(projectRoot, "warm-up disabled; managed engine unverifiable; using legacy Playwright");
   }
+
+  const warmUp = await warmUpManagedGsdBrowser(ctx, AbortSignal.timeout(PROBE_WARMUP_TIMEOUT_MS));
+  if (!warmUp.ok) {
+    const fallbackEngine = commitLegacyFallback(
+      projectRoot,
+      `gsd-browser daemon connect failed (${warmUp.error}); using legacy Playwright`,
+    );
+    if (ctx.hasUI) {
+      ctx.ui.notify(
+        `gsd-browser engine unavailable (${warmUp.error}); using Playwright browser tools for this session.`,
+        "warning",
+      );
+    }
+    return fallbackEngine;
+  }
+  if (warmUp.coverageWarning && ctx.hasUI) {
+    ctx.ui.notify(warmUp.coverageWarning, "warning");
+  }
+  return engine;
+}
+
+/**
+ * Local, synchronous-ish registration step: adopt an already-registered
+ * engine if one exists (browser tool registrations are process-global and
+ * cannot be swapped once live — see the comment below), then register and
+ * await the resolved engine's tools.
+ */
+async function adoptAndRegister(
+  pi: ExtensionAPI,
+  projectRoot: string,
+  engine: Exclude<BrowserEngineMode, "off">,
+): Promise<void> {
+  let resolvedEngine = engine;
 
   // Browser tool registrations are process-global and cannot be swapped once
   // live. When an earlier session in this process already registered an engine
@@ -213,17 +247,17 @@ async function registerBrowserTools(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   // load" and leaves this session with no browser tools at all. Commit the
   // adoption so ambient readers (UAT guidance, warm-up) describe the engine
   // actually in use.
-  if (registeredEngine && registeredEngine !== engine) {
-    engine = registeredEngine;
+  if (registeredEngine && registeredEngine !== resolvedEngine) {
+    resolvedEngine = registeredEngine;
     commitBrowserEngineResolution(projectRoot, {
-      engine,
+      engine: resolvedEngine,
       source: "probe",
-      reason: `browser tools already registered with ${engine} earlier in this process; adopting it`,
+      reason: `browser tools already registered with ${resolvedEngine} earlier in this process; adopting it`,
     });
   }
 
   let registration: Promise<void>;
-  if (engine === "legacy") {
+  if (resolvedEngine === "legacy") {
     registration = registerLegacyBrowserTools(pi);
   } else if (!managedRegistrationPromise) {
     managedRegistrationPromise = Promise.resolve()
@@ -239,13 +273,52 @@ async function registerBrowserTools(pi: ExtensionAPI, ctx: ExtensionContext): Pr
     registration = managedRegistrationPromise;
   }
 
-  registeredEngine = engine;
+  registeredEngine = resolvedEngine;
   try {
     await registration;
   } catch (error) {
-    if (registeredEngine === engine) registeredEngine = null;
+    if (registeredEngine === resolvedEngine) registeredEngine = null;
     throw error;
   }
+}
+
+/**
+ * Register browser-tools for a session. Everything except the probe-resolved
+ * managed daemon-connect warm-up is local module loading plus synchronous
+ * `pi.registerTool()` calls — always awaited before returning. The
+ * daemon-connect warm-up is the one slow, networked step; when it is reached
+ * and `options.deferProbeWarmUp` is true, this returns immediately with a
+ * `deferred` promise that performs that same warm-up, fallback, notify, and
+ * registration sequence in the background, so an interactive terminal
+ * session never waits out the daemon-connect budget.
+ */
+export async function registerBrowserTools(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  options: RegisterBrowserToolsOptions = {},
+): Promise<RegisterBrowserToolsResult> {
+  const projectRoot = ctx.cwd || process.cwd();
+  const resolution = resolveAmbientBrowserEngineResolution(projectRoot);
+  let engine = resolution.engine;
+  if (engine === "off") return {};
+
+  const reachesProbeWarmUpGate = engine === "gsd-browser" && resolution.source === "probe" && !registeredEngine;
+
+  if (reachesProbeWarmUpGate && options.deferProbeWarmUp) {
+    const warmUpEngine = engine;
+    const deferred = (async () => {
+      const resolvedEngine = await runProbeWarmUpGate(ctx, projectRoot, warmUpEngine);
+      await adoptAndRegister(pi, projectRoot, resolvedEngine);
+    })();
+    return { deferred };
+  }
+
+  if (reachesProbeWarmUpGate) {
+    engine = await runProbeWarmUpGate(ctx, projectRoot, engine);
+  }
+
+  await adoptAndRegister(pi, projectRoot, engine);
+  return {};
 }
 
 function commitLegacyFallback(projectRoot: string, reason: string): "legacy" {
@@ -297,8 +370,31 @@ async function closeActiveBrowserEngines(): Promise<void> {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    if (ctx.hasUI) {
-      void registerBrowserTools(pi, ctx)
+    // Registration itself is always awaited on both branches below — only the
+    // probe-resolved managed daemon-connect warm-up is ever deferred, and
+    // only for a session carrying a UI context (ctx.hasUI), which is what
+    // deferProbeWarmUp: ctx.hasUI selects. This is the fix: the old code
+    // fired registration itself as fire-and-forget whenever ctx.hasUI was
+    // true, so a dispatched RPC session's browser_* tools were never
+    // callable by the time this handler resolved.
+    let result: RegisterBrowserToolsResult;
+    try {
+      result = await registerBrowserTools(pi, ctx, { deferProbeWarmUp: ctx.hasUI });
+    } catch (error) {
+      // Preserve today's failure semantics: a registration failure on a
+      // session carrying a UI context is reported through ctx.ui.notify at
+      // warning level rather than rejecting this hook (and surfacing as an
+      // extension_error for the whole bindExtensions() batch); a session
+      // without one keeps today's rejecting behavior.
+      if (ctx.hasUI) {
+        ctx.ui.notify(`browser-tools failed to load: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        return;
+      }
+      throw error;
+    }
+
+    if (result.deferred) {
+      void result.deferred
         .then(() => maybeWarmUpManagedEngine(pi, ctx))
         .catch((error) => {
           ctx.ui.notify(`browser-tools failed to load: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -306,7 +402,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    await registerBrowserTools(pi, ctx);
+    // maybeWarmUpManagedEngine is already best-effort and non-blocking, and
+    // is gated on an env-sourced managed engine plus detectWebApp — safe to
+    // call directly whether or not this session carries a UI context.
     maybeWarmUpManagedEngine(pi, ctx);
   });
 
