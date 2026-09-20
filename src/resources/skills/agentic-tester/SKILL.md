@@ -31,9 +31,10 @@ Invocation points:
 - Hand-invocation by dispatching `{ agent: "agentic-tester", task: "..." }` directly — the entry
   point through Phase 5 and Phase 6, before the command exists.
 
-Note: Step 1's driver playbooks (`drivers/{cli,browser,android}.md`) are Phase 6 forward
-references and do not exist yet. A bare hand-invocation of this skill before Phase 6 lands them is
-expected, by design, to always halt at Step 1 — that halt is not itself a bug in this skill.
+Note: Step 1's driver playbooks (`drivers/{cli,browser,android}.md`) landed in Phase 6. A
+hand-invocation of this skill now resolves a real playbook for each of the three supported
+surfaces. A Step 1 halt therefore now means a genuinely missing playbook or an unsupported
+surface — a real condition to report rather than the expected default.
 </context>
 
 <core_principle>
@@ -56,10 +57,12 @@ Identify the target surface (CLI, browser, or Android) for the criteria you were
 against, then load that surface's driver playbook by reading it from
 `src/resources/skills/agentic-tester/drivers/cli.md`,
 `src/resources/skills/agentic-tester/drivers/browser.md`, or
-`src/resources/skills/agentic-tester/drivers/android.md`, selected by surface. These three paths
-are Phase 6 forward references — they do not exist yet at the time this skill is authored. Fold in
+`src/resources/skills/agentic-tester/drivers/android.md`, selected by surface.
+All three playbooks exist as of Phase 6. Fold in
 the `bootstrap_driver` rung here: if the resolved playbook is absent, halt and report rather than
-improvising a driver or inventing platform mechanics from memory.
+improvising a driver or inventing platform mechanics from memory. That halt rung still binds when
+a resolved playbook is absent because it was deleted or renamed, or when the dispatched target
+names a surface none of the three playbooks covers.
 
 **Exit condition:** a named driver playbook is loaded, or the run has halted and reported the
 missing playbook — a halt here still executes Step 6 to persist the halt (see "Halt persistence"
