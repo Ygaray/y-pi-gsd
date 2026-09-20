@@ -228,7 +228,11 @@ export function buildVerifyAgenticPrompt(input: {
 }): string {
   return loadPrompt("verify-agentic", {
     target: input.target,
-    criteria: input.criteria ?? DEFAULT_CRITERIA_NOTE,
+    // A blank/whitespace-only value (e.g. an explicit `--criteria ""`) is
+    // treated the same as "not supplied" -- `??` alone only substitutes on
+    // null/undefined and would otherwise let an empty string silently
+    // bypass the default-criteria fallback.
+    criteria: input.criteria?.trim() ? input.criteria : DEFAULT_CRITERIA_NOTE,
     surface: input.surface,
     driverPath: DRIVER_PATHS[input.surface],
     workingDirectory: input.basePath,
