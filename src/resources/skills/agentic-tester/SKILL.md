@@ -30,6 +30,10 @@ Invocation points:
 - The Phase 7 `/gsd verify-agentic` command, once wired — the eventual, routine entry point.
 - Hand-invocation by dispatching `{ agent: "agentic-tester", task: "..." }` directly — the entry
   point through Phase 5 and Phase 6, before the command exists.
+
+Note: Step 1's driver playbooks (`drivers/{cli,browser,android}.md`) are Phase 6 forward
+references and do not exist yet. A bare hand-invocation of this skill before Phase 6 lands them is
+expected, by design, to always halt at Step 1 — that halt is not itself a bug in this skill.
 </context>
 
 <core_principle>
