@@ -290,10 +290,19 @@ comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-cli-before.txt) <(sort /tmp/y-pi-gsd-p
 comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-browser-before.txt) <(sort /tmp/y-pi-gsd-pilot/pilot-browser-after.txt)
 comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-android-before.txt) <(sort /tmp/y-pi-gsd-pilot/pilot-android-after.txt)
 
-# Credential-leak scan across every capture file and log. Pattern is the OpenRouter key's
-# literal prefix, per this plan's Task 2 AUDIT 3 -- deliberately not spelled out in this
-# file (not even assigned to a shell variable here) so scanning this document does not
-# self-match; substitute the real prefix string from AUDIT 3 when running this command.
+# Repository's own secret scanner -- covers credential leakage across the whole repo and
+# requires no manual substitution, unlike the targeted AUDIT-3 grep documented below.
+pnpm run secret-scan
+```
+
+The one command in this document that is **not** copy-paste-runnable as printed is the targeted
+credential-leak grep this plan's Task 2 AUDIT 3 and its automated verify script used to scan this
+document and every capture file. Its pattern is the OpenRouter key's literal prefix, deliberately
+not spelled out anywhere in this file (not even assigned to a shell variable) so that scanning this
+document does not self-match. To re-derive that specific result, first substitute the real prefix
+string from AUDIT 3 for `<openrouter-key-prefix-see-AUDIT-3>` below, then run:
+
+```bash
 grep -rc '<openrouter-key-prefix-see-AUDIT-3>' \
   .gsd/verify-agentic/cli-pilot-2026-09-20T20-28-06Z-SELF-UAT.md \
   .gsd/verify-agentic/browser-pilot-2026-09-20T20-41-03Z-SELF-UAT.md \
@@ -301,7 +310,8 @@ grep -rc '<openrouter-key-prefix-see-AUDIT-3>' \
   /tmp/y-pi-gsd-pilot/pilot-cli-run.json /tmp/y-pi-gsd-pilot/pilot-cli-run.stderr \
   /tmp/y-pi-gsd-pilot/pilot-browser-run.json /tmp/y-pi-gsd-pilot/pilot-browser-run.stderr \
   /tmp/y-pi-gsd-pilot/pilot-android-run.json /tmp/y-pi-gsd-pilot/pilot-android-run.stderr
-
-# Repository's own secret scanner
-pnpm run secret-scan
 ```
+
+Run as literally printed above (without substitution), this command greps for a placeholder string
+that cannot appear anywhere and reports 0 matches -- a no-op, not a working scan. It is left out of
+the primary block above for exactly that reason.
