@@ -5,23 +5,19 @@
  * module implements: the per-criterion block shape, the `.gsd/verify-agentic/`
  * write location, and the `-SELF-UAT.md` filename suffix are all restated here
  * byte-identically from that step. This module performs NO filesystem,
- * network, or process-spawning I/O of its own — the actual write happens
- * inside the spawned `agentic-tester` child, via its own `write` tool, never
- * here. `renderSelfUat` and `selfUatLogFileName` are pure functions: plain
- * data in, a string out.
+ * network, or process-spawning I/O of its own — `renderSelfUat` and
+ * `selfUatLogFileName` are pure functions: plain data in, a string out.
  *
- * IMPORTANT — this is a contract/reference implementation, not a runtime
- * enforcement mechanism: nothing in the actual `/gsd verify-agentic` dispatch
- * path calls `renderSelfUat` or `selfUatLogFileName`. The spawned
- * `agentic-tester` child's tool surface (`read, bash, write, grep, find, ls,
- * browser_*`) writes the real SELF-UAT log as freeform markdown by following
- * the plain-text template in `SKILL.md` Step 6, not by invoking this module.
- * The four rejection guards below (`validateResults`) are exercised only by
- * this file's own unit tests — they describe what a compliant log looks like
- * and are a reference a future enforcement pass (e.g. a post-write
- * `/gsd verify-agentic --check <path>` step) could call, but today they do
- * not reject anything the agent actually writes. Do not read test coverage
- * of these functions as evidence that a bad real-world log gets rejected.
+ * `src/resources/skills/agentic-tester/write-self-uat.mjs` is the real
+ * invoker: for a completed run, the spawned `agentic-tester` child
+ * constructs its typed results and invokes that script via its own `bash`
+ * tool, which imports and calls `renderSelfUat` (and therefore the guards
+ * below) against the actual payload before ever writing the real on-disk
+ * log — the write itself happens inside that script, not inside this
+ * module. `src/resources/extensions/gsd/tests/write-self-uat-enforcement.test.ts`
+ * is the coverage proving this: it spawns a genuine
+ * `node --experimental-strip-types` subprocess running that script, never an
+ * in-process call to the functions this file exports.
  */
 
 export const SELF_UAT_LOG_DIR_RELATIVE = ".gsd/verify-agentic/";

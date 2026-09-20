@@ -150,18 +150,31 @@ Four facts about this write:
    write with no DB-projection guard.
 3. The managed-directory alternative (e.g. `.gsd/verification/`) is explicitly rejected because a
    derive cycle can clobber a managed projection.
-4. The write happens from inside this spawned child using its own `write` tool, because the
-   parent process has no callback into an already-exited child.
+4. For a completed run (Steps 4 and 5 finished normally, not a halt), `write-self-uat.mjs`
+   performs the write after validating the payload, invoked from inside this spawned child via
+   its own `bash` tool. The child's own `write` tool remains the mechanism for the Steps 1-3 halt
+   shape only, because a halt carries no per-criterion results for the guards to validate against
+   — that halt-writing behavior is unchanged from before this plan.
 
-The reference shape for this log ships as `src/resources/extensions/gsd/verify-agentic-log.ts`,
-whose `renderSelfUat` export documents exactly the per-criterion shape below and, as a
-contract/reference implementation validated by that file's own unit tests, describes a FAIL with no
-root cause, a root cause that restates its criterion, a verdict with no evidence, or routing text
-carrying a ready-to-apply change (D-02) as invalid. **This module is not invoked by the actual
-write below** — you (the spawned agent) write the log yourself with your own `write` tool by
-following the template that follows, so YOU are the one enforcing these four rules by hand: never
-write a FAIL with no root cause, a root cause that restates its criterion, a verdict with no
-evidence, or a gap-closure route carrying a ready-to-apply patch.
+For a completed run, construct your typed payload — `target`, `surface`, and a `results` array of
+`{criterion, verdict, evidence, rootCause?, gapClosureRoute?}` entries, one per criterion, in the
+same shape the log template below documents — and invoke it, via your `bash` tool, as:
+
+```
+node --experimental-strip-types src/resources/skills/agentic-tester/write-self-uat.mjs
+```
+
+piped that payload on stdin. This script, `src/resources/skills/agentic-tester/write-self-uat.mjs`,
+imports the real `renderSelfUat`/`selfUatLogFileName` exported by
+`src/resources/extensions/gsd/verify-agentic-log.ts`, runs the real guards against your real
+payload, and performs the write itself on success — **you do not separately write the file
+yourself for this path.** Those guards reject a FAIL with no root cause, a root cause that restates
+its criterion, a verdict with no evidence, or routing text carrying a ready-to-apply change (D-02).
+
+On a non-zero exit from the script, the printed reason names the entry to fix. Correct it and
+re-invoke the script. Never fall back to writing the log yourself with your own `write` tool as a
+workaround for a rejection — doing so would produce exactly the unvalidated log this mechanism
+exists to prevent.
 
 **Write-scope boundary:** the SELF-UAT log path is the ONLY location this run may write to.
 Scratch files, helper scripts, and configuration tweaks anywhere in the repository are prohibited,
