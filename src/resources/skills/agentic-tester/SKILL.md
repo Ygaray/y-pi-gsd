@@ -153,8 +153,8 @@ Four facts about this write:
 4. The write happens from inside this spawned child using its own `write` tool, because the
    parent process has no callback into an already-exited child.
 
-The rendering helper that turns this log into a nicer surface lands in Phase 7; until then, this
-skill's prose is the canonical description of the log's shape and location.
+The canonical rendering of this log now ships as `src/resources/extensions/gsd/verify-agentic-log.ts`,
+whose `renderSelfUat` export produces exactly the per-criterion shape below and rejects a FAIL with no root cause, a root cause that restates its criterion, a verdict with no evidence, or routing text carrying a ready-to-apply change (D-02).
 
 **Write-scope boundary:** the SELF-UAT log path is the ONLY location this run may write to.
 Scratch files, helper scripts, and configuration tweaks anywhere in the repository are prohibited,
