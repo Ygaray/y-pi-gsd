@@ -142,8 +142,8 @@ by the `initResources` → `syncResourceDir` call chain above (that call only ev
 `resourcesDir/skills`, i.e. `src/resources/skills/`, never from
 `src/resources/extensions/gsd/skills/`). A skill placed in
 `src/resources/extensions/gsd/skills/` silently never loads into the agent's skill set — there is
-no error, no warning, just an unreachable file. Phase 5-03 must place `SKILL.md` under
-`src/resources/skills/agentic-tester/`.
+no error, no warning, just an unreachable file. Phase 5-03 must place the spine skill at
+`src/resources/skills/agentic-tester/SKILL.md`.
 
 ## 4. .gsd/ write contract
 
