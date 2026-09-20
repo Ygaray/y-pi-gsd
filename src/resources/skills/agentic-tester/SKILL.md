@@ -33,7 +33,15 @@ Invocation points:
 </context>
 
 <core_principle>
-Task 2 of this plan fills this in.
+**FALSIFY, NEVER CONFIRM.** The default posture toward every criterion is to prove it broken, not
+to confirm it works. This run is judging work the same system produced — exactly the setup where
+an evaluator drifts toward confirming what it expected instead of challenging it. Reading the
+implementation and reasoning that it should work is not verification; only a fresh,
+criterion-specific observation captured in this run counts.
+
+**Tool enforcement lives in the agent frontmatter `tools:` line at
+`src/resources/agents/agentic-tester.md`, not in anything this skill declares.** A skill-level
+tool field is decorative and not enforced by pi-gsd's runtime, so nothing here may rely on one.
 </core_principle>
 
 <process>
@@ -75,28 +83,94 @@ blocker and stops.
 
 ## Step 4: Drive and falsify each criterion
 
-This is the adversarial core of the spine. Task 2 of this plan fills in its full discipline rules.
+This is the adversarial core of the spine. No criterion may be marked PASS or FAIL without
+evidence captured in THIS run.
+
+Match the evidence layer to the claim type — this is a claim-type-to-evidence-layer pairing, not a
+passive aside:
+- Exit-code and stdout claims are evidenced by captured command output.
+- DOM or state claims are evidenced by a DOM or console read.
+- Rendered or visual claims are evidenced by a screenshot, and only those.
+
+Screenshots for non-visual claims are waste; a DOM dump for a visual claim misses the regression.
+The cheapest sufficient layer is never zero layers — every verdict needs an evidence layer, even
+the cheapest one. Evidence from a previous step, a previous run, or a previous code state is stale
+and does not count; only an observation produced in this run, against this build, counts.
 
 **Exit condition:** every criterion has a verdict AND an observation captured in this run.
 
 ## Step 5: Findings
 
-Turn observations into findings for every FAIL. Task 2 of this plan fills in the root-cause
-discipline.
+Every FAIL requires a non-empty root cause: the observed output versus the expected output, plus
+the proximate cause.
+
+Two concrete acceptable shapes: an exit code with its stderr line (e.g. "exit 1, stderr:
+`ENOENT: no such file`"); an interaction that produced no state change, with the console error
+that explains it (e.g. "clicking Save produced no DOM change, console error: `TypeError:
+undefined is not a function`"). One unacceptable shape: a root cause that merely restates the
+criterion (e.g. "criterion failed" or "the button did not work as expected").
+
+The gap-closure route is prose only: never a patch, diff, or file-edit instruction. A
+ready-to-apply patch defeats the diagnose-only boundary even though this agent never calls an
+editing tool, because of how the next stage may consume it — an auto-apply or one-click-apply
+consumer would turn this agent's prose into a de facto edit.
 
 **Exit condition:** every FAIL has a specific root cause.
 
 ## Step 6: SELF-UAT log
 
 This step folds in the control-plane `report` rung: write the SELF-UAT log, then report back to
-the dispatching turn. Task 2 of this plan fills in the write-target and log-template details.
+the dispatching turn.
+
+Write the log to `.gsd/verify-agentic/`, named as the target slug plus an ISO timestamp plus a
+`-SELF-UAT.md` suffix (e.g. `.gsd/verify-agentic/cli-2026-09-20T12-00-00Z-SELF-UAT.md`).
+
+Four facts about this write:
+1. It is resolved under the project's own `.gsd/` directory, not the global agent home.
+2. The first path segment (`verify-agentic`) classifies as unmanaged, so this is a plain file
+   write with no DB-projection guard.
+3. The managed-directory alternative (e.g. `.gsd/verification/`) is explicitly rejected because a
+   derive cycle can clobber a managed projection.
+4. The write happens from inside this spawned child using its own `write` tool, because the
+   parent process has no callback into an already-exited child.
+
+The rendering helper that turns this log into a nicer surface lands in Phase 7; until then, this
+skill's prose is the canonical description of the log's shape and location.
+
+**Write-scope boundary:** the SELF-UAT log path is the ONLY location this run may write to.
+Scratch files, helper scripts, and configuration tweaks anywhere in the repository are prohibited,
+including outside the source tree — the diagnose-only guard is about the whole working tree, not
+only application source.
+
+Log template — a mandatory per-criterion evidence field alongside the verdict, so a verdict with
+an empty evidence field is visibly a defect rather than a silent one:
+
+```markdown
+### {N}. {criterion text}
+verdict: PASS | FAIL
+evidence: {what you actually observed this run — command output, DOM state, device output; never empty}
+root_cause: {FAIL only — observed vs expected, plus proximate cause}
+```
 
 **Exit condition:** the log path is written and reported back to the dispatching turn.
 
 </process>
 
 <anti_patterns>
-Task 2 of this plan fills this in.
+- **Reading the implementation and asserting it should work.** Reasoning from code you read
+  instead of output you captured is a rubber stamp wearing a tester's badge.
+- **Reusing a prior step's or prior run's observation.** Evidence from a previous step, a previous
+  run, or a previous code state is stale and does not count — capture it fresh, in this run.
+- **Screenshotting a non-visual claim.** An exit-code or stdout claim is settled by captured
+  command output; a screenshot is expensive, lossy, and harder to grep.
+- **Eyeballing a visual claim from a DOM dump.** A DOM dump proves structure, not what is actually
+  rendered — a genuinely visual claim needs a screenshot you actually read.
+- **A FAIL whose root cause restates the criterion.** "Criterion failed" is not a root cause — it
+  names nothing a follow-up fix could act on.
+- **Attaching a patch to a gap-closure route.** The route is prose only; a ready-to-apply patch
+  defeats the diagnose-only boundary even though you never called an editing tool.
+- **Fixing the bug it just found.** The one legitimate write is the SELF-UAT log — a real behavior
+  failure is reported with its root cause and routed to gap-closure, never patched.
 </anti_patterns>
 
 <success_criteria>
@@ -106,4 +180,9 @@ Task 2 of this plan fills this in.
 - [ ] Step 4: every criterion has a verdict AND an observation captured in this run.
 - [ ] Step 5: every FAIL has a specific root cause.
 - [ ] Step 6: the log path is written and reported back to the dispatching turn.
+- [ ] Core principle states FALSIFY, NEVER CONFIRM as the default posture toward every criterion.
+- [ ] No criterion may be marked PASS or FAIL without evidence captured in THIS run.
+- [ ] Every FAIL requires a non-empty root cause: the observed output versus the expected output, plus the proximate cause.
+- [ ] The gap-closure route is prose only: never a patch, diff, or file-edit instruction.
+- [ ] The SELF-UAT log write target is `.gsd/verify-agentic/`, the only location this run may write to.
 </success_criteria>
