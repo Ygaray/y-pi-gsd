@@ -69,16 +69,30 @@ behavior FAIL is reported with a tight root cause and routed to gap-closure.
 - Removing or changing the control-plane tester (this is additive).
 - Any public/user-facing product surface.
 
-## Android driver — device-safety invariants (load-bearing)
+## Android driver — device model & invariants (load-bearing)
 
-The Android driver playbook MUST encode the operator's standing device rules (from
-`~/.claude/context/devices/common.md`), because getting these wrong is destructive:
-- **Never** airplane-mode a device (severs adb irreversibly).
-- **Never** drive a device its owner is actively testing.
-- **Always** address a device explicitly: `adb -s <ip:port>`.
-- Target the **TESTER** device (`…-s22-ultra-2`), never the personal phone (`…-s22-ultra`), and treat
-  the retired rig (`…-s22-ultra-1`) as offline.
-- Resolve device alias + availability before acting; report if down, never silently substitute.
+**Updated device model (2026-09-20):** the tester (`…-s22-ultra-2`) is now on **wired adb, always
+plugged in** — a robust, always-available USB transport. This supersedes the old wireless-adb-only
+setup and its constraints:
+- **Airplane mode is now ALLOWED.** Wired adb survives it, so the old "never airplane-mode (severs
+  adb irreversibly)" rule no longer applies to this wired tester. Toggling airplane mode is a
+  legitimate test action (e.g. verifying offline / no-network behavior).
+- **The catch is the network side:** airplane mode drops wifi, which kills **tailscale and wireless
+  adb**. So the Android driver MUST, when those are needed again, **re-activate tailscale and
+  wireless adb over the wired adb connection** (wired adb is the recovery channel that brings the
+  network transports back up). Any test that toggles airplane mode owns restoring tailscale +
+  wireless adb afterward via the wired link.
+
+Still load-bearing:
+- **Always address the device explicitly** — `adb -s <usb-serial>` for the wired transport (or
+  `-s <ip:port>` when driving over reactivated wireless adb). Never issue an unscoped `adb` command.
+- Target the **TESTER** device (`…-s22-ultra-2`), never the personal phone (`…-s22-ultra`); treat the
+  retired rig (`…-s22-ultra-1`) as offline.
+- Resolve device availability before acting; report if down, never silently substitute another device.
+
+> Note: this updates the standing operator guidance in `~/.claude/context/devices/common.md` /
+> CLAUDE.md, whose "never airplane-mode" tripwire predates the wired-adb setup. See the
+> reconciliation note raised alongside this spec.
 
 ## Design shape (Approach B)
 
