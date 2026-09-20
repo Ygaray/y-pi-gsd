@@ -13,7 +13,7 @@
 
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -285,6 +285,32 @@ describe("write-self-uat.mjs — real subprocess enforcement", () => {
     assert.match(written, /^### 1\. first$/m);
     assert.match(written, /^### 2\. second$/m);
     assert.match(written, /^### 3\. third$/m);
+  });
+
+  it("rejects cleanly (no stack trace) when the log directory cannot be created", () => {
+    const tmpDir = makeTmpDir();
+    // Pre-create ".gsd" as a plain FILE so mkdirSync(".gsd/verify-agentic",
+    // {recursive:true}) throws ENOTDIR — a genuine filesystem failure, not a
+    // payload validation failure.
+    writeFileSync(join(tmpDir, ".gsd"), "not a directory", "utf8");
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", scriptPath], {
+      input: JSON.stringify({
+        target: "S07",
+        surface: "cli",
+        results: [{ criterion: "login works", verdict: "PASS", evidence: "exit 0" }],
+      }),
+      encoding: "utf-8",
+      cwd: tmpDir,
+    });
+    assert.notEqual(result.status, 0, `expected non-zero exit; stderr:\n${result.stderr}`);
+    assert.ok(
+      result.stderr.includes(REJECTION_PREFIX),
+      `expected stderr to contain "${REJECTION_PREFIX}"; got:\n${result.stderr}`,
+    );
+    assert.ok(
+      !/at .*\(.*write-self-uat\.mjs/.test(result.stderr) && !result.stderr.includes("Traceback"),
+      `expected no stack trace in stderr; got:\n${result.stderr}`,
+    );
   });
 
   it("names a colon-free <slug>-<timestamp>-SELF-UAT.md filename in both the WROTE line and on disk", () => {

@@ -104,10 +104,14 @@ try {
 }
 
 const dir = join(process.cwd(), SELF_UAT_LOG_DIR_RELATIVE);
-mkdirSync(dir, { recursive: true });
 const fileName = selfUatLogFileName(target, timestampIso);
 const destPath = join(dir, fileName);
-writeFileSync(destPath, rendered, "utf8");
+try {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(destPath, rendered, "utf8");
+} catch (err) {
+  reject(`failed to write SELF-UAT log — ${err instanceof Error ? err.message : String(err)}`);
+}
 
 process.stdout.write(`WROTE ${join(SELF_UAT_LOG_DIR_RELATIVE, fileName)}\n`);
 process.exit(0);
