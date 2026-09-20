@@ -22,9 +22,9 @@ per-criterion evidence non-skippable, not by asking nicely.
 <context>
 This skill runs inside a spawned `agentic-tester` child process with its own isolated context
 window, dispatched by a foreground turn via the `subagent` tool. The child's tool surface is
-restricted by its agent frontmatter to `read, bash, write, grep, find, ls` — it excludes source
-editing entirely; nothing in this skill relies on a skill-level tool restriction, because none is
-enforced by the runtime.
+restricted by its agent frontmatter to `read, bash, write, grep, find, ls`, plus the `browser_*`
+tool set the browser driver calls — it excludes source editing entirely; nothing in this skill
+relies on a skill-level tool restriction, because none is enforced by the runtime.
 
 Invocation points:
 - The Phase 7 `/gsd verify-agentic` command, once wired — the eventual, routine entry point.
