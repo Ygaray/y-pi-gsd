@@ -20,6 +20,7 @@ echo "$LISTING" | grep -qw "$TESTER" || { echo "TESTER_DEVICE_UNAVAILABLE: allow
 This playbook targets one device and one only: the wired tester serial allowlisted in this gate.
 If the allowlisted serial is not present, report the device unavailable and stop; never fall back to whichever device happens to be visible, even when it is the only one.
 Never rely on the ANDROID_SERIAL environment variable for targeting; it can carry a stale value from an unrelated session. Every invocation names the serial explicitly with adb -s.
+One agent device-tester per rig at a time; if another run holds this device, report and stop rather than driving it concurrently.
 
 The exact-match rule above is not paranoia. The tester and the operator's personal handset are the
 same model, their aliases differ by one trailing character, and the two carry different
@@ -151,10 +152,12 @@ Toggling airplane mode is permitted on this wired tester only; it is not a gener
 
 ## Halt conditions
 
-Three surfaces stop the run, each owned by a specific spine step:
+Four surfaces stop the run, each owned by a specific spine step:
 
 - **The allowlisted serial absent from a fresh device listing** halts at Step 2 via the identity
   gate.
+- **Another run already holds this device** halts at Step 2 via the identity gate — report and
+  stop rather than driving it concurrently.
 - **A secure keyguard that will not clear** halts at Step 2 and escalates to the human.
 - **A failing build or install** halts at Step 3.
 
