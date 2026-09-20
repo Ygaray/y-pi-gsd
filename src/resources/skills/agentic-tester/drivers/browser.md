@@ -5,8 +5,12 @@
 - The `browser-tools` extension is enabled and its tools are callable in this session. The
   extension manifest at `src/resources/extensions/browser-tools/extension-manifest.json` declares
   `requires.platform` at `>=2.29.0`, so the running pi-coding-agent platform version must satisfy
-  that floor. Check via `/gsd extensions info browser-tools` or `/gsd doctor`; if the platform
-  version does not satisfy the floor, halt and report rather than driving anyway.
+  that floor. This check is performed by the dispatching parent turn before it spawns this
+  subagent — `/gsd extensions info browser-tools` and `/gsd doctor` are interactive slash commands
+  with no equivalent on this agent's own tool surface (`read, bash, write, grep, find, ls` plus
+  `browser_*`), so the subagent itself cannot re-run it. If the `browser_*` tools are not callable
+  when this playbook is reached, treat that as the platform-floor check having already failed
+  upstream: halt and report rather than driving anyway.
 - The target URL is reachable and is serving the build under test.
 - This run never substitutes a different URL, a different port, or an already-open page for one
   that is unavailable. An unavailable target is reported and the run halts — it is not worked
