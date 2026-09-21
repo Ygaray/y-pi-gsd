@@ -402,6 +402,17 @@ describe("write-self-uat.mjs — aggregate verdict channel (PARTIAL, GATE-01)", 
     assert.equal(extractFrontmatterVerdict(written), "pass");
   });
 
+  it("writes no_criteria / advisory for a zero-criteria payload through the real script (WR-04)", () => {
+    const inv = invoke({ target: "S09", surface: "cli", results: [] });
+    assert.equal(inv.status, 0, `expected exit 0; stderr:\n${inv.stderr}`);
+    const entries = readdirSync(join(inv.tmpDir, ".gsd", "verify-agentic"));
+    assert.equal(entries.length, 1);
+
+    const written = writtenContent(inv);
+    assertTwoEntryFrontmatter(written, "no_criteria");
+    assert.equal(extractFrontmatterVerdict(written), "advisory");
+  });
+
   it("rejects a result whose verdict is the lowercase 'partial' (not PARTIAL) and writes nothing", () => {
     const inv = invoke({
       target: "S09",
