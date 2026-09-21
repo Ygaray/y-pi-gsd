@@ -21,7 +21,7 @@ per-run path carve-outs.
 | Surface | Known-good verdict | Known-bad verdict | Root cause (tight) | Guarded write path | Diagnose-only delta | SELF-UAT log |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLI | PASS | FAIL | Criterion anchored to an event name (`turn_complete`) the `--mode json` emitter never uses; the harness's real completion event is `turn_end` | Yes — via `write-self-uat.mjs` | 0 new lines | `cli-pilot-2026-09-20T20-28-06Z-SELF-UAT.md` |
-| Browser | UNVERIFIED (halted at Preflight) | UNVERIFIED (halted at Preflight) | `browser_*` tools returned "Tool `<name>` not found" in the dispatched session; neither criterion was ever evaluated | No — halt log written via the child's own `write` tool per SKILL.md Step 6, not through `write-self-uat.mjs` | 0 new lines | `browser-pilot-2026-09-20T20-41-03Z-SELF-UAT.md` |
+| Browser | PASS | FAIL | Document title metadata is set to the literal string `GSD` in `web/app/layout.tsx`; `GSD Dashboard` is never rendered | Yes — via `write-self-uat.mjs` | 0 new lines | `browser-pilot-2026-09-21T00-46-20Z-SELF-UAT.md` |
 | Android | PASS | FAIL | ClockPackage's stock four-tab surface (Alarm, World clock, Stopwatch, Timer) has no Metronome entry point at all | Yes — via `write-self-uat.mjs` | 0 new lines | `android-pilot-2026-09-20T21-27-42Z-SELF-UAT.md` |
 
 ### CLI surface
@@ -69,72 +69,79 @@ delta (08-01-SUMMARY.md).
 
 ### Browser surface
 
-**Dispatch command (RPC mode, the same recipe as CLI).** Credential exported by reading the key
-file, never as a literal: `export OPENROUTER_API_KEY="$(cat ~/.config/y-pi-gsd/openrouter.key)"`.
-Prompt submitted as
-`{ printf '%s\n' "$RPC_CMD"; sleep 1800; } | node dist/bootstrap.js --mode rpc --model openrouter/deepseek/deepseek-v4.1-flash > /tmp/y-pi-gsd-pilot/pilot-browser-run.json 2> /tmp/y-pi-gsd-pilot/pilot-browser-run.stderr`,
-where `$RPC_CMD` was
+**Dispatch command (RPC mode, the same recipe as CLI/Android, carrying the `PI_GSD_BROWSER_TOOLS=1`
+opt-in per 08-07's handoff).** Credential exported by reading the key file, never as a literal:
+`export OPENROUTER_API_KEY="$(cat ~/.config/y-pi-gsd/openrouter.key)"`; `export
+PI_GSD_BROWSER_TOOLS=1` was also exported for this dispatch — 08-07's own live probe recorded
+needing it for the tool to be advertised to the model at all. Prompt submitted as
+`{ cat rpc-browser-rerun-cmd.json; sleep 1800; } | node dist/bootstrap.js --mode rpc --model openrouter/deepseek/deepseek-v4.1-flash > /tmp/y-pi-gsd-pilot/pilot-browser-rerun-run.json 2> /tmp/y-pi-gsd-pilot/pilot-browser-rerun-run.stderr`,
+where the JSONL prompt line was
 `{"id":"1","type":"prompt","message":"/gsd verify-agentic browser-pilot --surface browser --criteria \"KNOWN-GOOD: navigating to http://127.0.0.1:4173 renders a document whose title is exactly GSD || KNOWN-BAD: that same rendered document title is exactly GSD Dashboard\""}`.
 The `web/` dashboard was served first via
-`node dist/bootstrap.js --web --host 127.0.0.1 --port 4173`.
+`node dist/bootstrap.js --web --host 127.0.0.1 --port 4173`, confirmed ready on the first readiness
+poll (1s).
 
-**Invocation mode.** The main dispatch used RPC mode directly (the CLI-surface recipe was already
-proven) and fired a real `subagent` tool call on the first attempt — no retry needed (151
-occurrences of `"subagent"` in the stream). A separate command, the plan's STEP 2 preflight
-(`--print --mode json --no-session '/gsd extensions info browser-tools'`), needed its own
-print-to-RPC substitution: print mode's `session.subscribe` never forwards the
-`ctx.ui.notify()`-backed `extension_ui_request` channel that `/gsd extensions info` uses, so it
-produced only a session header line. The RPC-mode equivalent of that same command confirmed
-`browser-tools` was `enabled`, `bundled` tier, with its full `browser_*` tool list declared
-(08-02-SUMMARY.md).
+**Invocation mode.** RPC mode was used directly (the recipe already proven by CLI/Android and by
+08-02's own browser-surface dispatch). A real `subagent` tool call fired on the first attempt — no
+STEP 4 retry needed (132 occurrences of `"subagent"` in the stream, `agent_end` reached after
+~280s). STEP 2's preflight (`/gsd extensions info browser-tools`) again needed the same
+print-to-RPC substitution 08-02 established; the RPC-mode form confirmed `browser-tools` `enabled`,
+`bundled` tier, with its full `browser_*` tool list declared, before any credential was exported.
 
-**Both criteria: UNVERIFIED — halted at Step 2 (Preflight), no PASS or FAIL recorded for either.**
-This is not a graded outcome and this document does not record it as one. The dispatched child
-attempted `browser_navigate` (26 tool-call attempts), `browser_screenshot` (24), and
-`browser_get_page_source` (23) in the captured stream — real tool-call events, not prose mentions
-— and every one failed at the tool-registry layer. Per the browser driver's halt-and-persist rule
-it correctly declined to substitute `curl` output or the `gsd-browser` MCP fallback (which was
-itself gated behind interactive trust approval it could not grant from a non-interactive child)
-as rendered-title evidence, and halted rather than fabricate a verdict.
+**Known-good:** "navigating to http://127.0.0.1:4173 renders a document whose title is exactly
+`GSD`." — **verdict: PASS**. Evidence quoted from the log: `browser_navigate` to
+`http://127.0.0.1:4173` reported `'Title: GSD'`; a `browser_evaluate` read of the live DOM returned
+`{"title":"GSD","titleTag":"GSD","url":"http://127.0.0.1:4173/"}`; an independent `curl` of the
+same URL cross-confirmed `<title>GSD</title>`; the log additionally records build provenance (the
+`next-server` listener's PID, cwd, and start time, plus a `find web -type f -newer
+dist/web/standalone/server.js` check returning nothing), ruling out a stale-code server.
 
-Root cause reconstructed from the log's `root_cause:` block (its `observed` and `proximate_cause`
-subfields, condensed under one label): "All three `browser_*` tool
-invocations returned "Tool `<name>` not found"; the gsd-browser MCP fallback returned an
-interactive-trust refusal... The spawned agentic-tester session was presented a tool surface that
-omitted the browser-tools extension tools, even though the agent frontmatter `tools:` line
-declares them and the extension is built... and the manifest is present." The `gap_closure_route`
-recommended next action, quoted as prose (not a patch): "Fix the dispatch surface so the browser
-driver can actually be driven, then re-dispatch this exact verification. Concretely: ensure the
-browser-tools extension is enabled and its `browser_*` tools are actually presented to the spawned
-agentic-tester child before any browser-surface verification is dispatched."
+**Known-bad:** "that same rendered document title is exactly `GSD Dashboard`." — **verdict: FAIL**.
+Root cause quoted verbatim from the log's `root_cause:` line: "Observed document.title = \"GSD\";
+expected exactly \"GSD Dashboard\". Proximate cause: the served application sets its document
+title metadata to the literal string \"GSD\" (declared in web/app/layout.tsx metadata.title), so
+the emitted <title> text is \"GSD\" and the string \"GSD Dashboard\" is never rendered." This
+known-bad is subtle and non-crash per D-01: the page loads and renders completely normally (the
+same `browser_navigate`/`browser_evaluate` reads that proved the known-good criterion also settle
+this one), `GSD Dashboard` is a plausible-looking title for this app, and only the actual DOM
+read — never a crash, error, or timeout — falsifies it.
 
-This is a genuine, reproducible halt at a real product defect, not a graded FAIL and not a
-dispatch failure smoothed over as a pass. 08-02's bounded (read-only, no source touched)
-investigation root-caused it, without fully pinning it, to
-`src/resources/extensions/browser-tools/index.ts`'s `session_start` hook firing
-`registerBrowserTools()` fire-and-forget (`void ...`, never awaited) whenever `ctx.hasUI` is true —
-true for both a plain top-level RPC session and a dispatched subagent child — with no readiness
-signal the dispatching parent can observe from outside the process. MCP-trust gating and a simple
-registration-timing race were both ruled out (an explicit 16-second pre-prompt wait, exceeding the
-managed engine's own 10-second daemon-connect budget, still produced no browser tools).
-
-**SELF-UAT log and guarded-write evidence:** `.gsd/verify-agentic/browser-pilot-2026-09-20T20-41-03Z-SELF-UAT.md`.
-This log's header does **not** match `renderSelfUat`'s PASS/FAIL shape (`# SELF-UAT — browser-pilot
-(browser surface)` / `target:` / `surface:` / `driver_playbook:` / `skill:` / `run_outcome: halted`)
-— by design, per `SKILL.md:153-157`'s documented halt-persistence rule for a Steps 1-3 halt. The
-log was written through the child's own `write` tool, **not** through the guarded
-`write-self-uat.mjs` script — the guarded script is reserved for completed runs with per-criterion
-results to validate, which this run never reached. The string `write-self-uat.mjs` appears 40
-times in the captured stream, but 08-02's investigation confirmed every occurrence is prompt/SKILL
-narration text describing the script, not an actual `bash` tool_call invoking it. This is the
-correct, plan-anticipated path for a genuine Preflight halt, not a guard bypass and not the
-`AR-07-02`/`T-07-11` risk materializing.
+**SELF-UAT log and guarded-write evidence:**
+`.gsd/verify-agentic/browser-pilot-2026-09-21T00-46-20Z-SELF-UAT.md`. The header byte-matches
+`renderSelfUat`'s exact PASS/FAIL shape (`# SELF-UAT — browser-pilot` / `target:` / `surface:` /
+`timestamp:` / `log location:`), and contains exactly two `### ` criterion blocks (one `verdict:
+PASS`, one `verdict: FAIL`). The string `write-self-uat.mjs` appears 58 times in the captured
+stream, but — unlike 08-02's halt log, where every occurrence was SKILL/prompt narration — this
+run's stream contains a genuine `bash` tool_call event (`call_c506fa2e825c4de695b51ec5`) whose
+`arguments.command` field literally invokes `node --experimental-strip-types
+src/resources/skills/agentic-tester/write-self-uat.mjs` piped the completed-run payload on stdin:
+the guarded write path was genuinely exercised, not narrated around.
 
 **Diagnose-only delta:** `comm -13` between the pre-dispatch and post-dispatch full-repo
-`git status --porcelain` snapshots produced zero new lines; `web/next-env.d.ts` was present in
-both and excluded from the delta (08-02-SUMMARY.md). The `--web` server's `next-server` child
-process (which the parent PID's `kill` did not terminate on the first attempt) was located and
-stopped separately, and port 4173 was confirmed free before Task 2 of that plan began.
+`git status --porcelain` snapshots produced zero new lines; the pre-existing `web/next-env.d.ts`
+dirty line was present in both `pilot-browser-rerun-before.txt` and `pilot-browser-rerun-after.txt`
+and is excluded from the delta by construction, exactly as for every prior surface. The `--web`
+server's parent PID had already exited on its own by the time Task 1 reached STEP 5 (matching the
+08-02/08-05/08-07 precedent); the separate `next-server` child was located via `ss -tlnp` and
+stopped directly, and port 4173 was confirmed free.
+
+**Superseded history — the original 08-02 halt.** The 08-02 run halted at Preflight with
+`browser_*` tools uncallable in the dispatched session
+(`.gsd/verify-agentic/browser-pilot-2026-09-20T20-41-03Z-SELF-UAT.md`, recorded in this document's
+prior revision and preserved unmodified on disk); `08-VERIFICATION.md` scored the phase 2/3 on
+exactly that gap, and both criteria were recorded as UNVERIFIED — never a graded FAIL and never a
+dispatch failure smoothed over as a pass. TWO independent source defects had to be fixed before a
+re-dispatch could mean anything: `.planning/phases/08-pilot-verification/08-05-SUMMARY.md` fixed
+the `session_start` fire-and-forget registration in
+`src/resources/extensions/browser-tools/index.ts` (commit `10441800`), but its own live probe
+still showed the tool absent from the model's advertised tool set; then
+`.planning/phases/08-pilot-verification/08-07-SUMMARY.md` fixed the second, cross-cutting defect in
+`packages/gsd-agent-core/src/session/agent-session-extensions.ts`'s `refreshToolRegistry()` (commit
+`39cae891`), whose newly-registered-tool detection never activated a tool registered lazily inside
+`session_start`, and live-proved a real `browser_navigate` call ("Title: GSD") with zero
+tool-registry misses. This run (`.planning/phases/08-pilot-verification/08-06-SUMMARY.md`) is the
+re-dispatch against that twice-fixed tree, carrying `PI_GSD_BROWSER_TOOLS=1` per 08-07's handoff.
+Deleting the prior failure is prohibited — a document that erases its own history is not evidence.
 
 ### Android surface
 
@@ -226,47 +233,71 @@ never permitted on the personal handset, which was never targeted by any command
 
 ## Findings
 
-- **AR-07-02 / T-07-11 backstop is closed by observation for the CLI and Android surfaces only.**
-  Both surfaces' dispatched children wrote genuine, uncontrolled model-generated PASS/FAIL content
-  through the guarded `write-self-uat.mjs` → `renderSelfUat` path (44 and 50 stream occurrences of
-  `write-self-uat.mjs` respectively). For CLI and Android, this rests on the existence of a genuine
-  PASS/FAIL SELF-UAT log on disk — which could only be produced by the guarded script actually
-  running — not on the explicit `toolName=="bash"` stream filtering performed for the browser
-  surface's narration-only occurrences (08-01-SUMMARY.md, 08-03-SUMMARY.md). The backstop remains
-  **open** for the browser surface: its child never reached the guarded write path at all — its
-  halt log went through the separate, SKILL.md-documented halt-persistence `write` tool, which was
-  never exercised by Phase 7's own tests.
-- **TEST-09 is not fully satisfied.** CLI and Android are proven end to end (known-good PASS,
-  known-bad FAIL with a tight root cause, guarded write confirmed, zero diagnose-only drift, zero
-  credential leakage). The browser surface is genuinely blocked: `browser-tools` extension tools
-  never became callable in any live GSD session during this run — confirmed in both the dispatched
-  `agentic-tester` child and a plain top-level RPC session with no subagent involved at all, even
-  after an explicit 16-second pre-prompt wait. This is recorded here as a real product defect, not
-  smoothed over as a partial pass.
+- **AR-07-02 / T-07-11 backstop is now closed by observation for all three surfaces.** CLI,
+  Android, and Browser dispatched children have each written genuine, uncontrolled
+  model-generated PASS/FAIL content through the guarded `write-self-uat.mjs` → `renderSelfUat`
+  path. For CLI and Android this rests on the existence of a genuine PASS/FAIL SELF-UAT log on
+  disk (44 and 50 stream occurrences of `write-self-uat.mjs` respectively) — which could only be
+  produced by the guarded script actually running (08-01-SUMMARY.md, 08-03-SUMMARY.md). For
+  Browser, 08-02's original dispatch left this backstop **open** (its halt log went through the
+  separate, SKILL.md-documented halt-persistence `write` tool instead, and all 40 stream mentions
+  of `write-self-uat.mjs` were narration); 08-06's re-dispatch closes it: of the 58 stream mentions
+  of `write-self-uat.mjs`, at least one is a genuine `bash` tool_call
+  (`call_c506fa2e825c4de695b51ec5`) whose `arguments.command` literally invokes the script with the
+  completed-run payload — the same disambiguation method (`toolName=="bash"` filtering) 08-01 and
+  08-03 relied on for CLI and Android (08-06-SUMMARY.md).
+- **TEST-09 is now fully satisfied.** CLI, Android, and Browser are each proven end to end
+  (known-good PASS, known-bad FAIL with a tight root cause, guarded write confirmed, zero
+  diagnose-only drift, zero credential leakage). The browser surface — genuinely blocked at 08-02,
+  and still blocked after 08-05's registration-timing fix alone — is unblocked following 08-07's
+  registry-propagation fix (commit `39cae891`) and this plan's (08-06) re-dispatch: real
+  `browser_navigate`/`browser_evaluate` tool-call events (144 occurrences in the re-run stream),
+  zero tool-registry misses, and a graded PASS/FAIL SELF-UAT log
+  (`browser-pilot-2026-09-21T00-46-20Z-SELF-UAT.md`).
 - **Every run required at least one deviation, all recorded honestly, none silently retried away:**
   the CLI surface's main dispatch needed the plan's own anticipated print-to-RPC fallback; the
   browser surface's STEP 2 preflight command independently needed the same print-to-RPC
-  substitution (its main dispatch succeeded on the first attempt); the Android surface's first
-  dispatch attempt hung for 24+ minutes on a self-authored missing-trailing-newline bug, fixed and
-  redispatched successfully.
-- **Root-cause hypothesis for the browser blocker** (bounded, read-only investigation; not fully
-  pinned to a single line): `src/resources/extensions/browser-tools/index.ts`'s `session_start`
-  hook fires `registerBrowserTools()` as `void`, fire-and-forget, whenever `ctx.hasUI` is true —
-  true for both RPC-mode top-level sessions and subagent children — with no readiness signal the
-  dispatching parent or child can observe from outside the process. MCP-trust gating on the managed
-  `gsd-browser` engine and a simple registration-timing race were both ruled out.
+  substitution in both 08-02 and 08-06 (each run's main dispatch succeeded on the first attempt);
+  the Android surface's first dispatch attempt hung for 24+ minutes on a self-authored
+  missing-trailing-newline bug, fixed and redispatched successfully. 08-06's browser re-dispatch
+  itself needed zero source-level deviations — its only in-scope finding was operational (see
+  below).
+- **Root-cause hypothesis for the browser blocker — now fixed and live-proven.** 08-02's bounded,
+  read-only investigation (not fully pinned to a single line) hypothesized
+  `src/resources/extensions/browser-tools/index.ts`'s `session_start` hook firing
+  `registerBrowserTools()` as `void`, fire-and-forget, whenever `ctx.hasUI` is true. 08-05 fixed
+  exactly that (commit `10441800`) but its own live probe still showed the tool absent, surfacing a
+  second, independent defect in `packages/gsd-agent-core/src/session/agent-session-extensions.ts`'s
+  `refreshToolRegistry()` — its newly-registered-tool comparison was computed after the registry
+  rebuild it was supposed to detect, making the incremental-activation branch a permanent no-op.
+  08-07 fixed that (commit `39cae891`) and live-proved a real `browser_navigate` call. 08-06's
+  re-dispatch is the end-to-end confirmation that both fixes together restore the browser surface
+  to full pilot-grade evidence.
 - **Android surface's literal unscoped-adb verify check printed 18, not 0** — disambiguated as
   narration text paraphrasing the driver playbook's own already-scoped example, not an actual
   executed command; zero real `bash` tool_call events contained an unscoped `adb` invocation. This
   is a verify-script limitation, not a device-safety violation, and is recorded here rather than
   hidden.
-- **Diagnose-only invariant held across all three runs.** Every before/after full-repo
+- **08-06 found a pre-existing, unrelated process-hygiene bug: the RPC-mode dispatch process from
+  08-02's original browser-pilot run was still alive ~4h10m later**, still appending
+  notification-churn heartbeat events to `/tmp/y-pi-gsd-pilot/pilot-browser-run.json` (growing it
+  from the 408 lines 08-02 analyzed to 1390 lines by the time 08-06 discovered and killed it). This
+  is append-only growth of trailing heartbeat noise — the original 408-line evidentiary content
+  08-02's own analysis rests on is preserved as an exact byte-prefix (single `>`-redirected stdout,
+  sequential writes only) — and it carries no criterion/verdict content of its own, so none of this
+  document's CLI or historical Browser claims are affected. Several sibling orphaned processes from
+  08-02/08-05/08-07's other diagnostic probes were found still running too; only the one actively
+  writing to a file this document cites was stopped, the rest are logged as deferred, out-of-scope
+  hygiene work (see `.planning/phases/08-pilot-verification/deferred-items.md`, 08-06-SUMMARY.md).
+- **Diagnose-only invariant held across all four pilot-verification runs** (08-01 CLI, 08-02
+  browser halt, 08-03 Android, 08-06 browser re-dispatch). Every before/after full-repo
   `git status --porcelain` delta was zero new lines; the pre-existing `web/next-env.d.ts` dirty
   line was present in every snapshot pair and excluded from every delta by construction.
-- **Zero credential leakage across all three runs.** A grep for the OpenRouter key's literal
-  prefix (the same pattern this plan's Task 2 AUDIT 3 and its automated verify script scan this
-  document itself for — not reproduced here to avoid a self-match) across every SELF-UAT log and
-  every capture file (stdout and stderr, all three surfaces) returned 0 matching files.
+- **Zero credential leakage across all four pilot-verification runs.** A grep for the OpenRouter
+  key's literal prefix (the same pattern this document's AUDIT 3 and its automated verify script
+  scan this document itself for — not reproduced here to avoid a self-match) across every SELF-UAT
+  log and every capture file (stdout and stderr, all runs including 08-06's re-dispatch) returned 0
+  matching files.
 
 ## Local Verification
 
@@ -280,19 +311,25 @@ node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental
   src/resources/extensions/gsd/tests/commands-verify-agentic.test.ts \
   src/resources/extensions/gsd/tests/integration/commands-verify-agentic.integration.test.ts
 
-# SELF-UAT header shape reads (CLI + Android byte-match renderSelfUat; browser differs by design)
+# SELF-UAT header shape reads (CLI + Android + the browser re-dispatch byte-match renderSelfUat;
+# the superseded 08-02 browser halt log differs by design, per its own halt-persistence rule)
 head -6 .gsd/verify-agentic/cli-pilot-2026-09-20T20-28-06Z-SELF-UAT.md
 head -6 .gsd/verify-agentic/android-pilot-2026-09-20T21-27-42Z-SELF-UAT.md
 head -8 .gsd/verify-agentic/browser-pilot-2026-09-20T20-41-03Z-SELF-UAT.md
+head -6 .gsd/verify-agentic/browser-pilot-2026-09-21T00-46-20Z-SELF-UAT.md
 
-# Confirm the guarded write-self-uat.mjs script was genuinely invoked (CLI + Android only)
+# Confirm the guarded write-self-uat.mjs script was genuinely invoked (CLI, Android, and the
+# browser re-dispatch; the count alone is not proof — see 08-06-SUMMARY.md for how the genuine
+# bash tool_call invocation was disambiguated from narration mentions in the browser stream)
 grep -c 'write-self-uat.mjs' /tmp/y-pi-gsd-pilot/pilot-cli-run.json
 grep -c 'write-self-uat.mjs' /tmp/y-pi-gsd-pilot/pilot-android-run.json
+grep -c 'write-self-uat.mjs' /tmp/y-pi-gsd-pilot/pilot-browser-rerun-run.json
 
-# Diagnose-only delta re-derivation (expect 0 new lines for all three surfaces)
+# Diagnose-only delta re-derivation (expect 0 new lines for all four runs)
 comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-cli-before.txt) <(sort /tmp/y-pi-gsd-pilot/pilot-cli-after.txt)
 comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-browser-before.txt) <(sort /tmp/y-pi-gsd-pilot/pilot-browser-after.txt)
 comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-android-before.txt) <(sort /tmp/y-pi-gsd-pilot/pilot-android-after.txt)
+comm -13 <(sort /tmp/y-pi-gsd-pilot/pilot-browser-rerun-before.txt) <(sort /tmp/y-pi-gsd-pilot/pilot-browser-rerun-after.txt)
 
 # Repository's own secret scanner -- covers credential leakage across the whole repo and
 # requires no manual substitution, unlike the targeted AUDIT-3 grep documented below.
@@ -310,9 +347,11 @@ string from AUDIT 3 for `<openrouter-key-prefix-see-AUDIT-3>` below, then run:
 grep -rc '<openrouter-key-prefix-see-AUDIT-3>' \
   .gsd/verify-agentic/cli-pilot-2026-09-20T20-28-06Z-SELF-UAT.md \
   .gsd/verify-agentic/browser-pilot-2026-09-20T20-41-03Z-SELF-UAT.md \
+  .gsd/verify-agentic/browser-pilot-2026-09-21T00-46-20Z-SELF-UAT.md \
   .gsd/verify-agentic/android-pilot-2026-09-20T21-27-42Z-SELF-UAT.md \
   /tmp/y-pi-gsd-pilot/pilot-cli-run.json /tmp/y-pi-gsd-pilot/pilot-cli-run.stderr \
   /tmp/y-pi-gsd-pilot/pilot-browser-run.json /tmp/y-pi-gsd-pilot/pilot-browser-run.stderr \
+  /tmp/y-pi-gsd-pilot/pilot-browser-rerun-run.json /tmp/y-pi-gsd-pilot/pilot-browser-rerun-run.stderr \
   /tmp/y-pi-gsd-pilot/pilot-android-run.json /tmp/y-pi-gsd-pilot/pilot-android-run.stderr
 ```
 
