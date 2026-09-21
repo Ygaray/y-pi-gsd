@@ -1502,3 +1502,106 @@ export function getMilestoneCommitAttributionShas(milestoneId: string): string[]
     .map((row) => typeof row["commit_sha"] === "string" ? row["commit_sha"] : "")
     .filter(Boolean);
 }
+
+// ---------------------------------------------------------------------------
+// UAT / acceptance-criteria reconciliation (Phase 10, DATA-01)
+//
+// Slice-level accessor over the existing `slices.success_criteria` free-text
+// column. This is an accessor/shape layer only (D-01): no new column, no new
+// table, no migration, no write SQL — everything below composes the existing
+// `getSlice` read path.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a slice's free-text `success_criteria` column into a normalized
+ * `string[]` of declared criteria. This is the single place this codebase
+ * parses that column — do not reimplement this splitting logic elsewhere.
+ *
+ * Mirrors the placeholder-detection semantics of the private
+ * `meaningfulSection` helper at `markdown-renderer.ts:224` (reimplemented
+ * here rather than imported: `markdown-renderer.ts` already imports FROM
+ * this layer, so importing back would invert the layering and create a
+ * cycle).
+ *
+ * Algorithm: trim the whole value; an empty or whole-value placeholder
+ * ("Not provided", "None", "N/A", or a `{{token}}` form) means "no criteria
+ * declared" and returns `[]`. Otherwise split on one-or-more newlines (which
+ * collapses blank lines between entries rather than emitting empty
+ * criteria), trim each line, strip at most one leading `-`-plus-whitespace
+ * list marker, and drop anything left empty.
+ *
+ * Two constraints are load-bearing:
+ * (a) Only the `-`-plus-whitespace marker form is stripped — `*`, `+`,
+ *     numeric markers, and a bare `-` with no following whitespace are left
+ *     untouched (10-03 relies on byte-identical rendered output for those
+ *     input shapes).
+ * (b) The three placeholder regexes apply to the WHOLE trimmed value only,
+ *     never to individual lines — per-line placeholder filtering would
+ *     discard text a human actually declared.
+ */
+export function normalizeAcceptanceCriteriaText(value: string | null | undefined): string[] {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return [];
+  if (/^(not provided\.?|none\.?|n\/a)$/i.test(trimmed)) return [];
+  if (/^\{\{[^}]+\}\}$/.test(trimmed)) return [];
+  return trimmed
+    .split(/\n+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => entry.replace(/^-\s+/, "").trim())
+    .filter(Boolean);
+}
+
+/** The one coherent acceptance-criteria shape every level (slice, milestone, task) shares. */
+export interface AcceptanceCriteria {
+  criteria: string[];
+  hasCriteria: boolean;
+}
+
+/**
+ * Slice-level acceptance criteria, derived from `slices.success_criteria`.
+ *
+ * `completionEvidence` carries `slices.full_uat_md` verbatim. This is
+ * completion-time evidence produced when the slice was finished, NOT
+ * pre-declared acceptance criteria — it must never be merged into
+ * `criteria`.
+ */
+export interface SliceAcceptanceCriteria extends AcceptanceCriteria {
+  milestoneId: string;
+  sliceId: string;
+  status: string;
+  completionEvidence: string;
+}
+
+/**
+ * Pure, DB-free shaper from an already-loaded `SliceRow` to
+ * `SliceAcceptanceCriteria`. Kept pure (no DB access) so callers composing
+ * `getMilestoneSlices()` output can map over it without an N-query storm,
+ * and so it unit-tests with no open database.
+ */
+export function sliceAcceptanceCriteriaFromRow(row: SliceRow): SliceAcceptanceCriteria {
+  const criteria = normalizeAcceptanceCriteriaText(row.success_criteria);
+  return {
+    milestoneId: row.milestone_id,
+    sliceId: row.id,
+    status: row.status,
+    criteria,
+    hasCriteria: criteria.length > 0,
+    completionEvidence: row.full_uat_md,
+  };
+}
+
+/**
+ * A slice's acceptance criteria in ONE call (ROADMAP Phase 10 Success
+ * Criterion 2). Returns `null` when no slice row exists for
+ * `(milestoneId, sliceId)` — matching the null-on-absence convention of
+ * every other accessor in this file. Returns a non-null object with
+ * `criteria: []` and `hasCriteria: false` (never a throw) when the slice
+ * row exists but declared no criteria — the exact self-skip input GATE-03
+ * needs in Phase 11.
+ */
+export function getSliceAcceptanceCriteria(milestoneId: string, sliceId: string): SliceAcceptanceCriteria | null {
+  const row = getSlice(milestoneId, sliceId);
+  if (!row) return null;
+  return sliceAcceptanceCriteriaFromRow(row);
+}
