@@ -121,6 +121,11 @@ function validateResults(results: SelfUatCriterionResult[]): void {
       );
     }
 
+    // PARTIAL is deliberately excluded from the root-cause-presence and
+    // rubber-stamp guards below (GATE-01) — following uat-policy.ts's
+    // precedent, PARTIAL is an aggregate-level concept here, not a
+    // per-criterion root-cause trigger. It remains subject to the
+    // verdict-agnostic evidence guard above and the prose-only guard below.
     if (result.verdict === "FAIL") {
       const rootCause = result.rootCause ?? "";
       const trimmedRootCause = rootCause.trim();
@@ -156,12 +161,22 @@ function validateResults(results: SelfUatCriterionResult[]): void {
  * so a caller has no channel to self-declare its own outcome (T-09-04).
  */
 export function aggregateSelfUat(results: SelfUatCriterionResult[]): SelfUatAggregate {
-  if (results.length > 0 && results.every((result) => result.verdict === "PASS")) {
-    return { result: "all_pass", verdict: "pass" };
+  // D-02: zero graded criteria is its own distinct non-pass aggregate — it
+  // must never share the all-PASS path. "Nothing was checked" can never
+  // render as "everything passed".
+  if (results.length === 0) {
+    return { result: "no_criteria", verdict: "advisory" };
   }
-  // Safe default until the remaining branches (FAIL precedence, PARTIAL,
-  // zero-criteria) are wired in: never let an unhandled case read as a pass.
-  return { result: "has_fail", verdict: "needs-rework" };
+  // FAIL takes precedence over PARTIAL, which takes precedence over PASS.
+  // Scan every entry rather than short-circuiting on the first non-PASS, so
+  // a FAIL appearing after a PARTIAL still wins.
+  if (results.some((result) => result.verdict === "FAIL")) {
+    return { result: "has_fail", verdict: "needs-rework" };
+  }
+  if (results.some((result) => result.verdict === "PARTIAL")) {
+    return { result: "has_partial", verdict: "advisory" };
+  }
+  return { result: "all_pass", verdict: "pass" };
 }
 
 /**
@@ -208,7 +223,7 @@ export function renderSelfUat(
     lines.push(`### ${n}. ${result.criterion}`);
     lines.push(`verdict: ${result.verdict}`);
     lines.push(`evidence: ${result.evidence}`);
-    if (result.verdict === "FAIL") {
+    if (result.verdict === "FAIL" || (result.verdict === "PARTIAL" && result.rootCause)) {
       lines.push(`root_cause: ${result.rootCause}`);
     }
     if (result.gapClosureRoute) {

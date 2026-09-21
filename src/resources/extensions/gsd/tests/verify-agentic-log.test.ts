@@ -409,6 +409,73 @@ describe("renderSelfUat guards", () => {
     });
   });
 
+  describe("PARTIAL guard semantics (GATE-01, Task 2)", () => {
+    it("does not throw for a PARTIAL with rootCause omitted (no inherited root-cause-presence guard)", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "e" }], BASE_META),
+      );
+    });
+
+    it("does not throw for a PARTIAL whose rootCause merely restates its criterion (no inherited rubber-stamp guard)", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat(
+          [{ criterion: "criterion partial", verdict: "PARTIAL", evidence: "e", rootCause: "criterion partial" }],
+          BASE_META,
+        ),
+      );
+    });
+
+    it("throws for a PARTIAL with empty-string evidence (evidence guard is verdict-agnostic)", () => {
+      assert.throws(
+        () => renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "" }], BASE_META),
+        SelfUatRenderError,
+      );
+    });
+
+    it("throws for a PARTIAL with whitespace-only evidence", () => {
+      assert.throws(
+        () => renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "   " }], BASE_META),
+        SelfUatRenderError,
+      );
+    });
+
+    it("throws for a PARTIAL whose gapClosureRoute carries a patch marker (prose-only guard is verdict-agnostic)", () => {
+      assert.throws(
+        () =>
+          renderSelfUat(
+            [
+              {
+                criterion: "c",
+                verdict: "PARTIAL",
+                evidence: "e",
+                gapClosureRoute: unifiedDiffHeaderLine(),
+              },
+            ],
+            BASE_META,
+          ),
+        SelfUatRenderError,
+      );
+    });
+
+    it("renders a root_cause line for a PARTIAL that supplies a rootCause", () => {
+      const doc = renderSelfUat(
+        [{ criterion: "c", verdict: "PARTIAL", evidence: "e", rootCause: "half the surfaces covered" }],
+        BASE_META,
+      );
+      assert.match(doc, /^root_cause: half the surfaces covered$/m);
+    });
+
+    it("renders no root_cause line for a PARTIAL with no rootCause supplied", () => {
+      const doc = renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "e" }], BASE_META);
+      assert.doesNotMatch(doc, /^root_cause: /m);
+    });
+
+    it("renders a verdict: PARTIAL line inside the criterion's own block", () => {
+      const doc = renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "e" }], BASE_META);
+      assert.match(doc, /^verdict: PARTIAL$/m);
+    });
+  });
+
   it("runs guards before any string building, so a rejected input produces no partial document", () => {
     let thrown: unknown;
     try {
@@ -473,6 +540,53 @@ describe("aggregateSelfUat", () => {
       { result: "all_pass", verdict: "pass" },
     );
   });
+
+  it("returns { result: no_criteria, verdict: advisory } for an empty results array (D-02)", () => {
+    assert.deepEqual(aggregateSelfUat([]), { result: "no_criteria", verdict: "advisory" });
+  });
+
+  it("returns { result: has_partial, verdict: advisory } for one PASS and one PARTIAL (SC2)", () => {
+    assert.deepEqual(
+      aggregateSelfUat([
+        { criterion: "a", verdict: "PASS", evidence: "e1" },
+        { criterion: "b", verdict: "PARTIAL", evidence: "e2" },
+      ]),
+      { result: "has_partial", verdict: "advisory" },
+    );
+  });
+
+  it("returns { result: has_fail, verdict: needs-rework } for one PASS, one PARTIAL and one FAIL — FAIL wins (SC3)", () => {
+    assert.deepEqual(
+      aggregateSelfUat([
+        { criterion: "a", verdict: "PASS", evidence: "e1" },
+        { criterion: "b", verdict: "PARTIAL", evidence: "e2" },
+        { criterion: "c", verdict: "FAIL", evidence: "e3", rootCause: "exit 1, stderr: x" },
+      ]),
+      { result: "has_fail", verdict: "needs-rework" },
+    );
+  });
+
+  it("returns { result: has_fail, verdict: needs-rework } for a single FAIL (SC3)", () => {
+    assert.deepEqual(
+      aggregateSelfUat([{ criterion: "c", verdict: "FAIL", evidence: "e", rootCause: "exit 1, stderr: x" }]),
+      { result: "has_fail", verdict: "needs-rework" },
+    );
+  });
+
+  it("returns the same has_fail/needs-rework aggregate regardless of entry order", () => {
+    const forward = aggregateSelfUat([
+      { criterion: "a", verdict: "PASS", evidence: "e1" },
+      { criterion: "b", verdict: "PARTIAL", evidence: "e2" },
+      { criterion: "c", verdict: "FAIL", evidence: "e3", rootCause: "exit 1, stderr: x" },
+    ]);
+    const reordered = aggregateSelfUat([
+      { criterion: "c", verdict: "FAIL", evidence: "e3", rootCause: "exit 1, stderr: x" },
+      { criterion: "b", verdict: "PARTIAL", evidence: "e2" },
+      { criterion: "a", verdict: "PASS", evidence: "e1" },
+    ]);
+    assert.deepEqual(forward, { result: "has_fail", verdict: "needs-rework" });
+    assert.deepEqual(reordered, { result: "has_fail", verdict: "needs-rework" });
+  });
 });
 
 describe("isSelfUatResult / isSelfUatVerdict", () => {
@@ -513,5 +627,33 @@ describe("renderSelfUat frontmatter channel", () => {
     const doc = renderSelfUat(THREE_CRITERION_RESULTS, BASE_META);
     const [, body] = splitFrontmatter(doc);
     assert.equal(body, THREE_CRITERION_GOLDEN_BODY);
+  });
+
+  it("extractFrontmatterVerdict reads advisory for a zero-criteria render, which still carries the no-criteria marker (D-02)", () => {
+    const doc = renderSelfUat([], BASE_META);
+    assert.equal(extractFrontmatterVerdict(doc), "advisory");
+    assert.match(doc, /\(no criteria were evaluated\)/);
+    const [frontmatterLines] = splitFrontmatter(doc);
+    assert.ok(frontmatterLines !== null);
+    assert.ok(frontmatterLines!.some((line) => line.includes("no_criteria")));
+  });
+
+  it("extractFrontmatterVerdict reads needs-rework for a render containing a FAIL", () => {
+    const doc = renderSelfUat(
+      [{ criterion: "c", verdict: "FAIL", evidence: "e", rootCause: "exit 1, stderr: x" }],
+      BASE_META,
+    );
+    assert.equal(extractFrontmatterVerdict(doc), "needs-rework");
+  });
+
+  it("extractFrontmatterVerdict reads advisory for a render containing a PARTIAL and no FAIL", () => {
+    const doc = renderSelfUat(
+      [
+        { criterion: "a", verdict: "PASS", evidence: "e1" },
+        { criterion: "b", verdict: "PARTIAL", evidence: "e2" },
+      ],
+      BASE_META,
+    );
+    assert.equal(extractFrontmatterVerdict(doc), "advisory");
   });
 });
