@@ -207,14 +207,17 @@ function validateResults(results: SelfUatCriterionResult[]): void {
       );
     }
 
-    // Gap-closure guard (IN-03): a PASS has no gap to close, so a
-    // gapClosureRoute attached to one is semantically incoherent — it would
-    // render a `gap_closure:` line under a passing criterion. Scoped to PASS
-    // only; FAIL and PARTIAL are exactly the verdicts a gap-closure route is
+    // Gap-closure/root-cause guard (IN-03, WR-01): a PASS has no gap to
+    // close and nothing to diagnose, so a gapClosureRoute or rootCause
+    // attached to one is semantically incoherent — it would either render a
+    // `gap_closure:` line under a passing criterion, or (for rootCause) get
+    // silently swallowed by the render loop's FAIL/PARTIAL-only condition,
+    // hiding a caller-payload mistake instead of surfacing it. Scoped to
+    // PASS only; FAIL and PARTIAL are exactly the verdicts these fields are
     // meaningful for.
-    if (result.verdict === "PASS" && result.gapClosureRoute) {
+    if (result.verdict === "PASS" && (result.gapClosureRoute || result.rootCause?.trim())) {
       throw new SelfUatRenderError(
-        `renderSelfUat: PASS for "${result.criterion}" carries a gapClosureRoute — gap-closure routing only applies to FAIL/PARTIAL`,
+        `renderSelfUat: PASS for "${result.criterion}" carries a rootCause/gapClosureRoute — routing and root-cause fields only apply to FAIL/PARTIAL`,
       );
     }
   }

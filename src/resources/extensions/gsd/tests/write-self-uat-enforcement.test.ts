@@ -169,6 +169,22 @@ describe("write-self-uat.mjs — real subprocess enforcement", () => {
     assertRejectedNoWrite(inv);
   });
 
+  it("rejects a PASS carrying a rootCause and writes nothing (WR-01)", () => {
+    const inv = invoke({
+      target: "S07",
+      surface: "cli",
+      results: [
+        {
+          criterion: "login works",
+          verdict: "PASS",
+          evidence: "exit 0",
+          rootCause: "totally unrelated stray root cause",
+        },
+      ],
+    });
+    assertRejectedNoWrite(inv);
+  });
+
   it("rejects a result with a verdict outside PASS/FAIL and writes nothing", () => {
     const inv = invoke({
       target: "S07",

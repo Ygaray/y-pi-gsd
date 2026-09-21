@@ -522,6 +522,39 @@ describe("renderSelfUat guards", () => {
         ),
       );
     });
+
+    it("throws for a PASS carrying a rootCause (WR-01, mirrors the gapClosureRoute guard)", () => {
+      assert.throws(
+        () =>
+          renderSelfUat(
+            [
+              {
+                criterion: "c",
+                verdict: "PASS",
+                evidence: "e",
+                rootCause: "totally unrelated stray root cause",
+              },
+            ],
+            BASE_META,
+          ),
+        SelfUatRenderError,
+      );
+    });
+
+    it("does not throw for a PASS with no rootCause", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat([{ criterion: "c", verdict: "PASS", evidence: "e" }], BASE_META),
+      );
+    });
+
+    it("does not throw for a PASS whose rootCause is whitespace-only (WR-01 guard trims before testing)", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat(
+          [{ criterion: "c", verdict: "PASS", evidence: "e", rootCause: "   " }],
+          BASE_META,
+        ),
+      );
+    });
   });
 
   describe("PARTIAL guard semantics (GATE-01, Task 2)", () => {
