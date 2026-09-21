@@ -396,6 +396,26 @@ export class AgentSessionExtensionsModule {
 	}
 
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+		// Snapshot the registry as it stood BEFORE this call's rebuild/cache-restore
+		// below, so the "newly registered since last call" comparison further down
+		// diffs against the correct baseline instead of the registry this call is
+		// about to (re)build. Capturing this AFTER the rebuild (the pre-fix bug)
+		// made the name a lie: it held the just-rebuilt registry, so every tool —
+		// including one a `pi.registerTool()` call just added inside a
+		// `session_start` handler — was trivially "already present" and the
+		// incremental-activation branch below was a permanent no-op.
+		//
+		// `isFirstEverCall` guards the true first-call case (nothing has been
+		// recorded yet, `this._toolCacheKey` is still null): without it, the very
+		// first bare `refreshToolRegistry()` call would see an empty "before"
+		// snapshot and treat every builtin tool as "newly registered", silently
+		// sweeping the whole base tool set into the active set. In practice the
+		// only zero-option caller (`actions.refreshTools` at line 289, reached via
+		// `pi.registerTool()`) always fires after the constructor's one-time
+		// options-carrying sweep, so this case is defensive, not load-bearing.
+		const isFirstEverCall = this._toolCacheKey === null;
+		const registryNamesBeforeThisRefresh = new Set(this.host._toolRegistry.keys());
+
 		// Check cache: if the tool-definition inputs haven't changed, reuse the cached Maps.
 		const cacheKey = this.buildToolCacheKey();
 		const cachedEntry = this._toolCacheKey === cacheKey ? this._toolCacheEntry : null;
@@ -411,7 +431,6 @@ export class AgentSessionExtensionsModule {
 			this._refreshToolRegistryBuild(cacheKey);
 		}
 
-		const previousRegistryNames = new Set(this.host._toolRegistry.keys());
 		const previousActiveToolNames = this.host.getActiveToolNames();
 		const allowedToolNames = this.host._allowedToolNames;
 		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
@@ -436,9 +455,9 @@ export class AgentSessionExtensionsModule {
 			for (const tool of this.host._toolRegistry.values()) {
 				nextActiveToolNames.push(tool.name);
 			}
-		} else if (!options?.activeToolNames) {
+		} else if (!options?.activeToolNames && !isFirstEverCall) {
 			for (const toolName of this.host._toolRegistry.keys()) {
-				if (!previousRegistryNames.has(toolName)) {
+				if (!registryNamesBeforeThisRefresh.has(toolName)) {
 					nextActiveToolNames.push(toolName);
 				}
 			}
