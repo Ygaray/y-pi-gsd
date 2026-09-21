@@ -108,6 +108,19 @@ describe("renderSelfUat", () => {
     assert.match(doc, /^root_cause: exit 1, stderr: ENOENT — the binary was never built$/m);
   });
 
+  it("renders a FAIL's root_cause line with leading/trailing whitespace stripped (IN-01)", () => {
+    const results: SelfUatCriterionResult[] = [
+      {
+        criterion: "c",
+        verdict: "FAIL",
+        evidence: "exit 1, stderr: ENOENT",
+        rootCause: "  exit 1, stderr: ENOENT — the binary was never built  ",
+      },
+    ];
+    const doc = renderSelfUat(results, BASE_META);
+    assert.match(doc, /^root_cause: exit 1, stderr: ENOENT — the binary was never built$/m);
+  });
+
   it("renders a gap_closure line for a FAIL with a gapClosureRoute", () => {
     const results: SelfUatCriterionResult[] = [
       {
@@ -616,6 +629,14 @@ describe("renderSelfUat guards", () => {
     it("renders no root_cause line for a PARTIAL with no rootCause supplied", () => {
       const doc = renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "e" }], BASE_META);
       assert.doesNotMatch(doc, /^root_cause: /m);
+    });
+
+    it("renders a PARTIAL's root_cause line with leading/trailing whitespace stripped (IN-01)", () => {
+      const doc = renderSelfUat(
+        [{ criterion: "c", verdict: "PARTIAL", evidence: "e", rootCause: "  half the surfaces covered  " }],
+        BASE_META,
+      );
+      assert.match(doc, /^root_cause: half the surfaces covered$/m);
     });
 
     it("renders no root_cause line for a PARTIAL with a whitespace-only rootCause (IN-02)", () => {

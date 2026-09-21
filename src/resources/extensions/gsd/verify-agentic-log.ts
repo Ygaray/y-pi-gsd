@@ -293,7 +293,7 @@ export function renderSelfUat(
     lines.push(`verdict: ${result.verdict}`);
     lines.push(`evidence: ${result.evidence}`);
     if (result.verdict === "FAIL" || (result.verdict === "PARTIAL" && result.rootCause?.trim())) {
-      lines.push(`root_cause: ${result.rootCause}`);
+      lines.push(`root_cause: ${result.rootCause?.trim()}`);
     }
     if (result.gapClosureRoute) {
       lines.push(`gap_closure: ${result.gapClosureRoute}`);
