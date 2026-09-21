@@ -18,6 +18,12 @@
  * is the coverage proving this: it spawns a genuine
  * `node --experimental-strip-types` subprocess running that script, never an
  * in-process call to the functions this file exports.
+ *
+ * This module's `result`/`verdict` frontmatter channel (see
+ * {@link SelfUatVerdict}) exists ONLY for a completed run (WR-03). A halted
+ * run — SKILL.md Steps 1-3's "Halt persistence" shape — is written directly
+ * by the agent's own `write` tool, carries no `verdict` key, and is never
+ * rendered or validated by anything in this module.
  */
 
 export const SELF_UAT_LOG_DIR_RELATIVE = ".gsd/verify-agentic/";
@@ -39,7 +45,16 @@ export function isSelfUatResult(value: string): value is SelfUatResult {
 
 /**
  * Closed set of hook-facing verdicts `aggregateSelfUat` can derive. This is
- * the enum Phase 11's blocking gate and Phase 13's Gate-2 ledger route on.
+ * the enum Phase 11's blocking gate and Phase 13's Gate-2 ledger route on —
+ * for a COMPLETED run only (WR-03). A halted run (SKILL.md's "Halt
+ * persistence" shape: a top-level `halted: true` plus a `reason:` block) is
+ * written directly by the agent's own `write` tool and carries no `verdict`
+ * key at all; nothing in this module renders or validates that shape. A
+ * downstream gate consumer MUST treat a missing `verdict` key as fail-closed
+ * (i.e. blocking, the same outcome as `needs-rework`), never as pass-through
+ * or as evidence the run completed — a halted run is arguably the worst
+ * outcome (the surface never became testable), so silently passing it would
+ * be worse than misreading a real `needs-rework`.
  */
 export const SELF_UAT_VERDICTS = ["pass", "needs-rework", "advisory"] as const;
 export type SelfUatVerdict = (typeof SELF_UAT_VERDICTS)[number];

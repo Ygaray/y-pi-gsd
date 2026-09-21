@@ -100,6 +100,15 @@ build blocker is evidence the surface itself is broken — losing that as a dura
 dispatching turn's context is later lost or summarized would defeat this spine's own core
 principle of resisting rubber-stamping via a durable, fresh-evidence trail.
 
+**No `verdict` key on a halt (WR-03):** the halt shape carries `halted: true` plus `reason:` —
+deliberately no `result`/`verdict` key of any kind. The `result`/`verdict` frontmatter channel
+described in Step 6 below is produced only by `renderSelfUat`, which never runs for a halt (the
+halt write goes through this agent's own `write` tool, not through `write-self-uat.mjs`). A
+downstream gate reading this log MUST treat a missing `verdict` key as fail-closed — the same
+blocking outcome as `needs-rework` — never as pass-through: a halted run means the surface never
+became testable at all, which is at least as serious as a `needs-rework` on a run that did
+complete.
+
 ## Step 4: Drive and falsify each criterion
 
 This is the adversarial core of the spine. No criterion may be marked PASS or FAIL without
