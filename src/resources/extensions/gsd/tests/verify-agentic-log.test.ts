@@ -441,6 +441,45 @@ describe("renderSelfUat guards", () => {
       );
       assert.doesNotMatch(doc, PATCH_MARKER_PATTERN);
     });
+
+    it("throws when gapClosureRoute opens a fenced code block tagged diff indented as a nested list item (CR-01)", () => {
+      const indented = `Apply this fix:\n  ${fencedDiffBlock().replace(/\n/g, "\n  ")}`;
+      assert.throws(
+        () =>
+          renderSelfUat(
+            [
+              {
+                criterion: "c",
+                verdict: "FAIL",
+                evidence: "e",
+                rootCause: "exit 1, stderr: x",
+                gapClosureRoute: indented,
+              },
+            ],
+            BASE_META,
+          ),
+        SelfUatRenderError,
+      );
+    });
+
+    it("throws when gapClosureRoute contains an indented unified-diff file header line (CR-01)", () => {
+      assert.throws(
+        () =>
+          renderSelfUat(
+            [
+              {
+                criterion: "c",
+                verdict: "FAIL",
+                evidence: "e",
+                rootCause: "exit 1, stderr: x",
+                gapClosureRoute: `  ${unifiedDiffHeaderLine()}`,
+              },
+            ],
+            BASE_META,
+          ),
+        SelfUatRenderError,
+      );
+    });
   });
 
   describe("gap-closure verdict-scope guard (IN-03)", () => {

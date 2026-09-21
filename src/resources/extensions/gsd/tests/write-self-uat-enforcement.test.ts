@@ -152,6 +152,23 @@ describe("write-self-uat.mjs — real subprocess enforcement", () => {
     assertRejectedNoWrite(inv);
   });
 
+  it("rejects a FAIL whose gapClosureRoute carries an indented fenced diff block and writes nothing (CR-01)", () => {
+    const inv = invoke({
+      target: "S07",
+      surface: "cli",
+      results: [
+        {
+          criterion: "logout works",
+          verdict: "FAIL",
+          evidence: "exit 1",
+          rootCause: "exit 1, stderr: ENOENT — the binary was never built",
+          gapClosureRoute: `Apply this fix:\n  ${fencedDiffBlock().replace(/\n/g, "\n  ")}`,
+        },
+      ],
+    });
+    assertRejectedNoWrite(inv);
+  });
+
   it("rejects a result with a verdict outside PASS/FAIL and writes nothing", () => {
     const inv = invoke({
       target: "S07",

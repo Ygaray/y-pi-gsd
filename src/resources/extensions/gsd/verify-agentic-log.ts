@@ -81,10 +81,10 @@ export interface SelfUatAggregate {
  *   - an `Index: ` header line
  */
 const PATCH_MARKER_SOURCES = [
-  "^```(?:diff|patch)\\b",
-  "^(?:\\+\\+\\+|---) ",
-  "^@@ ",
-  "^Index: ",
+  "^[ \\t]*```(?:diff|patch)\\b",
+  "^[ \\t]*(?:\\+\\+\\+|---) ",
+  "^[ \\t]*@@ ",
+  "^[ \\t]*Index: ",
 ];
 export const PATCH_MARKER_PATTERN = new RegExp(PATCH_MARKER_SOURCES.join("|"), "im");
 
