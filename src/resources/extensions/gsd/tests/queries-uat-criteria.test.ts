@@ -594,3 +594,28 @@ describe("queries-uat-criteria: renderer output parity", () => {
     assert.deepEqual(toRenderedLines("Not provided"), []);
   });
 });
+
+describe("queries-uat-criteria: presentation-vs-data layer boundary", () => {
+  // The renderer's "- Complete the planned slice outcomes." line is a display
+  // fallback for a human reader — it must never leak into the accessor's data
+  // shape, because Phase 11's gate would then grade a criteria-less slice
+  // against invented text instead of correctly self-skipping it.
+  const RENDERER_FALLBACK_TEXT = "Complete the planned slice outcomes.";
+
+  test("a criteria-less slice reports hasCriteria:false with an empty array, never the renderer's fallback text", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.equal(result!.hasCriteria, false);
+      assert.equal(result!.criteria.includes(RENDERER_FALLBACK_TEXT), false);
+      assert.deepEqual(result!.criteria, []);
+    } finally {
+      closeDatabase();
+    }
+  });
+});
