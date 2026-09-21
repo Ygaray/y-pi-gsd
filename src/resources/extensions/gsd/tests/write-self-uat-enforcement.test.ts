@@ -19,6 +19,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { renderSelfUat, type SelfUatCriterionResult, type SelfUatMeta } from "../verify-agentic-log.ts";
+import { splitFrontmatter } from "../../shared/frontmatter.js";
+import { extractFrontmatterVerdict } from "../verdict-parser.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // __dirname is src/resources/extensions/gsd/tests; the script lives at
@@ -328,5 +330,118 @@ describe("write-self-uat.mjs — real subprocess enforcement", () => {
     const entries = readdirSync(join(inv.tmpDir, ".gsd", "verify-agentic"));
     assert.equal(entries.length, 1);
     assert.equal(entries[0], relPath.split("/").pop());
+  });
+});
+
+describe("write-self-uat.mjs — aggregate verdict channel (PARTIAL, GATE-01)", () => {
+  function writtenContent(inv: Invocation): string {
+    const wroteLine = inv.stdout.split("\n").find((line) => line.startsWith("WROTE "));
+    assert.ok(wroteLine, `expected a line beginning "WROTE "; got stdout:\n${inv.stdout}`);
+    const relPath = wroteLine!.slice("WROTE ".length).trim();
+    return readFileSync(join(inv.tmpDir, relPath), "utf-8");
+  }
+
+  function assertTwoEntryFrontmatter(written: string, expectedResultFragment: string): void {
+    const firstLine = written.split("\n")[0];
+    assert.equal(firstLine, "---");
+    assert.equal(firstLine.length, 3);
+    const [frontmatterLines] = splitFrontmatter(written);
+    assert.ok(frontmatterLines, `expected a --- fenced frontmatter block; got:\n${written}`);
+    assert.equal(frontmatterLines!.length, 2);
+    assert.ok(
+      frontmatterLines!.some((line) => line.includes(expectedResultFragment)),
+      `expected a frontmatter line naming "${expectedResultFragment}"; got:\n${frontmatterLines!.join("\n")}`,
+    );
+  }
+
+  it("accepts a single PARTIAL result and writes a file whose frontmatter reads has_partial / advisory", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [{ criterion: "renders partial state", verdict: "PARTIAL", evidence: "half the rows rendered" }],
+    });
+    assert.equal(inv.status, 0, `expected exit 0; stderr:\n${inv.stderr}`);
+    const entries = readdirSync(join(inv.tmpDir, ".gsd", "verify-agentic"));
+    assert.equal(entries.length, 1);
+
+    const written = writtenContent(inv);
+    assertTwoEntryFrontmatter(written, "has_partial");
+    assert.equal(extractFrontmatterVerdict(written), "advisory");
+  });
+
+  it("writes has_fail / needs-rework when a PASS/PARTIAL/FAIL mix includes a FAIL with a distinct root cause", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [
+        { criterion: "first", verdict: "PASS", evidence: "e1" },
+        { criterion: "second", verdict: "PARTIAL", evidence: "e2" },
+        {
+          criterion: "third",
+          verdict: "FAIL",
+          evidence: "exit 1",
+          rootCause: "exit 1, stderr: ENOENT — the binary was never built",
+        },
+      ],
+    });
+    assert.equal(inv.status, 0, `expected exit 0; stderr:\n${inv.stderr}`);
+    const written = writtenContent(inv);
+    assertTwoEntryFrontmatter(written, "has_fail");
+    assert.equal(extractFrontmatterVerdict(written), "needs-rework");
+  });
+
+  it("writes all_pass / pass for an all-PASS payload", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [{ criterion: "first", verdict: "PASS", evidence: "e1" }],
+    });
+    assert.equal(inv.status, 0, `expected exit 0; stderr:\n${inv.stderr}`);
+    const written = writtenContent(inv);
+    assertTwoEntryFrontmatter(written, "all_pass");
+    assert.equal(extractFrontmatterVerdict(written), "pass");
+  });
+
+  it("rejects a result whose verdict is the lowercase 'partial' (not PARTIAL) and writes nothing", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [{ criterion: "renders partial state", verdict: "partial", evidence: "half the rows rendered" }],
+    });
+    assertRejectedNoWrite(inv);
+  });
+
+  it("rejects a result whose verdict is the mixed-case 'Partial' (not PARTIAL) and writes nothing", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [{ criterion: "renders partial state", verdict: "Partial", evidence: "half the rows rendered" }],
+    });
+    assertRejectedNoWrite(inv);
+  });
+
+  it("rejects a PARTIAL result with empty-string evidence and writes nothing", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [{ criterion: "renders partial state", verdict: "PARTIAL", evidence: "" }],
+    });
+    assertRejectedNoWrite(inv);
+  });
+
+  it("rejects a PARTIAL result whose gapClosureRoute carries a fenced diff marker and writes nothing", () => {
+    const inv = invoke({
+      target: "S09",
+      surface: "cli",
+      results: [
+        {
+          criterion: "renders partial state",
+          verdict: "PARTIAL",
+          evidence: "half the rows rendered",
+          gapClosureRoute: fencedDiffBlock(),
+        },
+      ],
+    });
+    assertRejectedNoWrite(inv);
   });
 });

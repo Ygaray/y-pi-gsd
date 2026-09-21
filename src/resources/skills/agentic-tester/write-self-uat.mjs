@@ -26,6 +26,12 @@ import {
 
 const REJECTION_PREFIX = "SELF_UAT_ENFORCEMENT_REJECTED:";
 
+// Closed, exactly-cased three-literal accept-set for the per-criterion verdict
+// on the real write path (GATE-01). Mirrors the array-membership idiom
+// `uat-run.ts` line 182 already establishes for this exact literal set — no
+// case normalization, no trimming, no prefix match.
+const SELF_UAT_CRITERION_VERDICTS = Object.freeze(["PASS", "FAIL", "PARTIAL"]);
+
 function reject(reason) {
   process.stderr.write(`${REJECTION_PREFIX} ${reason}\n`);
   process.exit(1);
@@ -75,8 +81,8 @@ for (const result of results) {
     reject("a result has a missing or empty criterion");
   }
   const verdict = result.verdict;
-  if (verdict !== "PASS" && verdict !== "FAIL") {
-    reject(`result for "${criterion}" has a verdict that is not exactly "PASS" or "FAIL"`);
+  if (!SELF_UAT_CRITERION_VERDICTS.includes(verdict)) {
+    reject(`result for "${criterion}" has a verdict that is not exactly "PASS", "FAIL", or "PARTIAL"`);
   }
   if (typeof result.evidence !== "string") {
     reject(`result for "${criterion}" has non-string evidence`);
