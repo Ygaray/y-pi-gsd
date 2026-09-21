@@ -98,6 +98,28 @@ export class SelfUatRenderError extends Error {
 }
 
 /**
+ * Generic, non-diagnostic root-cause phrasing the rubber-stamp guard rejects
+ * even when it does not literally restate the criterion (WR-01). SKILL.md
+ * Step 5 names this exact shape as unacceptable ("a root cause that merely
+ * restates the criterion (e.g. 'criterion failed' or 'the button did not
+ * work as expected')") — the literal-equality check alone does not catch the
+ * second named example, since it is rarely equal to the criterion string
+ * itself. Matched as a case-insensitive substring so a real diagnosis that
+ * happens to also name a broken component (e.g. "the button did not work as
+ * expected: onClick threw TypeError") is unaffected by design — this list is
+ * for phrasing that carries NO diagnostic content on its own, not a ban on a
+ * phrase ever appearing.
+ */
+const GENERIC_ROOT_CAUSE_PHRASES = [
+  "criterion failed",
+  "did not work as expected",
+  "didn't work as expected",
+  "failed as expected",
+  "not working as expected",
+  "test failed",
+] as const;
+
+/**
  * The four rejection guards, run over every result BEFORE any string
  * building so a single bad entry can never produce a half-rendered
  * document:
@@ -107,7 +129,9 @@ export class SelfUatRenderError extends Error {
  *   2. Root-cause presence guard — a FAIL must carry a structurally
  *      non-empty root cause.
  *   3. Rubber-stamp guard — a FAIL's root cause may not merely restate its
- *      criterion (SKILL.md Step 5's named unacceptable shape).
+ *      criterion, verbatim or via one of the generic non-diagnostic phrases
+ *      SKILL.md Step 5 names by example (WR-01), such as "did not work as
+ *      expected".
  *   4. Prose-only guard — neither rootCause nor gapClosureRoute may match
  *      {@link PATCH_MARKER_PATTERN} (D-02): the route is a pointer and a
  *      diagnosis, never a ready-to-apply change.
@@ -134,9 +158,15 @@ function validateResults(results: SelfUatCriterionResult[]): void {
           `renderSelfUat: FAIL for "${result.criterion}" has no root cause — a FAIL cannot render without one`,
         );
       }
-      if (trimmedRootCause.toLowerCase() === result.criterion.trim().toLowerCase()) {
+      const lowerRootCause = trimmedRootCause.toLowerCase();
+      if (lowerRootCause === result.criterion.trim().toLowerCase()) {
         throw new SelfUatRenderError(
           `renderSelfUat: FAIL for "${result.criterion}" has a root cause that merely restates the criterion`,
+        );
+      }
+      if (GENERIC_ROOT_CAUSE_PHRASES.some((phrase) => lowerRootCause.includes(phrase))) {
+        throw new SelfUatRenderError(
+          `renderSelfUat: FAIL for "${result.criterion}" has a root cause that is generic, non-diagnostic phrasing rather than a specific cause`,
         );
       }
     }
