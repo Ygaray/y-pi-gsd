@@ -21,16 +21,17 @@ import {
   renderSelfUat,
   selfUatLogFileName,
   SELF_UAT_LOG_DIR_RELATIVE,
+  SELF_UAT_CRITERION_VERDICTS,
   SelfUatRenderError,
 } from "../../extensions/gsd/verify-agentic-log.ts";
 
 const REJECTION_PREFIX = "SELF_UAT_ENFORCEMENT_REJECTED:";
 
 // Closed, exactly-cased three-literal accept-set for the per-criterion verdict
-// on the real write path (GATE-01). Mirrors the array-membership idiom
-// `uat-run.ts` line 182 already establishes for this exact literal set — no
-// case normalization, no trimming, no prefix match.
-const SELF_UAT_CRITERION_VERDICTS = Object.freeze(["PASS", "FAIL", "PARTIAL"]);
+// on the real write path (GATE-01) — imported from verify-agentic-log.ts (the
+// single source of truth, IN-01) rather than independently redeclared here,
+// so a future addition to the set cannot silently drift between the two
+// files. No case normalization, no trimming, no prefix match.
 
 function reject(reason) {
   process.stderr.write(`${REJECTION_PREFIX} ${reason}\n`);

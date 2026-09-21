@@ -73,10 +73,20 @@ const PATCH_MARKER_SOURCES = [
 ];
 export const PATCH_MARKER_PATTERN = new RegExp(PATCH_MARKER_SOURCES.join("|"), "im");
 
+/**
+ * Closed, exactly-cased three-literal accept-set for the per-criterion
+ * verdict (GATE-01). Exported as the single source of truth so
+ * `write-self-uat.mjs`'s real-write-path validation imports this array
+ * rather than independently redeclaring the same literal set (IN-01) — a
+ * future addition (e.g. a `SKIP` verdict) now only needs to change here.
+ */
+export const SELF_UAT_CRITERION_VERDICTS = ["PASS", "FAIL", "PARTIAL"] as const;
+export type SelfUatCriterionVerdict = (typeof SELF_UAT_CRITERION_VERDICTS)[number];
+
 /** One evaluated criterion's verdict, evidence, and (for FAIL) diagnosis. */
 export interface SelfUatCriterionResult {
   criterion: string;
-  verdict: "PASS" | "FAIL" | "PARTIAL";
+  verdict: SelfUatCriterionVerdict;
   evidence: string;
   rootCause?: string;
   gapClosureRoute?: string;
