@@ -32,6 +32,7 @@ import {
   getGateResults,
   getDbOrNull,
   isDbAvailable,
+  normalizeAcceptanceCriteriaText,
 } from "./gsd-db.js";
 import { createHash } from "node:crypto";
 import type { MilestoneRow, ArtifactRow } from "./db-milestone-artifact-rows.js";
@@ -550,9 +551,9 @@ function renderSlicePlanMarkdown(slice: SliceRow, tasks: TaskRow[], gates: GateR
 
   lines.push("## Must-Haves");
   lines.push("");
-  const successCriteria = meaningfulSection(slice.success_criteria);
-  if (successCriteria) {
-    for (const line of successCriteria.split(/\n+/).map((entry) => entry.trim()).filter(Boolean)) {
+  const successCriteria = normalizeAcceptanceCriteriaText(slice.success_criteria);
+  if (successCriteria.length > 0) {
+    for (const line of successCriteria) {
       lines.push(line.startsWith("-") ? line : `- ${line}`);
     }
   } else {

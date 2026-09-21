@@ -556,3 +556,41 @@ describe("queries-uat-criteria: no data loss across the reconciliation", () => {
     }
   });
 });
+
+describe("queries-uat-criteria: renderer output parity", () => {
+  // Reproduces markdown-renderer.ts's Must-Haves bullet-prefix rule exactly:
+  // an entry that already begins with a hyphen renders unchanged; anything
+  // else gets a hyphen-space prefix. This pins today's rendered output as a
+  // contract BEFORE the renderer is retrofitted to source its lines from
+  // normalizeAcceptanceCriteriaText instead of its own inline parse.
+  function toRenderedLines(input: string): string[] {
+    return normalizeAcceptanceCriteriaText(input).map((entry) =>
+      entry.startsWith("-") ? entry : `- ${entry}`,
+    );
+  }
+
+  test("an already-hyphen-marked line renders unchanged", () => {
+    assert.deepEqual(toRenderedLines("- already marked"), ["- already marked"]);
+  });
+
+  test("an unmarked line gets a hyphen-space prefix", () => {
+    assert.deepEqual(toRenderedLines("unmarked line"), ["- unmarked line"]);
+  });
+
+  test("a hyphen-with-no-space line is left unchanged (not a recognized marker)", () => {
+    assert.deepEqual(toRenderedLines("-tight"), ["-tight"]);
+  });
+
+  test("an asterisk-marker line is prefixed, not treated as already marked", () => {
+    assert.deepEqual(toRenderedLines("* starred"), ["- * starred"]);
+  });
+
+  test("a multi-line value renders one prefixed line per declared entry", () => {
+    assert.deepEqual(toRenderedLines("- one\n\n- two"), ["- one", "- two"]);
+  });
+
+  test("an empty value and a placeholder value both render zero criteria lines", () => {
+    assert.deepEqual(toRenderedLines(""), []);
+    assert.deepEqual(toRenderedLines("Not provided"), []);
+  });
+});
