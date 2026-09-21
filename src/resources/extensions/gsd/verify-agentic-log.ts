@@ -191,6 +191,17 @@ function validateResults(results: SelfUatCriterionResult[]): void {
         `renderSelfUat: gap-closure route for "${result.criterion}" contains a patch/diff marker — the route must stay prose-only`,
       );
     }
+
+    // Gap-closure guard (IN-03): a PASS has no gap to close, so a
+    // gapClosureRoute attached to one is semantically incoherent — it would
+    // render a `gap_closure:` line under a passing criterion. Scoped to PASS
+    // only; FAIL and PARTIAL are exactly the verdicts a gap-closure route is
+    // meaningful for.
+    if (result.verdict === "PASS" && result.gapClosureRoute) {
+      throw new SelfUatRenderError(
+        `renderSelfUat: PASS for "${result.criterion}" carries a gapClosureRoute — gap-closure routing only applies to FAIL/PARTIAL`,
+      );
+    }
   }
 }
 

@@ -276,6 +276,40 @@ describe("renderSelfUat guards", () => {
         ),
       );
     });
+
+    it("throws for the generic non-diagnostic phrase SKILL.md Step 5 names by example, even though it does not equal the criterion (WR-01)", () => {
+      assert.throws(
+        () =>
+          renderSelfUat(
+            [
+              {
+                criterion: "user can click Save",
+                verdict: "FAIL",
+                evidence: "e",
+                rootCause: "the button did not work as expected",
+              },
+            ],
+            BASE_META,
+          ),
+        SelfUatRenderError,
+      );
+    });
+
+    it("does not throw when a specific root cause happens to name a component also referenced by a generic phrase (WR-01)", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat(
+          [
+            {
+              criterion: "user can click Save",
+              verdict: "FAIL",
+              evidence: "e",
+              rootCause: "clicking Save produced no DOM change, console error: TypeError: undefined is not a function",
+            },
+          ],
+          BASE_META,
+        ),
+      );
+    });
   });
 
   describe("prose-only guard (D-02)", () => {
@@ -409,6 +443,48 @@ describe("renderSelfUat guards", () => {
     });
   });
 
+  describe("gap-closure verdict-scope guard (IN-03)", () => {
+    it("throws for a PASS carrying a gapClosureRoute", () => {
+      assert.throws(
+        () =>
+          renderSelfUat(
+            [
+              {
+                criterion: "c",
+                verdict: "PASS",
+                evidence: "e",
+                gapClosureRoute: "Rebuild and re-run; see src/bootstrap.ts",
+              },
+            ],
+            BASE_META,
+          ),
+        SelfUatRenderError,
+      );
+    });
+
+    it("does not throw for a PASS with no gapClosureRoute", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat([{ criterion: "c", verdict: "PASS", evidence: "e" }], BASE_META),
+      );
+    });
+
+    it("does not throw for a PARTIAL carrying a gapClosureRoute", () => {
+      assert.doesNotThrow(() =>
+        renderSelfUat(
+          [
+            {
+              criterion: "c",
+              verdict: "PARTIAL",
+              evidence: "e",
+              gapClosureRoute: "Cover the remaining surfaces; see src/foo.ts",
+            },
+          ],
+          BASE_META,
+        ),
+      );
+    });
+  });
+
   describe("PARTIAL guard semantics (GATE-01, Task 2)", () => {
     it("does not throw for a PARTIAL with rootCause omitted (no inherited root-cause-presence guard)", () => {
       assert.doesNotThrow(() =>
@@ -467,6 +543,14 @@ describe("renderSelfUat guards", () => {
 
     it("renders no root_cause line for a PARTIAL with no rootCause supplied", () => {
       const doc = renderSelfUat([{ criterion: "c", verdict: "PARTIAL", evidence: "e" }], BASE_META);
+      assert.doesNotMatch(doc, /^root_cause: /m);
+    });
+
+    it("renders no root_cause line for a PARTIAL with a whitespace-only rootCause (IN-02)", () => {
+      const doc = renderSelfUat(
+        [{ criterion: "c", verdict: "PARTIAL", evidence: "e", rootCause: "   " }],
+        BASE_META,
+      );
       assert.doesNotMatch(doc, /^root_cause: /m);
     });
 
