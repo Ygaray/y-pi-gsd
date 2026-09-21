@@ -156,6 +156,17 @@ Four facts about this write:
    shape only, because a halt carries no per-criterion results for the guards to validate against
    — that halt-writing behavior is unchanged from before this plan.
 
+For a completed (non-halt) run, the written document opens with a `---`-fenced frontmatter block
+carrying a `result` key and a `verdict` key. Both are computed by `renderSelfUat` from the
+per-criterion grades you supply — you do not write or supply either value yourself, and there is no
+payload field for either. The `result` value is one of the four closed outcomes `all_pass`,
+`has_fail`, `has_partial`, or `no_criteria`; the corresponding `verdict` value is one of the three
+closed outcomes `pass`, `needs-rework`, or `advisory`. This frontmatter channel is a machine-readable
+summary for downstream gates, not a substitute for what you report to the dispatching turn — you
+still report the full per-criterion evidence, root cause, and gap-closure routing exactly as Steps 4
+and 5 produced them; `prompts/verify-agentic.md` already forbids summarizing a FAIL down to a bare
+pass/fail flag, and this frontmatter channel does not change that.
+
 For a completed run, construct your typed payload — `target`, `surface`, and a `results` array of
 `{criterion, verdict, evidence, rootCause?, gapClosureRoute?}` entries, one per criterion, in the
 same shape the log template below documents — and invoke it, via your `bash` tool, as:
@@ -186,10 +197,13 @@ an empty evidence field is visibly a defect rather than a silent one:
 
 ```markdown
 ### {N}. {criterion text}
-verdict: PASS | FAIL
+verdict: PASS | FAIL | PARTIAL
 evidence: {what you actually observed this run — command output, DOM state, device output; never empty}
 root_cause: {FAIL only — observed vs expected, plus proximate cause}
 ```
+
+A PARTIAL grade carries evidence like any other grade, and carries a root cause only when you
+actually have one to give — PARTIAL is not a way to avoid diagnosing a genuine FAIL.
 
 **Exit condition:** the log path is written and reported back to the dispatching turn.
 
@@ -224,4 +238,5 @@ root_cause: {FAIL only — observed vs expected, plus proximate cause}
 - [ ] Every FAIL requires a non-empty root cause: the observed output versus the expected output, plus the proximate cause.
 - [ ] The gap-closure route is prose only: never a patch, diff, or file-edit instruction.
 - [ ] The SELF-UAT log write target is `.gsd/verify-agentic/`, the only location this run may write to.
+- [ ] A completed run's log carries the aggregate `result`/`verdict` frontmatter channel, computed by the renderer from the graded per-criterion results, never authored or supplied by the tester.
 </success_criteria>

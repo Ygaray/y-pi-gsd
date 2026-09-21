@@ -55,7 +55,7 @@ A per-criterion verdict table with an evidence column:
 
 | Criterion | Verdict | Evidence |
 |-----------|---------|----------|
-| ... | PASS / FAIL | what you actually observed this run — command output, DOM state, device output |
+| ... | PASS / FAIL / PARTIAL | what you actually observed this run — command output, DOM state, device output |
 
 Followed by:
 
