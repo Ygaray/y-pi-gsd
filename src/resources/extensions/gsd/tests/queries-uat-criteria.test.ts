@@ -85,3 +85,105 @@ describe("queries-uat-criteria", () => {
     assert.deepEqual(normalizeAcceptanceCriteriaText("-tight"), ["-tight"]);
   });
 });
+
+describe("queries-uat-criteria: no-criteria and placeholder cases", () => {
+  test("a slice with no planning.successCriteria (schema default '') yields criteria:[], hasCriteria:false, non-null", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, []);
+      assert.equal(result!.hasCriteria, false);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  for (const placeholder of ["Not provided", "none.", "N/A", "{{success_criteria}}"]) {
+    test(`placeholder value "${placeholder}" yields criteria:[] and hasCriteria:false`, () => {
+      openDatabase(":memory:");
+      try {
+        insertMilestone({ id: "M001" });
+        insertSlice({
+          id: "S01",
+          milestoneId: "M001",
+          status: "pending",
+          planning: { successCriteria: placeholder },
+        });
+
+        const result = getSliceAcceptanceCriteria("M001", "S01");
+
+        assert.notEqual(result, null);
+        assert.deepEqual(result!.criteria, []);
+        assert.equal(result!.hasCriteria, false);
+      } finally {
+        closeDatabase();
+      }
+    });
+  }
+
+  test("blank lines between declared criteria are collapsed, not emitted as empty criteria", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "pending",
+        planning: { successCriteria: "- real one\n\n\n- real two" },
+      });
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.equal(result!.criteria.length, 2);
+      assert.deepEqual(result!.criteria, ["real one", "real two"]);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("populated full_uat_md with default success_criteria still yields hasCriteria:false — evidence never manufactures a criterion", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+      setSliceUatMd("M001", "S01", "<sentinel-completion-evidence>");
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.equal(result!.hasCriteria, false);
+      assert.deepEqual(result!.criteria, []);
+      assert.equal(result!.completionEvidence, "<sentinel-completion-evidence>");
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a five-declared-line value returns an array of length exactly 5, with each line's text at its stored index", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      const lines = ["- alpha line", "- bravo line", "- charlie line", "- delta line", "- echo line"];
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "pending",
+        planning: { successCriteria: lines.join("\n") },
+      });
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.equal(result!.criteria.length, 5);
+      assert.deepEqual(result!.criteria, ["alpha line", "bravo line", "charlie line", "delta line", "echo line"]);
+    } finally {
+      closeDatabase();
+    }
+  });
+});
