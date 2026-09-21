@@ -6,8 +6,10 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   closeDatabase,
+  getMilestone,
   getMilestoneSlices,
   getMilestoneUatCriteriaState,
+  getSlice,
   getSliceAcceptanceCriteria,
   getTaskAcceptanceCriteria,
   insertMilestone,
@@ -418,6 +420,137 @@ describe("queries-uat-criteria: task inheritance and cross-level shape coherence
       // Negative: the task must NOT be wired to the milestone's vision-level
       // criteria — a future regression that accidentally does this must fail here.
       assert.notDeepEqual(taskResult!.criteria, milestoneResult!.criteria);
+    } finally {
+      closeDatabase();
+    }
+  });
+});
+
+describe("queries-uat-criteria: no data loss across the reconciliation", () => {
+  test("a five-entry stored milestone success_criteria array reads back through getMilestoneUatCriteriaState in order, identical text", () => {
+    openDatabase(":memory:");
+    try {
+      const fiveEntries = [
+        "milestone criterion one",
+        "milestone criterion two",
+        "milestone criterion three",
+        "milestone criterion four",
+        "milestone criterion five",
+      ];
+      insertMilestone({ id: "M001", planning: { successCriteria: fiveEntries } });
+
+      const result = getMilestoneUatCriteriaState("M001");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, fiveEntries);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a five-line stored slice success_criteria string reads back through getSliceAcceptanceCriteria in order, identical text after marker stripping", () => {
+    openDatabase(":memory:");
+    try {
+      const fiveLines = [
+        "- slice line one",
+        "- slice line two",
+        "- slice line three",
+        "- slice line four",
+        "- slice line five",
+      ];
+      insertMilestone({ id: "M001" });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "pending",
+        planning: { successCriteria: fiveLines.join("\n") },
+      });
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, [
+        "slice line one",
+        "slice line two",
+        "slice line three",
+        "slice line four",
+        "slice line five",
+      ]);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a JSON-looking slice success_criteria value reads back as literal text lines, never parsed, never throws", () => {
+    openDatabase(":memory:");
+    try {
+      const jsonLookingValue = '["not", "actually", "parsed"]';
+      insertMilestone({ id: "M001" });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "pending",
+        planning: { successCriteria: jsonLookingValue },
+      });
+
+      assert.doesNotThrow(() => getSliceAcceptanceCriteria("M001", "S01"));
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, [jsonLookingValue]);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a full_uat_md value with headings, a fenced block, and a trailing newline reads back byte-identical through completionEvidence", () => {
+    openDatabase(":memory:");
+    try {
+      const evidenceBlob = "## Evidence\n\nRan the app end to end.\n\n```\ncode block contents\n```\n";
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+      setSliceUatMd("M001", "S01", evidenceBlob);
+
+      const result = getSliceAcceptanceCriteria("M001", "S01");
+
+      assert.notEqual(result, null);
+      assert.equal(result!.completionEvidence, evidenceBlob);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("reading through all three new accessors alters no stored byte — raw rows re-read identically afterward", () => {
+    openDatabase(":memory:");
+    try {
+      const evidenceBlob = "## Evidence\n\nRan the app.\n";
+      insertMilestone({ id: "M001", planning: { successCriteria: ["a", "b", "c"] } });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "complete",
+        planning: { successCriteria: "- one\n- two" },
+      });
+      insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+      setSliceUatMd("M001", "S01", evidenceBlob);
+
+      const sliceBefore = getSlice("M001", "S01");
+      const milestoneBefore = getMilestone("M001");
+      const sliceSuccessCriteriaBefore = sliceBefore!.success_criteria;
+      const sliceFullUatMdBefore = sliceBefore!.full_uat_md;
+      const milestoneSuccessCriteriaBefore = milestoneBefore!.success_criteria;
+
+      // Exercise all three new accessors.
+      getMilestoneUatCriteriaState("M001");
+      getSliceAcceptanceCriteria("M001", "S01");
+      getTaskAcceptanceCriteria("M001", "S01", "T01");
+
+      const sliceAfter = getSlice("M001", "S01");
+      const milestoneAfter = getMilestone("M001");
+
+      assert.equal(sliceAfter!.success_criteria, sliceSuccessCriteriaBefore);
+      assert.equal(sliceAfter!.full_uat_md, sliceFullUatMdBefore);
+      assert.deepEqual(milestoneAfter!.success_criteria, milestoneSuccessCriteriaBefore);
     } finally {
       closeDatabase();
     }
