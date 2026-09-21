@@ -6,6 +6,8 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   closeDatabase,
+  getMilestoneSlices,
+  getMilestoneUatCriteriaState,
   getSliceAcceptanceCriteria,
   insertMilestone,
   insertSlice,
@@ -182,6 +184,123 @@ describe("queries-uat-criteria: no-criteria and placeholder cases", () => {
       assert.notEqual(result, null);
       assert.equal(result!.criteria.length, 5);
       assert.deepEqual(result!.criteria, ["alpha line", "bravo line", "charlie line", "delta line", "echo line"]);
+    } finally {
+      closeDatabase();
+    }
+  });
+});
+
+describe("queries-uat-criteria: milestone-level state", () => {
+  test("returns the milestone's own criteria, hasCriteria, and sliceCount from three seeded slices", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({
+        id: "M002",
+        planning: { successCriteria: ["vision criterion A", "vision criterion B"] },
+      });
+      insertSlice({ id: "S01", milestoneId: "M002", status: "complete", sequence: 1 });
+      insertSlice({ id: "S02", milestoneId: "M002", status: "pending", sequence: 2 });
+      insertSlice({ id: "S03", milestoneId: "M002", status: "pending", sequence: 3 });
+
+      const result = getMilestoneUatCriteriaState("M002");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, ["vision criterion A", "vision criterion B"]);
+      assert.equal(result!.hasCriteria, true);
+      assert.equal(result!.sliceCount, 3);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("slices roll-up is ordered exactly as getMilestoneSlices orders it, and each entry matches getSliceAcceptanceCriteria", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M002", planning: { successCriteria: ["vision criterion A"] } });
+      insertSlice({
+        id: "S03",
+        milestoneId: "M002",
+        status: "pending",
+        sequence: 3,
+        planning: { successCriteria: "- third slice criterion" },
+      });
+      insertSlice({ id: "S01", milestoneId: "M002", status: "complete", sequence: 1 });
+      insertSlice({
+        id: "S02",
+        milestoneId: "M002",
+        status: "pending",
+        sequence: 2,
+        planning: { successCriteria: "- second slice criterion" },
+      });
+
+      const result = getMilestoneUatCriteriaState("M002");
+      const expectedOrder = getMilestoneSlices("M002").map((slice) => slice.id);
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.slices.map((slice) => slice.sliceId), expectedOrder);
+      for (const entry of result!.slices) {
+        const direct = getSliceAcceptanceCriteria("M002", entry.sliceId);
+        assert.deepEqual(entry.criteria, direct!.criteria);
+        assert.equal(entry.status, direct!.status);
+        assert.equal(entry.hasCriteria, direct!.hasCriteria);
+      }
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("slicesWithCriteria counts exactly the slices that declared criteria", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M002" });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M002",
+        status: "complete",
+        sequence: 1,
+        planning: { successCriteria: "- one" },
+      });
+      insertSlice({
+        id: "S02",
+        milestoneId: "M002",
+        status: "pending",
+        sequence: 2,
+        planning: { successCriteria: "- two" },
+      });
+      insertSlice({ id: "S03", milestoneId: "M002", status: "pending", sequence: 3 });
+
+      const result = getMilestoneUatCriteriaState("M002");
+
+      assert.notEqual(result, null);
+      assert.equal(result!.slicesWithCriteria, 2);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a milestone with zero declared criteria and zero slices returns a non-null all-empty state", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M002" });
+
+      const result = getMilestoneUatCriteriaState("M002");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, []);
+      assert.equal(result!.hasCriteria, false);
+      assert.equal(result!.sliceCount, 0);
+      assert.equal(result!.slicesWithCriteria, 0);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("returns null for an unknown milestoneId", () => {
+    openDatabase(":memory:");
+    try {
+      const result = getMilestoneUatCriteriaState("no-such-milestone");
+
+      assert.equal(result, null);
     } finally {
       closeDatabase();
     }

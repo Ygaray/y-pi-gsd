@@ -1605,3 +1605,51 @@ export function getSliceAcceptanceCriteria(milestoneId: string, sliceId: string)
   if (!row) return null;
   return sliceAcceptanceCriteriaFromRow(row);
 }
+
+/**
+ * Milestone-level acceptance-criteria/UAT state, composing the milestone's
+ * own declared criteria with a per-slice criteria/status roll-up. Every
+ * entry in `slices` is a `SliceAcceptanceCriteria`, so a caller never has to
+ * reach past this accessor back into `getMilestoneSlices()` for information
+ * this shape is supposed to already provide.
+ */
+export interface MilestoneUatCriteriaState extends AcceptanceCriteria {
+  milestoneId: string;
+  slices: SliceAcceptanceCriteria[];
+  sliceCount: number;
+  slicesWithCriteria: number;
+}
+
+/**
+ * A milestone's UAT/criteria state in ONE call (ROADMAP Phase 10 Success
+ * Criterion 3 — the exact input Phase 13's Gate-2 ledger needs). SELECT-only:
+ * composes `getMilestone` and `getMilestoneSlices` inside one
+ * `readTransaction` so the milestone's own criteria and the slice roll-up
+ * describe the same database snapshot. Returns `null` when no milestone row
+ * exists for `milestoneId`.
+ *
+ * `milestones.success_criteria` arrives from `rowToMilestone` already parsed
+ * as a `string[]` — each entry is still run through
+ * `normalizeAcceptanceCriteriaText` (and flattened) so a milestone-declared
+ * line gets exactly the same trimming/placeholder/marker handling a
+ * slice-declared line gets. That shared normalization is what makes "one
+ * consistent shape" (Success Criterion 1) true rather than merely asserted.
+ */
+export function getMilestoneUatCriteriaState(milestoneId: string): MilestoneUatCriteriaState | null {
+  if (!getDbOrNull()) return null;
+  return readTransaction(() => {
+    const milestone = getMilestone(milestoneId);
+    if (!milestone) return null;
+    const sliceRows = getMilestoneSlices(milestoneId);
+    const slices = sliceRows.map(sliceAcceptanceCriteriaFromRow);
+    const criteria = milestone.success_criteria.flatMap((entry) => normalizeAcceptanceCriteriaText(entry));
+    return {
+      milestoneId,
+      criteria,
+      hasCriteria: criteria.length > 0,
+      slices,
+      sliceCount: slices.length,
+      slicesWithCriteria: slices.filter((slice) => slice.hasCriteria).length,
+    };
+  });
+}
