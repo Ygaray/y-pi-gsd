@@ -1653,3 +1653,47 @@ export function getMilestoneUatCriteriaState(milestoneId: string): MilestoneUatC
     };
   });
 }
+
+/**
+ * Task-level acceptance criteria, derived by documented inheritance from the
+ * task's own slice (D-02: no task-level acceptance-criteria column exists,
+ * or is added, anywhere). A task's `criteria` ARE its slice's `criteria` —
+ * `inheritedFromSliceId` records that provenance explicitly so a caller can
+ * never mistake an inherited criterion for one the task declared itself.
+ */
+export interface TaskAcceptanceCriteria extends AcceptanceCriteria {
+  milestoneId: string;
+  sliceId: string;
+  taskId: string;
+  inheritedFromSliceId: string;
+}
+
+/**
+ * A task's acceptance criteria in ONE call, inherited from its slice (D-02).
+ * Returns `null` when the named task row does not exist for
+ * `(milestoneId, sliceId, taskId)` — confirmed via `getTask` first, since
+ * without that guard this function would happily report a slice's criteria
+ * for a task that is not in the database. Also returns `null` when the
+ * slice itself is missing. Reads nothing from the task row beyond its
+ * existence: `TaskRow` carries no criteria field of any kind, and this
+ * accessor must not introduce a second, task-scoped source of criteria
+ * truth.
+ */
+export function getTaskAcceptanceCriteria(
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): TaskAcceptanceCriteria | null {
+  const task = getTask(milestoneId, sliceId, taskId);
+  if (!task) return null;
+  const slice = getSliceAcceptanceCriteria(milestoneId, sliceId);
+  if (!slice) return null;
+  return {
+    milestoneId,
+    sliceId,
+    taskId,
+    criteria: slice.criteria,
+    hasCriteria: slice.hasCriteria,
+    inheritedFromSliceId: slice.sliceId,
+  };
+}

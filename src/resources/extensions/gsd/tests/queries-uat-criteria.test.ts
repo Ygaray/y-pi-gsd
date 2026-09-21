@@ -9,8 +9,10 @@ import {
   getMilestoneSlices,
   getMilestoneUatCriteriaState,
   getSliceAcceptanceCriteria,
+  getTaskAcceptanceCriteria,
   insertMilestone,
   insertSlice,
+  insertTask,
   normalizeAcceptanceCriteriaText,
   openDatabase,
   setSliceUatMd,
@@ -301,6 +303,121 @@ describe("queries-uat-criteria: milestone-level state", () => {
       const result = getMilestoneUatCriteriaState("no-such-milestone");
 
       assert.equal(result, null);
+    } finally {
+      closeDatabase();
+    }
+  });
+});
+
+describe("queries-uat-criteria: task inheritance and cross-level shape coherence", () => {
+  test("a task in a slice declaring two criteria returns those same criteria, hasCriteria:true, inheritedFromSliceId", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "complete",
+        planning: { successCriteria: "- must handle X\n- must handle Y" },
+      });
+      insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+
+      const result = getTaskAcceptanceCriteria("M001", "S01", "T01");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, ["must handle X", "must handle Y"]);
+      assert.equal(result!.hasCriteria, true);
+      assert.equal(result!.inheritedFromSliceId, "S01");
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a task in a slice declaring no criteria returns a non-null object with criteria:[] and hasCriteria:false", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+      insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
+
+      const result = getTaskAcceptanceCriteria("M001", "S01", "T01");
+
+      assert.notEqual(result, null);
+      assert.deepEqual(result!.criteria, []);
+      assert.equal(result!.hasCriteria, false);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("an unknown taskId in a real slice returns null", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+
+      const result = getTaskAcceptanceCriteria("M001", "S01", "does-not-exist");
+
+      assert.equal(result, null);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("a real taskId paired with an unknown sliceId returns null", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001" });
+      insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+      insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
+
+      const result = getTaskAcceptanceCriteria("M001", "does-not-exist", "T01");
+
+      assert.equal(result, null);
+    } finally {
+      closeDatabase();
+    }
+  });
+
+  test("cross-level shape coherence: milestone, slice, and task all expose criteria/hasCriteria; task's criteria matches its slice, not the milestone", () => {
+    openDatabase(":memory:");
+    try {
+      insertMilestone({ id: "M001", planning: { successCriteria: ["milestone-level vision criterion"] } });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "complete",
+        sequence: 1,
+        planning: { successCriteria: "- slice-level criterion one\n- slice-level criterion two" },
+      });
+      insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+
+      const milestoneResult = getMilestoneUatCriteriaState("M001");
+      const sliceResult = getSliceAcceptanceCriteria("M001", "S01");
+      const taskResult = getTaskAcceptanceCriteria("M001", "S01", "T01");
+
+      assert.notEqual(milestoneResult, null);
+      assert.notEqual(sliceResult, null);
+      assert.notEqual(taskResult, null);
+
+      // Positive: all three levels expose the shared shape with matching types.
+      assert.equal(Array.isArray(milestoneResult!.criteria), true);
+      assert.equal(typeof milestoneResult!.hasCriteria, "boolean");
+      assert.equal(Array.isArray(sliceResult!.criteria), true);
+      assert.equal(typeof sliceResult!.hasCriteria, "boolean");
+      assert.equal(Array.isArray(taskResult!.criteria), true);
+      assert.equal(typeof taskResult!.hasCriteria, "boolean");
+
+      // The task's criteria equal its slice's criteria verbatim, and that same
+      // slice entry appears in the milestone's roll-up.
+      assert.deepEqual(taskResult!.criteria, sliceResult!.criteria);
+      const milestoneSliceEntry = milestoneResult!.slices.find((slice) => slice.sliceId === "S01");
+      assert.notEqual(milestoneSliceEntry, undefined);
+      assert.deepEqual(milestoneSliceEntry!.criteria, sliceResult!.criteria);
+
+      // Negative: the task must NOT be wired to the milestone's vision-level
+      // criteria — a future regression that accidentally does this must fail here.
+      assert.notDeepEqual(taskResult!.criteria, milestoneResult!.criteria);
     } finally {
       closeDatabase();
     }
