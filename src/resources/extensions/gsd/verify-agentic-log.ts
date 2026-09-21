@@ -24,6 +24,38 @@ export const SELF_UAT_LOG_DIR_RELATIVE = ".gsd/verify-agentic/";
 export const SELF_UAT_SUFFIX = "-SELF-UAT.md";
 
 /**
+ * Closed set of aggregate outcomes `aggregateSelfUat` can derive from a
+ * graded `SelfUatCriterionResult[]` (GATE-01). `no_criteria` is distinct
+ * from `all_pass` by construction (D-02) — a run that checked nothing can
+ * never render as a run where everything passed.
+ */
+export const SELF_UAT_RESULTS = ["all_pass", "has_fail", "has_partial", "no_criteria"] as const;
+export type SelfUatResult = (typeof SELF_UAT_RESULTS)[number];
+
+/** Check whether a string is a valid {@link SelfUatResult} aggregate. */
+export function isSelfUatResult(value: string): value is SelfUatResult {
+  return (SELF_UAT_RESULTS as readonly string[]).includes(value);
+}
+
+/**
+ * Closed set of hook-facing verdicts `aggregateSelfUat` can derive. This is
+ * the enum Phase 11's blocking gate and Phase 13's Gate-2 ledger route on.
+ */
+export const SELF_UAT_VERDICTS = ["pass", "needs-rework", "advisory"] as const;
+export type SelfUatVerdict = (typeof SELF_UAT_VERDICTS)[number];
+
+/** Check whether a string is a valid {@link SelfUatVerdict}. */
+export function isSelfUatVerdict(value: string): value is SelfUatVerdict {
+  return (SELF_UAT_VERDICTS as readonly string[]).includes(value);
+}
+
+/** The aggregate outcome `aggregateSelfUat` derives from graded per-criterion results. */
+export interface SelfUatAggregate {
+  result: SelfUatResult;
+  verdict: SelfUatVerdict;
+}
+
+/**
  * Matches any patch/diff marker that would let a rendered gap-closure route
  * or root cause read as a ready-to-apply change (D-02). Built from an array
  * of alternation sources so each marker is individually readable and
@@ -44,7 +76,7 @@ export const PATCH_MARKER_PATTERN = new RegExp(PATCH_MARKER_SOURCES.join("|"), "
 /** One evaluated criterion's verdict, evidence, and (for FAIL) diagnosis. */
 export interface SelfUatCriterionResult {
   criterion: string;
-  verdict: "PASS" | "FAIL";
+  verdict: "PASS" | "FAIL" | "PARTIAL";
   evidence: string;
   rootCause?: string;
   gapClosureRoute?: string;
@@ -118,6 +150,21 @@ function validateResults(results: SelfUatCriterionResult[]): void {
 }
 
 /**
+ * Derive the aggregate outcome from graded per-criterion results (GATE-01).
+ * This is the ONLY producer of {@link SelfUatResult} / {@link SelfUatVerdict}
+ * values inside this module — `renderSelfUat` takes no aggregate parameter,
+ * so a caller has no channel to self-declare its own outcome (T-09-04).
+ */
+export function aggregateSelfUat(results: SelfUatCriterionResult[]): SelfUatAggregate {
+  if (results.length > 0 && results.every((result) => result.verdict === "PASS")) {
+    return { result: "all_pass", verdict: "pass" };
+  }
+  // Safe default until the remaining branches (FAIL precedence, PARTIAL,
+  // zero-criteria) are wired in: never let an unhandled case read as a pass.
+  return { result: "has_fail", verdict: "needs-rework" };
+}
+
+/**
  * Render the SELF-UAT log document for a completed verification run.
  *
  * Pure function: takes plain data, returns a markdown string. Performs no
@@ -125,7 +172,9 @@ function validateResults(results: SelfUatCriterionResult[]): void {
  * inside the spawned `agentic-tester` child, never here (SKILL.md Step 6).
  *
  * Guards (Task 2) run over every result before any string building, so a
- * single bad entry can never produce a half-rendered document.
+ * single bad entry can never produce a half-rendered document. The rendered
+ * document opens with a `---`-fenced frontmatter block naming the aggregate
+ * `result`/`verdict` derived by {@link aggregateSelfUat} (GATE-01).
  */
 export function renderSelfUat(
   results: SelfUatCriterionResult[],
@@ -133,7 +182,14 @@ export function renderSelfUat(
 ): string {
   validateResults(results);
 
+  const aggregate = aggregateSelfUat(results);
+
   const lines: string[] = [];
+  lines.push("---");
+  lines.push(`result: ${aggregate.result}`);
+  lines.push(`verdict: ${aggregate.verdict}`);
+  lines.push("---");
+  lines.push("");
   lines.push(`# SELF-UAT — ${meta.target}`);
   lines.push("");
   lines.push(`target: ${meta.target}`);

@@ -15,11 +15,16 @@ import {
   SELF_UAT_LOG_DIR_RELATIVE,
   SELF_UAT_SUFFIX,
   SelfUatRenderError,
+  aggregateSelfUat,
+  isSelfUatResult,
+  isSelfUatVerdict,
   renderSelfUat,
   selfUatLogFileName,
   type SelfUatCriterionResult,
   type SelfUatMeta,
 } from "../verify-agentic-log.js";
+import { splitFrontmatter } from "../../shared/frontmatter.js";
+import { extractFrontmatterVerdict } from "../verdict-parser.js";
 
 const BASE_META: SelfUatMeta = {
   target: "S07",
@@ -438,5 +443,75 @@ describe("SELF_UAT_LOG_DIR_RELATIVE / SELF_UAT_SUFFIX", () => {
 
   it("SELF_UAT_SUFFIX is the literal -SELF-UAT.md suffix", () => {
     assert.equal(SELF_UAT_SUFFIX, "-SELF-UAT.md");
+  });
+});
+
+// ─── Frontmatter verdict channel (GATE-01, Task 1) ─────────────────────────────
+
+// Golden body captured from the pre-Phase-9 renderer for a three-criterion
+// (PASS, FAIL-with-rootCause-and-gapClosure, PASS) fixture with BASE_META's
+// sibling values below. SC5 pins the post-change body to this exact string.
+const THREE_CRITERION_GOLDEN_BODY =
+  "# SELF-UAT — S07\n\ntarget: S07\nsurface: cli\ntimestamp: 2026-09-20T12:00:00.000Z\nlog location: .gsd/verify-agentic/\n\n### 1. first check\nverdict: PASS\nevidence: exit 0, stdout: ok\n\n### 2. second check\nverdict: FAIL\nevidence: exit 1, stderr: ENOENT\nroot_cause: exit 1, stderr: ENOENT — the binary was never built\ngap_closure: Rebuild and re-run; see src/bootstrap.ts\n\n### 3. third check\nverdict: PASS\nevidence: exit 0, stdout: ok again\n";
+
+const THREE_CRITERION_RESULTS: SelfUatCriterionResult[] = [
+  { criterion: "first check", verdict: "PASS", evidence: "exit 0, stdout: ok" },
+  {
+    criterion: "second check",
+    verdict: "FAIL",
+    evidence: "exit 1, stderr: ENOENT",
+    rootCause: "exit 1, stderr: ENOENT — the binary was never built",
+    gapClosureRoute: "Rebuild and re-run; see src/bootstrap.ts",
+  },
+  { criterion: "third check", verdict: "PASS", evidence: "exit 0, stdout: ok again" },
+];
+
+describe("aggregateSelfUat", () => {
+  it("returns { result: all_pass, verdict: pass } for a single PASS result", () => {
+    assert.deepEqual(
+      aggregateSelfUat([{ criterion: "c", verdict: "PASS", evidence: "e" }]),
+      { result: "all_pass", verdict: "pass" },
+    );
+  });
+});
+
+describe("isSelfUatResult / isSelfUatVerdict", () => {
+  it("isSelfUatVerdict accepts pass and rejects passed", () => {
+    assert.equal(isSelfUatVerdict("pass"), true);
+    assert.equal(isSelfUatVerdict("passed"), false);
+  });
+
+  it("isSelfUatResult accepts all_pass and rejects allpass", () => {
+    assert.equal(isSelfUatResult("all_pass"), true);
+    assert.equal(isSelfUatResult("allpass"), false);
+  });
+});
+
+describe("renderSelfUat frontmatter channel", () => {
+  it("begins with a literal --- line with no trailing space", () => {
+    const doc = renderSelfUat([{ criterion: "c", verdict: "PASS", evidence: "e" }], BASE_META);
+    const firstLine = doc.split("\n")[0];
+    assert.equal(firstLine, "---");
+    assert.equal(firstLine.length, 3);
+  });
+
+  it("carries a splitFrontmatter-parseable block with exactly two lines naming result and verdict", () => {
+    const doc = renderSelfUat([{ criterion: "c", verdict: "PASS", evidence: "e" }], BASE_META);
+    const [frontmatterLines] = splitFrontmatter(doc);
+    assert.ok(frontmatterLines !== null);
+    assert.equal(frontmatterLines!.length, 2);
+    assert.match(frontmatterLines![0], /^result:/);
+    assert.match(frontmatterLines![1], /^verdict:/);
+  });
+
+  it("extractFrontmatterVerdict reads pass for an all-PASS render", () => {
+    const doc = renderSelfUat([{ criterion: "c", verdict: "PASS", evidence: "e" }], BASE_META);
+    assert.equal(extractFrontmatterVerdict(doc), "pass");
+  });
+
+  it("preserves the pre-Phase-9 markdown body byte-identically below the fence", () => {
+    const doc = renderSelfUat(THREE_CRITERION_RESULTS, BASE_META);
+    const [, body] = splitFrontmatter(doc);
+    assert.equal(body, THREE_CRITERION_GOLDEN_BODY);
   });
 });
