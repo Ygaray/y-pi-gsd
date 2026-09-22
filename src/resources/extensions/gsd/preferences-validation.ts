@@ -32,6 +32,16 @@ import {
   isReadOnlyPlanningDispatchAgent,
 } from "./planning-subagent-registry.js";
 
+/**
+ * Mirrors `AGENTIC_GATE1_HOOK_NAME` in `preferences.ts` (the reserved name
+ * for the code-synthesized Phase 11 blocking Gate-1 hook). Duplicated as a
+ * literal rather than imported: `preferences.ts` already imports
+ * `validatePreferences` from this file, so importing back would create a
+ * circular module dependency. Keep this literal in sync if the reserved name
+ * ever changes (WR-01).
+ */
+const RESERVED_AGENTIC_GATE1_HOOK_NAME = "agentic-gate1";
+
 const VALID_TOKEN_PROFILES = new Set<TokenProfile>(["budget", "balanced", "quality", "burn-max"]);
 const VALID_THINKING_LEVELS = new Set<GSDThinkingLevel>([
   "off",
@@ -678,6 +688,10 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
       if (seenNames.has(name)) {
         errors.push(`duplicate post_unit_hooks name: ${name}`);
+        continue;
+      }
+      if (name === RESERVED_AGENTIC_GATE1_HOOK_NAME) {
+        errors.push(`post_unit_hooks "${name}" is a reserved name (Phase 11 agentic-gate1); choose a different name`);
         continue;
       }
       const after = normalizeStringArray(hook.after);

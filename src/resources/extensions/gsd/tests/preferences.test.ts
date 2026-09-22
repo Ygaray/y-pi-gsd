@@ -864,6 +864,20 @@ test("post-unit hook criticality and on_block validation", () => {
   assert.match(invalidAction.errors.join("\n"), /invalid on_block action/);
 });
 
+test("WR-01: post_unit_hooks rejects the reserved 'agentic-gate1' name, never letting a user-authored hook be silently hijacked", () => {
+  const { preferences, errors } = validatePreferences({
+    post_unit_hooks: [{
+      name: "agentic-gate1",
+      after: ["complete-slice"],
+      prompt: "Run my own custom check",
+      criticality: "blocking",
+      artifact: "MY-CHECK.md",
+    }],
+  } as any);
+  assert.match(errors.join("\n"), /post_unit_hooks "agentic-gate1" is a reserved name/);
+  assert.equal(preferences.post_unit_hooks, undefined, "the reserved-name hook must not survive validation");
+});
+
 test("pre-dispatch hook action validation via validatePreferences", () => {
   const base = { name: "h", before: ["execute-task"] };
 
