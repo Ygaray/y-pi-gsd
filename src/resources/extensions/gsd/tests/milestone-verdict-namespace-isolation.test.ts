@@ -243,6 +243,66 @@ test("the certify/audit registry additions do not widen or move validate-milesto
   assert.equal(getOwnerTurn("AUD01"), "audit-milestone");
 });
 
+// ─── WR-02 regression: a legacy (pre-D-01, unprefixed) required
+// validate-milestone criterion is neither silently demoted by a certify run
+// NOR silently required for certify to cover ────────────────────────────
+
+function milestoneLifecycleId(): string {
+  const found = rows(`
+    SELECT lifecycle_id FROM workflow_item_lifecycles
+    WHERE item_kind = 'milestone' AND milestone_id = 'M001' AND slice_id IS NULL AND task_id IS NULL
+  `);
+  return String(found[0]!["lifecycle_id"]);
+}
+
+/** Seed a bare/legacy (unprefixed) required technical criterion directly —
+ * the shape a pre-Phase-14 validate-milestone run would have left behind,
+ * before the "<namespace>:" convention existed. */
+function insertLegacyBareCriterion(): void {
+  executeAtFence("test.legacy-criterion.fixture", "fixture/namespace/legacy-criterion", (context) => {
+    db().prepare(`
+      INSERT INTO workflow_acceptance_criteria (
+        criterion_id, criterion_key, project_id, lifecycle_id,
+        criterion_kind, evidence_class, required, description, created_at,
+        operation_id, project_revision, authority_epoch
+      ) VALUES (
+        'criterion-legacy-bare', 'legacy-contract', :project_id, :lifecycle_id,
+        'technical', 'artifact', 1, 'Pre-D-01 legacy contract criterion.', :created_at,
+        :operation_id, :project_revision, :authority_epoch
+      )
+    `).run({
+      ":project_id": context.projectId,
+      ":lifecycle_id": milestoneLifecycleId(),
+      ":created_at": "2026-01-01T00:00:00.000Z",
+      ":operation_id": context.operationId,
+      ":project_revision": context.resultingRevision,
+      ":authority_epoch": context.resultingAuthorityEpoch,
+    });
+  });
+}
+
+test("a legacy bare-keyed required criterion is not demoted by a certify run, and does not block certify's own coverage check", () => {
+  makeBase();
+  insertLegacyBareCriterion();
+
+  assert.doesNotThrow(() => {
+    runCertify("namespace/legacy-criterion/certify");
+  });
+
+  const legacyCurrent = rows(`
+    SELECT criterion_id, required
+    FROM workflow_acceptance_criteria criterion
+    WHERE criterion.criterion_key = 'legacy-contract'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_acceptance_criteria successor
+        WHERE successor.supersedes_criterion_id = criterion.criterion_id
+      )
+  `);
+  assert.equal(legacyCurrent.length, 1);
+  assert.equal(legacyCurrent[0]!["criterion_id"], "criterion-legacy-bare");
+  assert.equal(Boolean(legacyCurrent[0]!["required"]), true);
+});
+
 test("pre-existing owner-turn gate sets (gate-evaluate, execute-task) are unchanged", () => {
   assert.deepEqual(
     [...getGateIdsForTurn("gate-evaluate")].sort(),

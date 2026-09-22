@@ -302,6 +302,29 @@ function isForeignVerdictNamespace(criterionKey: string, ownNamespace: string): 
   );
 }
 
+/**
+ * WR-02: true only when `criterionKey` is EXPLICITLY prefixed with the
+ * caller's OWN namespace. Unlike `isForeignVerdictNamespace` (which asks
+ * "does this key explicitly claim a DIFFERENT namespace" — true for a bare
+ * legacy key ONLY if it never claims one), this asks "does this key
+ * explicitly claim MY OWN namespace" — the stricter test required anywhere
+ * this writer would otherwise MUTATE another stage's technical-criterion row
+ * (the carry-forward demotion below) or REQUIRE the caller to supply
+ * evidence for a row it never created (`insertMilestoneValidationVerdicts`'s
+ * required-coverage check). A bare/legacy criterionKey belongs to no one's
+ * explicit namespace under this test — not even the caller's — so a
+ * pre-D-01, unprefixed, `required` validate-milestone criterion is never
+ * silently demoted to `required: false` by a certify/audit run, nor
+ * silently required for certify/audit to cover, contradicting neither this
+ * module's "genuinely separate evidence trails" guarantee nor
+ * `isForeignVerdictNamespace`'s own docstring (which promises legacy keys
+ * are left "untouched" — untouched means untouched by everyone, not just by
+ * explicitly-different namespaces).
+ */
+function belongsToOwnVerdictNamespace(criterionKey: string, ownNamespace: string): boolean {
+  return criterionKey.startsWith(`${ownNamespace}:`);
+}
+
 function changedRows(result: unknown): number {
   return typeof (result as { changes?: unknown })?.changes === "number"
     ? (result as { changes: number }).changes
@@ -433,7 +456,10 @@ function prepareMilestoneValidationAttemptRows(
     `${criterion.criterionKey}\u0000${criterion.requirementId ?? ""}`
   ));
   for (const criterion of currentTechnicalCriteria(context.projectId, lifecycle.lifecycle_id)) {
-    if (isForeignVerdictNamespace(criterion.criterion_key, input.policy.criterionNamespace)) continue;
+    // WR-02: only ever demote a criterion this caller's own namespace
+    // explicitly claims — never a bare/legacy key, which belongs to no
+    // caller's explicit namespace (see belongsToOwnVerdictNamespace).
+    if (!belongsToOwnVerdictNamespace(criterion.criterion_key, input.policy.criterionNamespace)) continue;
     const identity = `${criterion.criterion_key}\u0000${criterion.requirement_id ?? ""}`;
     if (Boolean(criterion.required) && !requestedCriteria.has(identity)) {
       ensureTechnicalCriterion(context, lifecycle.lifecycle_id, {
@@ -765,8 +791,15 @@ function insertMilestoneValidationVerdicts(
     if (!criterion) throw new Error("criterion result must reference a current technical criterion");
     validateEvidence(criterion, result);
   }
+  // WR-02: symmetric with the carry-forward demotion guard above — a caller
+  // is only required to cover criteria its own namespace explicitly claims.
+  // Without this, a bare/legacy key that the demotion guard now leaves
+  // required:true forever would perpetually fail THIS check for every
+  // future certify/audit run (neither ever supplies a result for a key it
+  // never created), converting the pre-fix silent-recoupling bug into a
+  // hard failure instead of resolving it.
   const namespacedCriteria = criteria.filter((criterion) =>
-    !isForeignVerdictNamespace(criterion.criterion_key, input.policy.criterionNamespace)
+    belongsToOwnVerdictNamespace(criterion.criterion_key, input.policy.criterionNamespace)
   );
   const missingRequired = namespacedCriteria.filter((criterion) =>
     Boolean(criterion.required) && !suppliedIds.has(criterion.criterion_id)
