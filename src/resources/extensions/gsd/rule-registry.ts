@@ -439,9 +439,22 @@ export class RuleRegistry {
     // `blockingOnly` (step mode) skips advisory hooks: only `criticality:
     // blocking` gates dispatch there, so a gate can never be bypassed by
     // running the workflow one step at a time (#2194).
-    const queueHooks = opts?.blockingOnly
+    const blockingFilteredHooks = opts?.blockingOnly
       ? hooks.filter(h => isBlockingHook(h))
       : hooks;
+    // D-03 pre-queue self-skip (RESEARCH.md Pitfall 2): a criteria-less
+    // slice must never have the agentic-gate1 hook queued at all — this is
+    // a HOST-SIDE skip inside evaluatePostUnit()'s queue construction, NOT
+    // the codebase's distinct `pre_dispatch_hooks`/`evaluatePreDispatch`
+    // mechanism (rule-types.ts's `RulePhase: "pre-dispatch"`), which fires
+    // before a NEW unit's dispatch, not before a post-unit hook is queued.
+    const queueHooks = blockingFilteredHooks.filter(h => {
+      if (!isAgenticGateHook(h)) return true;
+      const { milestone: mid, slice: sid } = parseUnitId(completedUnitId);
+      if (!mid || !sid) return true;
+      const criteriaState = getSliceAcceptanceCriteria(mid, sid);
+      return Boolean(criteriaState?.hasCriteria);
+    });
     if (queueHooks.length === 0) return null;
 
     const completionIdentity = captureTaskCompletionIdentity({
