@@ -14,10 +14,18 @@ function cancellationOperations(
   return value === true ? ["task.cancel"] : value === false ? [] : value;
 }
 
+/**
+ * `atomicVerdictOperationTypes` names the set of milestone verdict-recording
+ * operation types (e.g. `milestone.validate`, and — from Phase 14 onward —
+ * `milestone.certify`/`milestone.audit`) authorized to settle a Milestone
+ * Attempt atomically within the same Domain Operation, without going through
+ * the generic `attempt.settle` operation. Pass `[]` (the default) to disable
+ * this authorization entirely, matching the pre-Phase-14 `false` behavior.
+ */
 export function createAttemptSettlementShapeTrigger(
   db: DbAdapter,
   allowedCancellations: boolean | readonly CancellationOperationType[] = [],
-  allowAtomicMilestoneValidation = false,
+  atomicVerdictOperationTypes: readonly string[] = [],
 ): void {
   const cancellationOperationTypes = cancellationOperations(allowedCancellations);
   const cancellationAuthorization = cancellationOperationTypes.length > 0
@@ -27,9 +35,9 @@ export function createAttemptSettlementShapeTrigger(
         AND NEW.settle_outcome = 'interrupted'
       )`
     : "";
-  const milestoneValidationAuthorization = allowAtomicMilestoneValidation
+  const milestoneValidationAuthorization = atomicVerdictOperationTypes.length > 0
     ? `OR (
-        operation.operation_type = 'milestone.validate'
+        operation.operation_type IN (${atomicVerdictOperationTypes.map((type) => `'${type}'`).join(", ")})
         AND EXISTS (
           SELECT 1
           FROM workflow_item_lifecycles lifecycle

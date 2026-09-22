@@ -9,11 +9,13 @@ import {
 import { getDb } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import {
+  MILESTONE_VALIDATION_POLICY,
   writeMilestoneValidation,
   type InsertedMilestoneValidationVerdict,
   type MilestoneValidationEvidenceClass,
   type MilestoneValidationObservation,
   type MilestoneValidationVerdict,
+  type MilestoneVerdictPolicy,
   type PreparedMilestoneValidationCriterion,
   type ValidateMilestoneWriteInput,
   type ValidateMilestoneWriteResult,
@@ -59,6 +61,17 @@ export interface ValidateMilestoneInput {
   summary: string;
   output: DomainJsonValue;
   criteria: ValidateMilestoneCriterionInput[];
+}
+
+/**
+ * `ValidateMilestoneInput` plus the `MilestoneVerdictPolicy` that selects
+ * which of the three close-lifecycle stages (validate/certify/audit) this
+ * write belongs to (D-01/D-03). `validateMilestone()` is a thin wrapper that
+ * pins `policy` to `MILESTONE_VALIDATION_POLICY`; certify/audit's own
+ * domain-operation files call this directly with their own locked policy.
+ */
+export interface RecordMilestoneVerdictInput extends ValidateMilestoneInput {
+  policy: MilestoneVerdictPolicy;
 }
 
 interface OperationReceipt {
@@ -212,8 +225,9 @@ function storedVerdicts(value: unknown): InsertedMilestoneValidationVerdict[] {
 
 function storedCombinedValidation(
   operationId: string,
+  eventType: string,
 ): Omit<ValidateMilestoneReceipt, keyof OperationReceipt> {
-  const payload = storedEventPayload(operationId, "milestone.validation.recorded");
+  const payload = storedEventPayload(operationId, eventType);
   const attemptNumber = payload["attemptNumber"];
   if (typeof attemptNumber !== "number" || !Number.isInteger(attemptNumber) || attemptNumber < 1) {
     return invalidStoredReceipt("attemptNumber");
@@ -388,7 +402,8 @@ function currentRequiredSubjectiveProofs(
   }) as unknown as SubjectiveProofRow[];
 }
 
-export function validateMilestone(input: ValidateMilestoneInput): ValidateMilestoneReceipt {
+export function recordMilestoneVerdict(input: RecordMilestoneVerdictInput): ValidateMilestoneReceipt {
+  const policy = input.policy;
   const milestoneId = requireNonBlank(input.milestoneId, "milestoneId");
   const testedSourceRevision = requireNonBlank(
     input.testedSourceRevision,
@@ -432,6 +447,7 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
   });
   const writeInput: ValidateMilestoneWriteInput = {
     milestoneId,
+    policy,
     testedSourceRevision,
     policyId,
     policyVersion,
@@ -442,8 +458,9 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     output: input.output,
     criteria,
   };
+  const { policy: _policy, ...writeInputForPayload } = writeInput;
   const payload: DomainJsonValue = {
-    ...writeInput,
+    ...writeInputForPayload,
     rationale,
     criteria: criteria.map((criterion) => ({
       criterionKey: criterion.criterionKey,
@@ -469,7 +486,7 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let written: ValidateMilestoneWriteResult | undefined;
   const operation = executeDomainOperation({
-    operationType: "milestone.validate",
+    operationType: policy.operationType,
     idempotencyKey: input.invocation.idempotencyKey,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
@@ -481,11 +498,10 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     payload,
   }, (context) => {
     written = writeMilestoneValidation(context, writeInput);
-    const subjectiveProofs = currentRequiredSubjectiveProofs(
-      written.lifecycleId,
-      testedSourceRevision,
-    );
-    if (input.verdict === "pass") {
+    const subjectiveProofs = policy.requireSubjectiveAcceptance
+      ? currentRequiredSubjectiveProofs(written.lifecycleId, testedSourceRevision)
+      : [];
+    if (policy.requireSubjectiveAcceptance && input.verdict === "pass") {
       const unsatisfied = subjectiveProofs.find((proof) =>
         !proof.human_acceptance_id || proof.disposition !== "accepted"
       );
@@ -501,7 +517,7 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     );
     return {
       events: [{
-        eventType: "milestone.validation.recorded",
+        eventType: policy.eventType,
         entityType: "milestone",
         entityId: written.milestoneId,
         payload: {
@@ -538,13 +554,13 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
         destinations: ["projection"],
       }],
       projections: [{
-        projectionKey: `validation/${written.milestoneId}`.toLowerCase(),
-        projectionKind: "milestone-validation",
+        projectionKey: `${policy.projectionKeyPrefix}/${written.milestoneId}`.toLowerCase(),
+        projectionKind: policy.projectionKind,
         rendererVersion: "1",
       }],
     };
   });
-  const stored = written ?? storedCombinedValidation(operation.operationId);
+  const stored = written ?? storedCombinedValidation(operation.operationId, policy.eventType);
   return {
     ...operationReceipt(operation),
     milestoneId: stored.milestoneId,
@@ -560,4 +576,13 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     verdict: stored.verdict,
     verdicts: stored.verdicts,
   };
+}
+
+/**
+ * Thin wrapper pinning `policy` to `MILESTONE_VALIDATION_POLICY` — the
+ * validate-milestone turn's exported signature, return type, and observable
+ * behaviour are unchanged from before `recordMilestoneVerdict` existed.
+ */
+export function validateMilestone(input: ValidateMilestoneInput): ValidateMilestoneReceipt {
+  return recordMilestoneVerdict({ ...input, policy: MILESTONE_VALIDATION_POLICY });
 }

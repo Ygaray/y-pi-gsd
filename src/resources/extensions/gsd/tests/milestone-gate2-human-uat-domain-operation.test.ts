@@ -209,7 +209,7 @@ afterEach(() => {
   tempDirs.clear();
 });
 
-test("schema: human_uat_pending table exists at schema v52 on a fresh install", () => {
+test("schema: human_uat_pending table exists at schema v52+ on a fresh install", () => {
   makeBase();
   assert.equal(
     Number(row(`
@@ -217,8 +217,8 @@ test("schema: human_uat_pending table exists at schema v52 on a fresh install", 
     `).count),
     1,
   );
-  assert.equal(Number(row("PRAGMA user_version").user_version), 52);
-  assert.equal(SCHEMA_VERSION, 52);
+  assert.equal(Number(row("PRAGMA user_version").user_version), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 53);
 });
 
 test("atomic commit: one registration call commits the row, event, and outbox row together", () => {

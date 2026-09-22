@@ -9,7 +9,11 @@ import { createTaskVerificationRecoverySchemaV38 } from "./db-task-verification-
 import { createTaskRecoveryCurrentHeadSchemaV39 } from "./db-task-recovery-current-head-schema.js";
 import { createSliceCancellationSchemaV40 } from "./db-slice-cancellation-schema.js";
 import { createSliceCompletionSchemaV41 } from "./db-slice-completion-schema.js";
-import { createMilestoneValidationSchemaV42, createMilestoneVerdictScopeSchemaV49 } from "./db-milestone-validation-schema.js";
+import {
+  createMilestoneValidationSchemaV42,
+  createMilestoneVerdictPolicyScopeSchemaV53,
+  createMilestoneVerdictScopeSchemaV49,
+} from "./db-milestone-validation-schema.js";
 import { createBlockerAcceptedCloseoutSchemaV50 } from "./db-blocker-accepted-closeout-schema.js";
 import { createHumanUatPendingSchemaV52 } from "./db-human-uat-pending-schema.js";
 import { createMilestoneCompletionSchemaV43 } from "./db-milestone-completion-schema.js";
@@ -604,4 +608,8 @@ export function applyMigrationV51SliceSurface(db: DbAdapter): void {
 
 export function applyMigrationV52HumanUatPending(db: DbAdapter): void {
   createHumanUatPendingSchemaV52(db);
+}
+
+export function applyMigrationV53MilestoneVerdictPolicyScope(db: DbAdapter): void {
+  createMilestoneVerdictPolicyScopeSchemaV53(db);
 }

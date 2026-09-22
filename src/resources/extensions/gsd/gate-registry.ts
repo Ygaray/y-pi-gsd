@@ -27,7 +27,9 @@ export type OwnerTurn =
   | "gate-evaluate"
   | "execute-task"
   | "complete-slice"
-  | "validate-milestone";
+  | "validate-milestone"
+  | "certify-milestone"
+  | "audit-milestone";
 
 export interface GateDefinition {
   id: GateId;
@@ -164,6 +166,51 @@ export const GATE_REGISTRY = {
       "Flag requirements that slices claim to advance but no artifact proves.",
     ].join("\n"),
     promptSection: "Requirement Coverage",
+  },
+  CERT01: {
+    id: "CERT01",
+    scope: "slice",
+    ownerTurn: "certify-milestone",
+    question: "Does this slice's recorded gate evidence still hold, and are any gaps self-fixable?",
+    guidance: [
+      "Read the slice's durable quality-gate rows and any escalation/rework history.",
+      "Identify gaps: a stale or missing gate row, a flagged verdict, or unresolved rework.",
+      "For each gap, judge whether it is mechanically fixable by re-dispatching the owning gate, and record that judgment — do not silently pass a slice with no durable evidence.",
+    ].join("\n"),
+    promptSection: "Slice Gate Audit",
+  },
+  CERT02: {
+    id: "CERT02",
+    scope: "milestone",
+    ownerTurn: "certify-milestone",
+    question: "Does certify's own cross-slice integration check confirm the milestone's slices compose end-to-end?",
+    guidance: [
+      "Trace at least one cross-slice flow using durable evidence, independent of validate-milestone's own MV03 finding.",
+      "Flag any integration gap discovered during certify's pass, whether or not MV03 already flagged it.",
+    ].join("\n"),
+    promptSection: "Certify Integration Check",
+  },
+  AUD01: {
+    id: "AUD01",
+    scope: "milestone",
+    ownerTurn: "audit-milestone",
+    question: "Independently of certify and validate-milestone, do the slices actually wire together end-to-end?",
+    guidance: [
+      "Perform a genuinely independent re-check of cross-slice wiring — do not reuse or wrap certify's or validate-milestone's own verdict.",
+      "Flag any wiring gap this independent pass finds, even one certify or validate-milestone already called passing.",
+    ].join("\n"),
+    promptSection: "Independent Cross-Slice Wiring",
+  },
+  AUD02: {
+    id: "AUD02",
+    scope: "milestone",
+    ownerTurn: "audit-milestone",
+    question: "Is every requirement mapped to a slice on this milestone genuinely satisfied?",
+    guidance: [
+      "For each requirement whose supporting_slices names a slice on this milestone, independently confirm the slice is done and its evidence actually satisfies the requirement.",
+      "Flag any requirement claimed as covered but unsupported by durable evidence.",
+    ].join("\n"),
+    promptSection: "Independent Requirement Coverage",
   },
 } as const satisfies Record<GateId, GateDefinition>;
 

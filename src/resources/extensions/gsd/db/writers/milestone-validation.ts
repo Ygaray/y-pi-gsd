@@ -15,6 +15,48 @@ export type MilestoneValidationEvidenceClass = "command" | "runtime" | "browser"
 export type MilestoneValidationVerdict = "pass" | "fail" | "inconclusive";
 export type MilestoneValidationObservation = "passed" | "failed" | "inconclusive";
 
+/**
+ * Identifies which of the three milestone close-lifecycle stages (validate,
+ * certify, audit) a durable verdict write belongs to. Every axis here is
+ * distinct per stage (D-01) so their event-sourced evidence never blends —
+ * see 14-01-PLAN.md's Resolved Open Questions for the locked identifier set.
+ */
+export interface MilestoneVerdictPolicy {
+  operationType: string;
+  criterionNamespace: string;
+  eventType: string;
+  projectionKeyPrefix: string;
+  projectionKind: string;
+  requireSubjectiveAcceptance: boolean;
+}
+
+export const MILESTONE_VALIDATION_POLICY: MilestoneVerdictPolicy = Object.freeze({
+  operationType: "milestone.validate",
+  criterionNamespace: "milestone-validation",
+  eventType: "milestone.validation.recorded",
+  projectionKeyPrefix: "validation",
+  projectionKind: "milestone-validation",
+  requireSubjectiveAcceptance: true,
+});
+
+export const MILESTONE_CERTIFY_POLICY: MilestoneVerdictPolicy = Object.freeze({
+  operationType: "milestone.certify",
+  criterionNamespace: "milestone-certify",
+  eventType: "milestone.certify.recorded",
+  projectionKeyPrefix: "certify",
+  projectionKind: "milestone-certify",
+  requireSubjectiveAcceptance: false,
+});
+
+export const MILESTONE_AUDIT_POLICY: MilestoneVerdictPolicy = Object.freeze({
+  operationType: "milestone.audit",
+  criterionNamespace: "milestone-audit",
+  eventType: "milestone.audit.recorded",
+  projectionKeyPrefix: "audit",
+  projectionKind: "milestone-audit",
+  requireSubjectiveAcceptance: false,
+});
+
 export interface MilestoneValidationWaiverWriteInput {
   waiverId: string;
   lifecycleId: string;
@@ -90,6 +132,7 @@ export interface PreparedMilestoneValidationCriterion {
 
 interface PrepareMilestoneValidationAttemptInput {
   milestoneId: string;
+  policy: MilestoneVerdictPolicy;
   criteria: MilestoneValidationCriterionWriteInput[];
   claimedAt?: string;
 }
@@ -142,6 +185,7 @@ interface MilestoneValidationCriterionResultWriteInput {
 
 interface InsertMilestoneValidationVerdictsInput {
   attemptId: string;
+  policy: MilestoneVerdictPolicy;
   testedSourceRevision: string;
   policyId: string;
   policyVersion: string;
@@ -175,6 +219,7 @@ interface ValidateMilestoneCriterionWriteInput
 
 export interface ValidateMilestoneWriteInput {
   milestoneId: string;
+  policy: MilestoneVerdictPolicy;
   testedSourceRevision: string;
   policyId: string;
   policyVersion: string;
@@ -227,6 +272,34 @@ function requireNonBlank(value: string, field: string): void {
 function requireTimestamp(value: string, field: string): string {
   if (!Number.isFinite(Date.parse(value))) throw new Error(`${field} must be an ISO timestamp`);
   return value;
+}
+
+/**
+ * The full set of verdict-policy namespaces this writer recognizes today.
+ * Used only to detect when a criterionKey explicitly claims a DIFFERENT
+ * stage's namespace — an unprefixed (legacy) criterionKey is never treated
+ * as foreign, so pre-existing validate-milestone callers that predate this
+ * namespace discipline are unaffected (D-03: extend, don't break, the
+ * existing writer contract).
+ */
+const KNOWN_VERDICT_NAMESPACES: readonly string[] = [
+  "milestone-validation",
+  "milestone-certify",
+  "milestone-audit",
+];
+
+/**
+ * D-01 namespace guard: true only when `criterionKey` is explicitly prefixed
+ * with a KNOWN namespace that is NOT the caller's own. This is the
+ * load-bearing check that keeps certify/audit's evidence from demoting or
+ * shadowing validate-milestone's (and vice versa) while leaving bare/legacy
+ * criterionKeys — which belong to no recognized namespace — untouched, see
+ * 14-01-PLAN.md Task 1 step 3(b)/(d).
+ */
+function isForeignVerdictNamespace(criterionKey: string, ownNamespace: string): boolean {
+  return KNOWN_VERDICT_NAMESPACES.some(
+    (namespace) => namespace !== ownNamespace && criterionKey.startsWith(`${namespace}:`),
+  );
 }
 
 function changedRows(result: unknown): number {
@@ -346,12 +419,21 @@ function prepareMilestoneValidationAttemptRows(
 ): PrepareMilestoneValidationAttemptResult {
   requireNonBlank(input.milestoneId, "milestoneId");
   if (input.criteria.length === 0) throw new Error("Milestone validation requires objective criteria");
+  for (const criterion of input.criteria) {
+    if (isForeignVerdictNamespace(criterion.criterionKey, input.policy.criterionNamespace)) {
+      throw new Error(
+        `criterionKey "${criterion.criterionKey}" belongs to another verdict policy's namespace; `
+          + `expected a "${input.policy.criterionNamespace}:" prefix (or an unnamespaced legacy key)`,
+      );
+    }
+  }
   const lifecycle = requireMilestoneLifecycle(context, input.milestoneId);
   const claimedAt = requireTimestamp(input.claimedAt ?? new Date().toISOString(), "claimedAt");
   const requestedCriteria = new Set(input.criteria.map((criterion) =>
     `${criterion.criterionKey}\u0000${criterion.requirementId ?? ""}`
   ));
   for (const criterion of currentTechnicalCriteria(context.projectId, lifecycle.lifecycle_id)) {
+    if (isForeignVerdictNamespace(criterion.criterion_key, input.policy.criterionNamespace)) continue;
     const identity = `${criterion.criterion_key}\u0000${criterion.requirement_id ?? ""}`;
     if (Boolean(criterion.required) && !requestedCriteria.has(identity)) {
       ensureTechnicalCriterion(context, lifecycle.lifecycle_id, {
@@ -683,7 +765,12 @@ function insertMilestoneValidationVerdicts(
     if (!criterion) throw new Error("criterion result must reference a current technical criterion");
     validateEvidence(criterion, result);
   }
-  const missingRequired = criteria.filter((criterion) => Boolean(criterion.required) && !suppliedIds.has(criterion.criterion_id));
+  const namespacedCriteria = criteria.filter((criterion) =>
+    !isForeignVerdictNamespace(criterion.criterion_key, input.policy.criterionNamespace)
+  );
+  const missingRequired = namespacedCriteria.filter((criterion) =>
+    Boolean(criterion.required) && !suppliedIds.has(criterion.criterion_id)
+  );
   if (missingRequired.length > 0) {
     throw new Error("Milestone validation must cover all required current technical criteria");
   }
@@ -769,11 +856,15 @@ export function writeMilestoneValidation(
   context: Readonly<DomainOperationContext>,
   input: ValidateMilestoneWriteInput,
 ): ValidateMilestoneWriteResult {
-  if (requireActiveDomainOperationContext(context) !== "milestone.validate") {
-    throw new Error("Combined Milestone validation requires a milestone.validate Domain Operation");
+  const activeOperationType = requireActiveDomainOperationContext(context);
+  if (activeOperationType !== input.policy.operationType) {
+    throw new Error(
+      `Combined Milestone validation requires a ${input.policy.operationType} Domain Operation`,
+    );
   }
   const prepared = prepareMilestoneValidationAttemptRows(context, {
     milestoneId: input.milestoneId,
+    policy: input.policy,
     criteria: input.criteria.map((criterion) => ({
       criterionKey: criterion.criterionKey,
       evidenceClass: criterion.evidenceClass,
@@ -791,6 +882,7 @@ export function writeMilestoneValidation(
   });
   const inserted = insertMilestoneValidationVerdicts(context, {
     attemptId: prepared.attemptId,
+    policy: input.policy,
     testedSourceRevision: input.testedSourceRevision,
     policyId: input.policyId,
     policyVersion: input.policyVersion,
