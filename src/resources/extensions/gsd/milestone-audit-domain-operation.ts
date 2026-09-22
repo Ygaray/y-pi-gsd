@@ -4,13 +4,13 @@
 // (recordMilestoneVerdict) under the locked "milestone-audit" policy so the
 // audit's evidence trail (policyId, operationType, event type, criterionKey
 // namespace, projection) is genuinely separate from both validate-milestone's
-// and certify's — D-01/D-03. The audit reads getActiveRequirements,
-// getMilestoneSlices, and getGateResults directly and never imports
+// and certify's — D-01/D-03. The audit's actual coverage/wiring re-derivation
+// lives in `milestone-audit-coverage.ts`; this file wires that derivation
+// through the shared verdict-recording machinery. Never imports
 // milestone-certify-*, milestone-validation-gates, or tools/validate-milestone
-// — its conclusion must never be a function of the signal it independently
-// checks (D-01, RESEARCH Pitfall 3).
+// — the audit's conclusion must never be a function of the signal it
+// independently checks (D-01, RESEARCH Pitfall 3).
 
-import { getActiveRequirements, getMilestoneSlices } from "./db/queries.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
 import {
@@ -20,8 +20,15 @@ import {
   type MilestoneValidationVerdict,
 } from "./db/writers/milestone-validation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import {
+  auditCrossSliceWiring,
+  auditRequirementCoverage,
+  type CrossSliceWiringFinding,
+  type CrossSliceWiringFindingClass,
+  type RequirementCoverageFinding,
+  type RequirementCoverageFindingClass,
+} from "./milestone-audit-coverage.js";
 import { insertAuditGates } from "./milestone-close-gates.js";
-import { RAW_CLOSED_STATUSES } from "./status-guards.js";
 import {
   recordMilestoneVerdict,
   type ValidateMilestoneReceipt,
@@ -63,12 +70,6 @@ interface AuditCriterionInput {
     durableOutputRef: string;
     environment: { [key: string]: DomainJsonValue };
   }>;
-}
-
-const RAW_CLOSED_STATUS_SET: ReadonlySet<string> = new Set(RAW_CLOSED_STATUSES);
-
-function isTerminalSliceStatus(status: string): boolean {
-  return RAW_CLOSED_STATUS_SET.has(status);
 }
 
 function evidenceEnvironment(extra: Record<string, string>): { [key: string]: DomainJsonValue } {
@@ -132,65 +133,106 @@ function buildCriterion(
   };
 }
 
+function tallyByClass<T extends string>(classes: readonly T[]): string {
+  if (classes.length === 0) return "none";
+  const counts = new Map<T, number>();
+  for (const cls of classes) counts.set(cls, (counts.get(cls) ?? 0) + 1);
+  return [...counts.entries()].map(([cls, count]) => `${cls}=${count}`).join(", ");
+}
+
+function coverageRationale(
+  requirementsExamined: number,
+  mappedRequirementCount: number,
+  findings: RequirementCoverageFinding[],
+): string {
+  const breakdown = tallyByClass(findings.map((f) => f.findingClass));
+  if (mappedRequirementCount === 0) {
+    return `Examined ${requirementsExamined} requirement(s); 0 mapped to a slice of this milestone `
+      + `(zero requirements mapped) — coverage is inconclusive. Findings by class: ${breakdown}.`;
+  }
+  return `Examined ${requirementsExamined} requirement(s), ${mappedRequirementCount} mapped to a slice of this milestone. `
+    + `${findings.length} finding(s). Findings by class: ${breakdown}.`;
+}
+
+function wiringRationale(findings: CrossSliceWiringFinding[]): string {
+  const breakdown = tallyByClass(findings.map((f) => f.findingClass));
+  return findings.length === 0
+    ? "No wiring disagreement observed between slices.depends and slice_dependencies."
+    : `Found ${findings.length} wiring disagreement(s) between slices.depends and slice_dependencies. `
+      + `Findings by class: ${breakdown}.`;
+}
+
+function findingsText<T extends { detail: string }>(findings: T[]): string {
+  return findings.map((f) => f.detail).join("; ");
+}
+
 /**
- * Run the independent audit pass (CERT-02, Task 1 tracer): derive ONE
- * requirement-coverage finding inline (a requirement's `primary_owner`
- * exactly naming a non-terminal slice of this milestone), record a
- * placeholder-free "no wiring disagreement observed" wiring criterion, then
- * record the audit's own `milestone.audit.recorded` verdict and its AUD01/
- * AUD02 gate rows. Task 2 (`milestone-audit-coverage.ts`) replaces this
- * tracer's inline derivation with the full requirement-coverage and
- * cross-slice-wiring derivation; the domain-operation/replay/gate-writing
- * shape established here does not change.
+ * The overall milestone verdict is computed by the SAME fail > inconclusive >
+ * pass priority the shared writer's own `aggregateVerdict` uses internally
+ * (`db/writers/milestone-validation.ts`) — recordMilestoneVerdict rejects a
+ * verdict that does not match the aggregate of its criteria's own verdicts,
+ * so this function's result must always agree with `worstVerdict(wiring,
+ * coverage)` below.
+ */
+function worstVerdict(...verdicts: MilestoneValidationVerdict[]): MilestoneValidationVerdict {
+  if (verdicts.some((v) => v === "fail")) return "fail";
+  if (verdicts.some((v) => v === "inconclusive")) return "inconclusive";
+  return "pass";
+}
+
+/**
+ * Run the independent audit pass (CERT-02): independently re-derive
+ * cross-slice wiring (AUD01, `auditCrossSliceWiring`) and requirement
+ * coverage (AUD02, `auditRequirementCoverage`) from durable DB state, record
+ * the audit's own `milestone.audit.recorded` verdict, and write its AUD01/
+ * AUD02 gate rows. `inconclusive` when zero requirements mapped to any slice
+ * of this milestone (never `pass`); `fail` when any coverage or wiring
+ * finding exists; `pass` only when at least one requirement mapped and no
+ * finding exists.
  */
 export function auditMilestone(input: AuditMilestoneInput): AuditMilestoneReceipt {
   const milestoneId = input.milestoneId;
 
-  const slices = getMilestoneSlices(milestoneId);
-  const sliceById = new Map(slices.map((slice) => [slice.id, slice]));
-
-  const coverageFindings: string[] = [];
-  for (const requirement of getActiveRequirements()) {
-    const owner = requirement.primary_owner.trim();
-    if (!owner) continue;
-    const slice = sliceById.get(owner);
-    if (slice && !isTerminalSliceStatus(slice.status)) {
-      coverageFindings.push(
-        `${requirement.id} maps to slice ${slice.id}, which is not terminal (status=${slice.status})`,
-      );
-    }
-  }
+  const coverage = auditRequirementCoverage({ milestoneId });
+  const wiringFindings = auditCrossSliceWiring({ milestoneId });
 
   const evaluatedAt = readAuditEvaluatedAt(input.invocation.idempotencyKey) ?? new Date().toISOString();
+
+  const coverageVerdict: MilestoneValidationVerdict = coverage.mappedRequirementCount === 0
+    ? "inconclusive"
+    : coverage.findings.length > 0
+      ? "fail"
+      : "pass";
+  const wiringVerdict: MilestoneValidationVerdict = wiringFindings.length > 0 ? "fail" : "pass";
 
   const wiringCriterion = buildCriterion(
     "milestone-audit:cross-slice-wiring",
     "Independently cross-check the slices.depends column against the slice_dependencies table.",
     milestoneId,
-    "pass",
-    "No wiring disagreement observed.",
+    wiringVerdict,
+    wiringRationale(wiringFindings),
     evaluatedAt,
-    {},
+    { findingCount: String(wiringFindings.length) },
   );
-  const coverageVerdict: MilestoneValidationVerdict = coverageFindings.length === 0 ? "pass" : "fail";
   const coverageCriterion = buildCriterion(
     "milestone-audit:requirement-coverage",
     "Independently confirm every requirement mapped to a slice of this milestone is genuinely satisfied.",
     milestoneId,
     coverageVerdict,
-    coverageFindings.length === 0
-      ? "No coverage findings for this check."
-      : `Found ${coverageFindings.length} finding(s): ${coverageFindings.join("; ")}`,
+    coverageRationale(coverage.requirementsExamined, coverage.mappedRequirementCount, coverage.findings),
     evaluatedAt,
-    { findingCount: String(coverageFindings.length) },
+    { findingCount: String(coverage.findings.length) },
   );
 
-  const milestoneVerdict: MilestoneValidationVerdict = coverageVerdict;
+  const milestoneVerdict = worstVerdict(wiringVerdict, coverageVerdict);
   const outcome = milestoneVerdict === "pass" ? "succeeded" as const : "failed" as const;
-  const failureClass = milestoneVerdict === "pass" ? "none" : "audit-coverage-gap";
-  const rationale = coverageFindings.length === 0
-    ? `Audit found no coverage findings for milestone ${milestoneId}.`
-    : `Audit found ${coverageFindings.length} coverage finding(s) for milestone ${milestoneId}.`;
+  const failureClass = milestoneVerdict === "pass"
+    ? "none"
+    : milestoneVerdict === "inconclusive"
+      ? "audit-no-requirements-mapped"
+      : "audit-finding";
+  const rationale = `Audit recorded ${milestoneVerdict} for ${milestoneId}: `
+    + `${coverage.findings.length} coverage finding(s), ${wiringFindings.length} wiring finding(s).`;
 
   const receipt = recordMilestoneVerdict({
     invocation: input.invocation,
@@ -206,7 +248,9 @@ export function auditMilestone(input: AuditMilestoneInput): AuditMilestoneReceip
     summary: `Audit recorded ${milestoneVerdict} for ${milestoneId}.`,
     output: {
       stage: "audit",
-      coverageFindingCount: coverageFindings.length,
+      coverageFindingCount: coverage.findings.length,
+      wiringFindingCount: wiringFindings.length,
+      mappedRequirementCount: coverage.mappedRequirementCount,
     },
     criteria: [wiringCriterion, coverageCriterion],
   });
@@ -215,20 +259,25 @@ export function auditMilestone(input: AuditMilestoneInput): AuditMilestoneReceip
   // are a separate, replay-guarded write AFTER the verdict Domain Operation
   // commits, never inside it.
   if (receipt.status !== "replayed") {
-    const gateVerdict = milestoneVerdict === "pass" ? "pass" as const : "flag" as const;
+    const wiringGateVerdict = wiringVerdict === "fail" ? "flag" as const : "pass" as const;
+    const coverageGateVerdict = coverageVerdict === "pass" ? "pass" as const : "flag" as const;
     insertAuditGates(milestoneId, {
       wiring: {
-        verdict: "pass",
+        verdict: wiringGateVerdict,
         rationale: wiringCriterion.rationale,
-        findings: "",
+        findings: findingsText(wiringFindings),
       },
       coverage: {
-        verdict: gateVerdict,
+        verdict: coverageGateVerdict,
         rationale: coverageCriterion.rationale,
-        findings: coverageFindings.join("; "),
+        findings: findingsText(coverage.findings),
       },
-    }, gateVerdict, evaluatedAt);
+    }, milestoneVerdict === "pass" ? "pass" : "flag", evaluatedAt);
   }
 
   return receipt;
 }
+
+// Re-exported so importers of the domain-operation file can name the finding
+// class unions without a second import from milestone-audit-coverage.ts.
+export type { RequirementCoverageFindingClass, CrossSliceWiringFindingClass };
