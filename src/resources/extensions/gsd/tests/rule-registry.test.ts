@@ -1477,6 +1477,16 @@ function runGapClosureCycle(
   return registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
 }
 
+/** Durable count of `slice.reopened` domain events for an entity — the
+ *  ground truth for "how many real reopen operations actually ran",
+ *  independent of how many gate evaluations were made (RESEARCH Pitfall 5). */
+function reopenedEventCount(entityId: string): number {
+  const row = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS n FROM workflow_domain_events WHERE event_type = 'slice.reopened' AND entity_id = :entity_id",
+  ).get({ ":entity_id": entityId }) as { n: number };
+  return row.n;
+}
+
 describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
   test("a needs-rework verdict on a genuinely completed slice reopens it and authors exactly one cycle-1 rework brief (D-01, D-02, D-03)", () => {
     const { projectRoot, cleanup } = setupGate1Fixture([
@@ -1826,5 +1836,208 @@ describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
     } finally {
       cleanup();
     }
+  });
+
+  describe("resume safety (Phase 12, D-03 restart invariant — RESEARCH Pitfall 5)", () => {
+    test("repeated same-cycle evaluation: a second evaluation against the same needs-rework artifact double-reopens neither the slice nor authors a second brief", () => {
+      const { projectRoot, cleanup } = setupGate1Fixture([
+        "---",
+        "version: 1",
+        "agentic_gate1_enabled: true",
+        "---",
+      ]);
+      try {
+        insertSlice({
+          id: "S01",
+          milestoneId: "M001",
+          status: "active",
+          planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+        });
+        insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+        insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+        completeGate1Slice("resume-repeat-cycle1");
+        const registry = new RuleRegistry([]);
+        const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+        assert.notEqual(dispatch, null);
+        writeNeedsReworkArtifact(projectRoot, "2026-09-22T07:00:00.000Z");
+
+        const first = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+        assert.equal(first, null, "the first, real evaluation must complete cycle 1");
+        assert.equal(registry.consumeGateBlock(), null);
+        assert.equal(reworkBriefCountForSlice("M001", "S01"), 1, "cycle 1 authors exactly one brief");
+        assert.equal(reopenedEventCount("M001/S01"), 1, "cycle 1 reopens the slice exactly once");
+
+        // Invariant (RESEARCH Pitfall 5): once a cycle's success exit clears
+        // activeHook/hookQueue, evaluatePostUnit's own hook-on-hook guard
+        // (completedUnitType.startsWith("hook/")) makes a second, unpaired
+        // evaluation of the SAME hook unit id a pure no-op — it can never
+        // re-enter gap-closure routing without a genuine new dispatch. This
+        // is what keeps a re-evaluation from double-reopening: the reopen
+        // count tracks cycles genuinely run, never evaluations made.
+        const second = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+        assert.equal(second, null, "a repeated hook-unit evaluation with no active hook must be a no-op");
+        assert.equal(reworkBriefCountForSlice("M001", "S01"), 1, "no second brief from the repeated evaluation");
+        assert.equal(
+          reopenedEventCount("M001/S01"),
+          1,
+          "no second reopen from the repeated evaluation — the count matches cycles run, not evaluations made",
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    test("a persisted cap block survives persist/restore/reconcile without resetting or bypassing the cap", () => {
+      const { projectRoot, cleanup } = setupGate1Fixture([
+        "---",
+        "version: 1",
+        "agentic_gate1_enabled: true",
+        "---",
+      ]);
+      try {
+        insertSlice({
+          id: "S01",
+          milestoneId: "M001",
+          status: "active",
+          planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+        });
+        insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+        insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+        const registry = new RuleRegistry([]);
+        for (const [label, ts] of [
+          ["resume-cap-1", "2026-09-22T08:00:00.000Z"],
+          ["resume-cap-2", "2026-09-22T09:00:00.000Z"],
+          ["resume-cap-3", "2026-09-22T10:00:00.000Z"],
+        ] as const) {
+          const cycleResult = runGapClosureCycle(registry, projectRoot, label, ts);
+          assert.equal(cycleResult, null);
+          assert.equal(registry.consumeGateBlock(), null);
+        }
+        const briefCountBeforePersist = reworkBriefCountForSlice("M001", "S01");
+        assert.equal(briefCountBeforePersist, GAP_CLOSURE_MAX_CYCLES, "three real cycles must reach the cap");
+
+        // A 4th attempt now hits the cap and pauses. Do NOT consume the
+        // block — persist it outstanding, exactly as a real pause/resume
+        // would leave it.
+        completeGate1Slice("resume-cap-4th-attempt");
+        const fourthDispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+        assert.notEqual(fourthDispatch, null);
+        writeNeedsReworkArtifact(projectRoot, "2026-09-22T11:00:00.000Z");
+        const fourthResult = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+        assert.equal(fourthResult, null);
+        assert.notEqual(registry.gateBlockPending, null, "the cap pause must leave an outstanding gate block");
+        assert.equal(registry.gateBlockPending?.action, "pause");
+
+        registry.persistState(projectRoot);
+
+        const resumed = new RuleRegistry([]);
+        resumed.restoreState(projectRoot);
+        assert.notEqual(
+          resumed.gateBlockPending,
+          null,
+          "the restored registry must still carry the outstanding cap-pause block",
+        );
+
+        const reconciled = resumed.reconcileRestoredGateBlock(projectRoot);
+        assert.notEqual(
+          reconciled,
+          null,
+          "reconcileRestoredGateBlock must re-dispatch the same gate hook rather than silently clearing the cap block",
+        );
+        assert.equal(reconciled?.unitType, "hook/agentic-gate1");
+        assert.equal(reconciled?.unitId, "M001/S01");
+        assert.equal(
+          resumed.activeHook?.hookName,
+          "agentic-gate1",
+          "activeHook must be re-armed so the re-run's completion is assessed against the gate",
+        );
+        assert.equal(
+          resumed.consumeGateBlock(),
+          null,
+          "reconcile replaces the outstanding block with a live re-dispatch rather than a cleared pass",
+        );
+
+        // The re-dispatched hook completes against the SAME (still
+        // needs-rework, still cap-reached) artifact — the cap must still
+        // hold: pause again, no 4th brief.
+        const afterReconcileResult = resumed.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+        assert.equal(afterReconcileResult, null);
+        const blockAfterReconcile = resumed.consumeGateBlock();
+        assert.notEqual(blockAfterReconcile, null, "the cap must still pause the resumed session, not admit a 4th cycle");
+        assert.equal(blockAfterReconcile?.action, "pause");
+
+        assert.equal(
+          reworkBriefCountForSlice("M001", "S01"),
+          briefCountBeforePersist,
+          "a restart must never reset or advance the cap-authority COUNT (D-03)",
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    test("a fresh RuleRegistry that never observed cycle 1/2 still derives the next cycle from the DB COUNT, not from any local/restored state", () => {
+      const { projectRoot, cleanup } = setupGate1Fixture([
+        "---",
+        "version: 1",
+        "agentic_gate1_enabled: true",
+        "---",
+      ]);
+      try {
+        insertSlice({
+          id: "S01",
+          milestoneId: "M001",
+          status: "active",
+          planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+        });
+        insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+        insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+        // Pre-seed cycles 1 and 2 directly in the DB — no registry instance
+        // has ever run evaluatePostUnit for this slice.
+        for (const cycle of [1, 2]) {
+          saveReworkBrief({
+            briefId: `RB-M001-S01-T02-gap-${cycle}`,
+            milestoneId: "M001",
+            sliceId: "S01",
+            taskId: "T02",
+            findings: [{
+              findingId: `GC${cycle}-01`,
+              severity: "blocking",
+              description: `pre-seeded finding for cycle ${cycle}`,
+              requiredFix: "n/a",
+              verificationCommands: [],
+              evidence: "pre-seeded",
+              decisionRef: "pre-seeded",
+            }],
+          });
+        }
+        assert.equal(reworkBriefCountForSlice("M001", "S01"), 2);
+
+        completeGate1Slice("resume-fresh-registry-cycle3");
+        const registry = new RuleRegistry([]);
+        const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+        assert.notEqual(dispatch, null);
+        writeNeedsReworkArtifact(projectRoot, "2026-09-22T12:00:00.000Z");
+
+        const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+        assert.equal(result, null);
+        assert.equal(registry.consumeGateBlock(), null);
+        assert.equal(
+          reworkBriefCountForSlice("M001", "S01"),
+          3,
+          "a fresh registry must compute cycle 3 from the DB COUNT, landing exactly at the cap",
+        );
+        const brief = reworkBriefRow("RB-M001-S01-T02-gap-3");
+        assert.ok(
+          brief,
+          "the fresh registry's own first gap-closure evaluation must carry the DB-derived -gap-3 suffix, not -gap-1",
+        );
+      } finally {
+        cleanup();
+      }
+    });
   });
 });
