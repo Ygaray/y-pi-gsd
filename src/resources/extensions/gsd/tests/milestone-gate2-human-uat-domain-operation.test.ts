@@ -431,3 +431,138 @@ test("additive no-op: completeMilestone succeeds exactly as before with no Gate-
   const result = await completeMilestone(completionInput("fixture/gate2/complete-clean"));
   assert.equal(result.canonicalStatus, "completed");
 });
+
+test("input validation: blank milestoneId, sliceId, or reason is rejected before any write", () => {
+  makeBase();
+  assert.throws(() => registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/blank-milestone"),
+    milestoneId: "   ",
+    sliceId: "S01",
+    reason: "PARTIAL: blank milestone",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  }));
+  assert.throws(() => registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/blank-slice"),
+    milestoneId: "M001",
+    sliceId: "",
+    reason: "PARTIAL: blank slice",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  }));
+  assert.throws(() => registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/blank-reason"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "   ",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  }));
+  assert.deepEqual(countGate2State(), { rows: 0, events: 0, outbox: 0 });
+});
+
+test("context guard: registerGate2HumanUatPendingRow rejects a wrong Domain Operation context", () => {
+  makeBase();
+  assert.throws(
+    () => executeAtFence("test.fixture.wrong-op", "fixture/gate2/wrong-op", (context) => {
+      registerGate2HumanUatPendingRow(context, {
+        milestoneId: "M001",
+        sliceId: "S01",
+        taskId: null,
+        artifactPath: null,
+        reason: "PARTIAL: wrong operation context",
+        partialCriteria: [{ criterion: "A", evidence: "a" }],
+      });
+    }),
+    /requires its Domain Operation/,
+  );
+  assert.deepEqual(countGate2State(), { rows: 0, events: 0, outbox: 0 });
+});
+
+test("Pitfall-1 probe: flipping human_uat_pending.status alone does not clear the close guard", async () => {
+  // Deliberate false-clearance probe (Pitfall 1, RESEARCH.md): this bypasses
+  // the real resolve path (13-04) and must NOT unblock the close guard. If
+  // this test ever goes green for the wrong reason, the guard has been
+  // silently rewired to read human_uat_pending instead of the event head.
+  await prepareValidatedFixture();
+  const receipt = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/pitfall-1-flip"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: pitfall probe",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  assert.ok(receipt.entryId);
+
+  db().prepare(`
+    UPDATE human_uat_pending SET status = 'signed-off', updated_at = :now
+    WHERE entry_id = :entry_id
+  `).run({ ":now": new Date().toISOString(), ":entry_id": receipt.entryId });
+
+  await assert.rejects(
+    async () => completeMilestone(completionInput("fixture/gate2/pitfall-1-complete")),
+    (error: unknown) => {
+      assert.ok(error instanceof MilestoneLifecycleValidationError);
+      assert.match((error as Error).message, /S01/);
+      return true;
+    },
+  );
+});
+
+test("Pitfall-1 probe: draining the outbox row alone (no resolution event) does not clear the close guard", async () => {
+  // Same deliberate false-clearance probe as the status-flip test above, but
+  // for the OTHER independent trip-wire: draining the outbox row with no
+  // resolution event must still leave the close guard blocked. If this test
+  // ever goes green for the wrong reason, the guard is treating the outbox
+  // drain as sufficient settlement on its own.
+  await prepareValidatedFixture();
+  const receipt = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/pitfall-1-drain"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: pitfall probe",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  assert.ok(receipt.entryId);
+
+  db().prepare(`
+    UPDATE human_uat_pending SET status = 'signed-off', updated_at = :now
+    WHERE entry_id = :entry_id
+  `).run({ ":now": new Date().toISOString(), ":entry_id": receipt.entryId });
+  const eventRow = row(`
+    SELECT event_id FROM workflow_domain_events
+    WHERE event_type = 'milestone.gate2-human-uat-required'
+      AND json_extract(payload_json, '$.entryId') = '${receipt.entryId}'
+  `);
+  db().prepare(`
+    UPDATE workflow_outbox SET delivered_at = :now WHERE event_id = :event_id
+  `).run({ ":now": new Date().toISOString(), ":event_id": String(eventRow["event_id"]) });
+
+  await assert.rejects(
+    async () => completeMilestone(completionInput("fixture/gate2/pitfall-1-drain-complete")),
+    (error: unknown) => {
+      assert.ok(error instanceof MilestoneLifecycleValidationError);
+      assert.match((error as Error).message, /S01/);
+      return true;
+    },
+  );
+});
+
+test("outbox rows cannot be deleted: DELETE FROM workflow_outbox is rejected by the schema trigger", () => {
+  makeBase();
+  const receipt = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/delete-outbox"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: delete probe",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  const eventRow = row(`
+    SELECT event_id FROM workflow_domain_events
+    WHERE event_type = 'milestone.gate2-human-uat-required'
+      AND json_extract(payload_json, '$.entryId') = '${receipt.entryId}'
+  `);
+  assert.throws(
+    () => db().prepare(`
+      DELETE FROM workflow_outbox WHERE event_id = :event_id
+    `).run({ ":event_id": String(eventRow["event_id"]) }),
+    /outbox rows are durable history/,
+  );
+});
