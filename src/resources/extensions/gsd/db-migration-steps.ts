@@ -11,6 +11,7 @@ import { createSliceCancellationSchemaV40 } from "./db-slice-cancellation-schema
 import { createSliceCompletionSchemaV41 } from "./db-slice-completion-schema.js";
 import { createMilestoneValidationSchemaV42, createMilestoneVerdictScopeSchemaV49 } from "./db-milestone-validation-schema.js";
 import { createBlockerAcceptedCloseoutSchemaV50 } from "./db-blocker-accepted-closeout-schema.js";
+import { createHumanUatPendingSchemaV52 } from "./db-human-uat-pending-schema.js";
 import { createMilestoneCompletionSchemaV43 } from "./db-milestone-completion-schema.js";
 import { createMilestoneReopenSchemaV44 } from "./db-milestone-reopen-schema.js";
 import { createCanonicalFoundationSchemaV31 } from "./db-canonical-foundation-schema.js";
@@ -599,4 +600,8 @@ export function applyMigrationV51SliceSurface(db: DbAdapter): void {
     "surface",
     "ALTER TABLE slices ADD COLUMN surface TEXT NOT NULL DEFAULT 'cli'",
   );
+}
+
+export function applyMigrationV52HumanUatPending(db: DbAdapter): void {
+  createHumanUatPendingSchemaV52(db);
 }

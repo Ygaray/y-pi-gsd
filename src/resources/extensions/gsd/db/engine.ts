@@ -94,6 +94,7 @@ import {
   applyMigrationV49MilestoneVerdictScope,
   applyMigrationV50BlockerAcceptedCloseout,
   applyMigrationV51SliceSurface,
+  applyMigrationV52HumanUatPending,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -164,7 +165,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 51;
+export const SCHEMA_VERSION = 52;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -416,6 +417,7 @@ function initSchema(
         applyMigrationV49MilestoneVerdictScope(db);
         applyMigrationV50BlockerAcceptedCloseout(db);
         applyMigrationV51SliceSurface(db);
+        applyMigrationV52HumanUatPending(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -839,6 +841,15 @@ function migrateSchema(
       applyMigrationV51SliceSurface(db);
       stampStateCutoverPragmas(db, 51);
       recordSchemaVersion(db, 51);
+    }
+
+    if (currentVersion < 52) {
+      // V52 — Gate-2 human-UAT pending ledger (Phase 13, LEDGER-01): additive
+      // human_uat_pending table backing the milestone close guard that blocks
+      // completion while a human-UAT entry is outstanding.
+      applyMigrationV52HumanUatPending(db);
+      stampStateCutoverPragmas(db, 52);
+      recordSchemaVersion(db, 52);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

@@ -1,8 +1,11 @@
 // Project/App: gsd-pi
 // File Purpose: Tests for extracted GSD database migration DDL steps.
 
-import { describe, test } from "node:test";
+import { afterEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DbAdapter, DbStatement } from "../db-adapter.ts";
 import {
   applyMigrationV2Artifacts,
@@ -20,7 +23,9 @@ import {
   applyMigrationV22QualityGateRepair,
   applyMigrationV48TaskToolRequirements,
   applyMigrationV51SliceSurface,
+  applyMigrationV52HumanUatPending,
 } from "../db-migration-steps.ts";
+import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 
 class FakeStatement implements DbStatement {
   private readonly rows: Record<string, unknown>[];
@@ -55,6 +60,20 @@ class FakeAdapter implements DbAdapter {
   }
 
   close(): void {}
+}
+
+const tempDirs = new Set<string>();
+
+afterEach(() => {
+  closeDatabase();
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  tempDirs.clear();
+});
+
+function freshDbPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-migration-steps-v52-"));
+  tempDirs.add(dir);
+  return join(dir, "gsd.db");
 }
 
 describe("db-migration-steps", () => {
@@ -140,6 +159,26 @@ describe("db-migration-steps", () => {
     assert.deepEqual(db.execCalls, [
       "ALTER TABLE slices ADD COLUMN surface TEXT NOT NULL DEFAULT 'cli'",
     ]);
+  });
+
+  test("v52 creates the Gate-2 human-UAT pending ledger", () => {
+    const dbPath = freshDbPath();
+    assert.equal(openDatabase(dbPath), true);
+    const db = _getAdapter();
+    assert.ok(db);
+
+    const table = db.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'human_uat_pending'
+    `).get();
+    assert.ok(table, "human_uat_pending table must exist after fresh install (already applied at v52)");
+
+    // Idempotency: a second call on the already-migrated database must not throw.
+    assert.doesNotThrow(() => applyMigrationV52HumanUatPending(db));
+
+    const index = db.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = 'idx_human_uat_pending_one_open'
+    `).get();
+    assert.ok(index, "idx_human_uat_pending_one_open index must exist");
   });
 
   test("memory FTS migration delegates data-copy backfill to caller-owned write callback", () => {
