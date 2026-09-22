@@ -759,6 +759,126 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
       cleanup();
     }
   });
+
+  test("a criteria-less slice self-skips: evaluatePostUnit returns null, never queuing the gate hook", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({ id: "S01", milestoneId: "M001", status: "active" });
+
+      const registry = new RuleRegistry([]);
+      const result = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.equal(result, null, "a slice with no declared success_criteria must never dispatch the gate hook");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("two different criteria-bearing slices dispatch independently with correct per-slice targets, no cross-slice bleed", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+      insertSlice({
+        id: "S02",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle Y" },
+      });
+
+      const registry1 = new RuleRegistry([]);
+      const dispatch1 = registry1.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      const registry2 = new RuleRegistry([]);
+      const dispatch2 = registry2.evaluatePostUnit("complete-slice", "M001/S02", projectRoot);
+
+      assert.notEqual(dispatch1, null);
+      assert.notEqual(dispatch2, null);
+      assert.equal(dispatch1!.unitId, "M001/S01");
+      assert.equal(dispatch2!.unitId, "M001/S02");
+      assert.ok(dispatch1!.prompt.includes("S01"));
+      assert.ok(dispatch2!.prompt.includes("S02"));
+      assert.equal(dispatch1!.prompt.includes("S02"), false, "S01's dispatch must not bleed S02's target");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("toggle genuinely unset (not written at all): behaves identically to explicit false — zero dispatch", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const result = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.equal(result, null, "an unset toggle must behave exactly like an explicit false");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a duplicate complete-slice trigger for the same already-dispatched slice does not double-dispatch", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      // Default max_cycles:1 plus the existing, unmodified one-shot
+      // lost-dispatch refund (#1246/#2194 — a repeated "complete-slice"
+      // trigger with no intervening hook/agentic-gate1 completion looks
+      // identical to a lost/interrupted dispatch) means a repeated trigger
+      // is re-dispatched exactly once, then blocks on the third call —
+      // never looping unboundedly. This is the pre-existing
+      // cycleCounts/max_cycles + redispatchedGateKeys mechanism, unmodified
+      // by this plan; this test proves it holds for the new gate hook too.
+      const registry = new RuleRegistry([]);
+      const first = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(first, null, "first complete-slice trigger must dispatch");
+      assert.equal(first!.unitType, "hook/agentic-gate1");
+
+      const second = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(second, null, "the one-shot lost-dispatch refund re-dispatches the same gate hook once");
+      assert.equal(second!.unitType, "hook/agentic-gate1");
+
+      const third = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.equal(third, null, "a third repeated trigger — refund already spent — must block rather than dispatch a third time");
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "the blocked state must be observable, not a silent unbounded loop");
+      assert.equal(block?.action, "pause");
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("resolveHookArtifactPath", () => {
