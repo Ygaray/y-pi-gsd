@@ -976,7 +976,8 @@ test("legacy preview database target classifies supported schema boundaries and 
     { name: "historical-v47", version: 47, code: "historical-schema-version", outcome: "mapped" },
     { name: "historical-v48", version: 48, code: "historical-schema-version", outcome: "mapped" },
     { name: "historical-v49", version: 49, code: "historical-schema-version", outcome: "mapped" },
-    { name: "future-v51", version: 51, code: "future-schema-version", outcome: "unparsed" },
+    { name: "historical-v51", version: 51, code: "historical-schema-version", outcome: "mapped" },
+    { name: "future-v53", version: 53, code: "future-schema-version", outcome: "unparsed" },
   ] as const;
   for (const scenario of scenarios) {
     const gsd = join(base, scenario.name);
