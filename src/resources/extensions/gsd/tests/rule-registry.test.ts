@@ -29,7 +29,10 @@ import {
   insertSlice,
   insertTask,
   openDatabase,
+  _getAdapter,
 } from "../gsd-db.ts";
+import { resolvePostUnitHooks } from "../preferences.ts";
+import { SELF_UAT_LOG_DIR_RELATIVE, selfUatLogFileName } from "../verify-agentic-log.ts";
 
 // ─── Mock Rule Factories ──────────────────────────────────────────────────
 
@@ -640,6 +643,121 @@ describe("RuleRegistry", () => {
 
     assert.deepStrictEqual(result.action, "stop", "result is a stop action");
     assert.deepStrictEqual(result.matchedRule, "<no-match>", "matchedRule is '<no-match>' on fallback");
+  });
+});
+
+// ─── Phase 11: agentic-gate1 blocking dispatch ─────────────────────────────
+
+/** Shared fixture setup for the agentic-gate1 describe block below. */
+function setupGate1Fixture(prefsLines: string[]): { projectRoot: string; cleanup: () => void } {
+  const originalGsdHome = process.env.GSD_HOME;
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-gate1-"));
+  const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-gate1-home-"));
+  mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
+  writeFileSync(join(projectRoot, ".gsd", "PREFERENCES.md"), prefsLines.join("\n"), "utf-8");
+  process.env.GSD_HOME = tempGsdHome;
+  openDatabase(join(projectRoot, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  return {
+    projectRoot,
+    cleanup: () => {
+      closeDatabase();
+      if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+      else process.env.GSD_HOME = originalGsdHome;
+      rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(tempGsdHome, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
+  test("toggle OFF: resolvePostUnitHooks has no agentic-gate1 entry even with unrelated post_unit_hooks configured", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "post_unit_hooks:",
+      "  - name: review-after-task",
+      "    after: [execute-task]",
+      "    prompt: Review {taskId}",
+      "---",
+    ]);
+    try {
+      insertSlice({ id: "S01", milestoneId: "M001", status: "active" });
+      const hooks = resolvePostUnitHooks(projectRoot);
+      assert.equal(hooks.some(h => h.name === "agentic-gate1"), false, "toggle off must never synthesize the gate hook");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("toggle ON + android surface + criteria: dispatch prompt uses the android driver, never cli", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+      _getAdapter()!.prepare("UPDATE slices SET surface = ? WHERE milestone_id = ? AND id = ?")
+        .run("android", "M001", "S01");
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+
+      assert.notEqual(dispatch, null, "criteria-bearing slice with toggle on must dispatch");
+      assert.equal(dispatch!.unitType, "hook/agentic-gate1");
+      assert.ok(dispatch!.prompt.includes("S01"), "prompt must reference the target slice ID");
+      assert.ok(
+        dispatch!.prompt.includes("src/resources/skills/agentic-tester/drivers/android.md"),
+        "prompt must reference the android driver path",
+      );
+      assert.equal(
+        dispatch!.prompt.includes("src/resources/skills/agentic-tester/drivers/cli.md"),
+        false,
+        "prompt must NEVER reference the cli driver path for an android-surfaced slice",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a real passing timestamped SELF-UAT artifact clears the block and evaluatePostUnit returns null", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+      assert.equal(dispatch!.unitType, "hook/agentic-gate1");
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const fileName = selfUatLogFileName("S01", new Date().toISOString());
+      writeFileSync(join(selfUatDir, fileName), "---\nresult: all_pass\nverdict: pass\n---\n", "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a pass verdict clears the block");
+      assert.equal(registry.consumeGateBlock(), null, "no gate block should be pending after a pass verdict");
+    } finally {
+      cleanup();
+    }
   });
 });
 
