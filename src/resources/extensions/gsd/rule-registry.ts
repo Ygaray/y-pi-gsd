@@ -755,12 +755,16 @@ export class RuleRegistry {
     // all-PARTIAL SELF-UAT run (result: "has_partial") its own verdict,
     // "needs-attention", distinct from "advisory" (reserved for the true
     // no_criteria case). "needs-attention" does NOT satisfy this pass/advisory
-    // fast path -- it falls through below, which re-arms `activeHook` and
-    // returns a fresh dispatch instead of dequeuing past the block, so a
-    // restored all-PARTIAL block stays outstanding (mirroring
-    // `_handleBlockingGateCompletion` below routing the same verdict through
-    // `_pauseForGate`) rather than silently clearing a blocking correctness
-    // gate on resume.
+    // fast path -- it falls through below with every other non-clearing
+    // verdict (needs-rework, needs-remediation, failed, undefined): the block
+    // stays outstanding and this re-arms `activeHook`, returning a fresh
+    // dispatch so the resumed session re-runs the gate hook and gets a new
+    // verdict, rather than the pass/advisory fast path silently dropping a
+    // restored all-PARTIAL block. This does NOT itself re-invoke
+    // `_pauseForGate` -- a resumed session re-verifies rather than
+    // re-prompting; if the re-run comes back needs-attention again, the LIVE
+    // completion path (`_handleBlockingGateCompletion` below) is what pauses
+    // again via `_pauseForGate`.
     if (outcome.verdict === "pass" || outcome.verdict === "advisory") {
       return this._dequeueNextHook(basePath);
     }
@@ -862,6 +866,18 @@ export class RuleRegistry {
     return null;
   }
 
+  /**
+   * IN-01 (resolved): the needs-remediation/needs-attention pause reason is
+   * identical at both switch call sites below (`_handleExistingBlockingArtifact`
+   * and `_handleBlockingGateCompletion`) -- extracted here so a future wording
+   * change or third caller only has one spot to update.
+   */
+  private _gateAttentionReason(config: PostUnitHookConfig, outcome: GateOutcome): string {
+    return config.name === AGENTIC_GATE1_HOOK_NAME
+      ? "SELF-UAT partial -- no criterion fully verified"
+      : `gate reported ${outcome.verdict}`;
+  }
+
   private _handleExistingBlockingArtifact(
     config: PostUnitHookConfig,
     trigger: HookTriggerRef,
@@ -884,11 +900,7 @@ export class RuleRegistry {
         return this._routeNeedsRework(config, trigger, outcome);
       case "needs-remediation":
       case "needs-attention": {
-        const reason =
-          config.name === AGENTIC_GATE1_HOOK_NAME
-            ? "SELF-UAT partial -- no criterion fully verified"
-            : `gate reported ${outcome.verdict}`;
-        this._pauseForGate(config, trigger, outcome, reason);
+        this._pauseForGate(config, trigger, outcome, this._gateAttentionReason(config, outcome));
         return null;
       }
       case "failed":
@@ -958,13 +970,8 @@ export class RuleRegistry {
       case "needs-rework":
         return this._routeNeedsRework(config, hook, outcome);
       case "needs-remediation":
-      case "needs-attention": {
-        const reason =
-          config.name === AGENTIC_GATE1_HOOK_NAME
-            ? "SELF-UAT partial -- no criterion fully verified"
-            : `gate reported ${outcome.verdict}`;
-        return this._pauseForGate(config, hook, outcome, reason);
-      }
+      case "needs-attention":
+        return this._pauseForGate(config, hook, outcome, this._gateAttentionReason(config, outcome));
       case "failed":
       case undefined:
         return this._rerunGateOrBlock(config, hook, basePath, {

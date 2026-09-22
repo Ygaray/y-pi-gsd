@@ -1046,6 +1046,75 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
     }
   });
 
+  test("WR-02-followup: reconcileRestoredGateBlock on a resumed needs-attention block does not dequeue past the gate, and re-dispatches the same hook rather than clearing it", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const fileName = selfUatLogFileName("M001/S01", new Date().toISOString());
+      // Represents an all-PARTIAL SELF-UAT run: aggregateSelfUat derives
+      // verdict "needs-attention" (not "advisory") for result "has_partial".
+      writeFileSync(join(selfUatDir, fileName), "---\nresult: has_partial\nverdict: needs-attention\n---\n", "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a needs-attention verdict must not clear the gate or auto-dispatch again");
+
+      // Do NOT consume the block here -- persist it outstanding, exactly as
+      // it would be across a real pause/resume, and reconcile it against a
+      // fresh registry instance restored from that persisted state.
+      registry.persistState(projectRoot);
+
+      const resumed = new RuleRegistry([]);
+      resumed.restoreState(projectRoot);
+      assert.notEqual(
+        resumed.gateBlockPending,
+        null,
+        "the restored registry must still carry the outstanding needs-attention block",
+      );
+
+      const reconciled = resumed.reconcileRestoredGateBlock(projectRoot);
+      assert.notEqual(
+        reconciled,
+        null,
+        "reconcileRestoredGateBlock must return a fresh dispatch on resume, not silently dequeue past the block as pass/advisory would",
+      );
+      assert.equal(
+        reconciled?.unitType,
+        "hook/agentic-gate1",
+        "the fresh dispatch must re-run the SAME gate hook, not the next unit behind it in the queue",
+      );
+      assert.equal(reconciled?.unitId, "M001/S01");
+      assert.equal(
+        resumed.activeHook?.hookName,
+        "agentic-gate1",
+        "activeHook must be re-armed so the re-run's completion is assessed against the gate",
+      );
+      assert.equal(
+        resumed.consumeGateBlock(),
+        null,
+        "reconcile must not leave behind a pass/advisory-style cleared block -- the outstanding needs-attention block was replaced by a live re-dispatch, not treated as a clean pass",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   test("a halted run with no SELF-UAT artifact still produces an observable block, never a silent hang", () => {
     const { projectRoot, cleanup } = setupGate1Fixture([
       "---",
