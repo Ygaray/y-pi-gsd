@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -27,14 +27,21 @@ import {
   openDatabase,
   readDomainOperationFence,
 } from "../gsd-db.ts";
+import { renderHumanUatPendingLedger } from "../human-uat-pending-projection.ts";
 import {
   registerGate2HumanUatPending,
   resolveGate2HumanUatPending,
 } from "../milestone-gate2-human-uat-domain-operation.ts";
+import {
+  completeMilestone,
+  MilestoneLifecycleValidationError,
+} from "../milestone-lifecycle-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
+import { handleValidateMilestone, type ValidateMilestoneParams } from "../tools/validate-milestone.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
 
 const tempDirs = new Set<string>();
+let testedSourceRevision = "";
 
 function db() {
   const adapter = _getAdapter();
@@ -127,6 +134,7 @@ function makeBase(): string {
   execFileSync("git", ["commit", "-m", "fixture"], { cwd: basePath, stdio: "ignore" });
   const source = captureVerificationSourceSnapshot([{ id: "project", cwd: basePath }]);
   if (!source.ok) assert.fail(source.error);
+  testedSourceRevision = source.snapshot.aggregateRevision;
 
   assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
   insertMilestone({ id: "M001", title: "Gate-2 drain", status: "active" });
@@ -148,8 +156,71 @@ function makeBase(): string {
   return basePath;
 }
 
+/** Registers a second slice (S02) on the same milestone, for partial-clearance tests. */
+function addSecondSlice(): void {
+  insertSlice({ id: "S02", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T02", sliceId: "S02", milestoneId: "M001", status: "complete" });
+  executeAtFence("test.gate2.ready-second-slice", "fixture/gate2-drain/ready-second-slice", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "completed",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S02", taskId: "T02",
+      lifecycleStatus: "completed",
+    });
+  });
+}
+
+const validation: ValidateMilestoneParams = {
+  milestoneId: "M001",
+  verdict: "pass",
+  remediationRound: 0,
+  successCriteriaChecklist: "- [x] Complete",
+  sliceDeliveryAudit: "| S01 | delivered |",
+  crossSliceIntegration: "Passed",
+  requirementCoverage: "Covered",
+  verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+  verdictRationale: "All current database evidence passes.",
+};
+
+async function prepareValidatedFixture(): Promise<string> {
+  const basePath = makeBase();
+  const result = await handleValidateMilestone(validation, basePath, {
+    invocation: invocation("fixture/gate2-drain/validate"),
+    skipBrowserEvidenceGate: true,
+  });
+  assert.ok(!("error" in result), `validation fixture failed: ${"error" in result ? result.error : ""}`);
+  return basePath;
+}
+
+function completionInput(idempotencyKey: string) {
+  return {
+    invocation: invocation(idempotencyKey),
+    milestoneId: "M001",
+    sourceRevision: testedSourceRevision,
+    closeout: {
+      title: "Gate-2 drain completion",
+      oneLiner: "Completed with the Gate-2 sign-off/drain path exercised.",
+      narrative: "Completed through one durable Domain Operation.",
+      successCriteriaResults: "All success criteria passed.",
+      definitionOfDoneResults: "All completion conditions passed.",
+      requirementOutcomes: "All required outcomes are covered.",
+      keyDecisions: ["The database is authoritative"],
+      keyFiles: ["src/resources/extensions/gsd/milestone-gate2-human-uat-domain-operation.ts"],
+      lessonsLearned: ["The event head, not the ledger table, is the guard's authority"],
+      followUps: "None.",
+      deviations: "None.",
+    },
+    audit: {
+      actorName: "gate2-drain-completion-test",
+      triggerReason: "Current validation and terminal descendants",
+    },
+  };
+}
+
 afterEach(() => {
   _setDomainOperationFaultForTest(null);
+  testedSourceRevision = "";
   clearPathCache();
   clearParseCache();
   closeDatabase();
@@ -313,4 +384,118 @@ test("resolve: a fault at after-events leaves the row pending and the outbox row
   `);
   assert.equal(outboxRowsForEntry.length, 1);
   assert.equal(outboxRowsForEntry[0]!["delivered_at"], null);
+});
+
+test("clearance: completeMilestone succeeds after resolveGate2HumanUatPending signs off the only entry", async () => {
+  await prepareValidatedFixture();
+  const registration = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/clearance-register"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: clearance test",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+
+  await assert.rejects(
+    async () => completeMilestone(completionInput("fixture/gate2-drain/clearance-blocked")),
+  );
+
+  resolveGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/clearance-resolve"),
+    entryId: registration.entryId,
+    disposition: "signed-off",
+  });
+
+  const result = await completeMilestone(completionInput("fixture/gate2-drain/clearance-complete"));
+  assert.equal(result.canonicalStatus, "completed");
+});
+
+test("clearance: signing off one of two outstanding entries still blocks, naming only the remaining slice", async () => {
+  // Second slice must exist BEFORE validation is recorded — validating
+  // against a milestone state, then adding a slice afterward, makes the
+  // recorded validation stale ("not current"), which would throw for an
+  // unrelated reason before the Gate-2 guard is ever reached.
+  const basePath = makeBase();
+  addSecondSlice();
+  const validated = await handleValidateMilestone(validation, basePath, {
+    invocation: invocation("fixture/gate2-drain/partial-validate"),
+    skipBrowserEvidenceGate: true,
+  });
+  assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+
+  const first = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/partial-register-first"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: first slice",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/partial-register-second"),
+    milestoneId: "M001",
+    sliceId: "S02",
+    reason: "PARTIAL: second slice",
+    partialCriteria: [{ criterion: "B", evidence: "b" }],
+  });
+
+  resolveGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/partial-resolve-first"),
+    entryId: first.entryId,
+    disposition: "signed-off",
+  });
+
+  await assert.rejects(
+    async () => completeMilestone(completionInput("fixture/gate2-drain/partial-still-blocked")),
+    (error: unknown) => {
+      assert.ok(error instanceof MilestoneLifecycleValidationError);
+      assert.match((error as Error).message, /S02/);
+      assert.doesNotMatch((error as Error).message, /S01/);
+      return true;
+    },
+  );
+});
+
+test("clearance: signed-off-with-gap unblocks the close exactly as signed-off does", async () => {
+  await prepareValidatedFixture();
+  const registration = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/gap-register"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: gap clearance test",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+
+  resolveGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/gap-resolve"),
+    entryId: registration.entryId,
+    disposition: "signed-off-with-gap",
+    note: "Accepted gap",
+  });
+
+  const result = await completeMilestone(completionInput("fixture/gate2-drain/gap-complete"));
+  assert.equal(result.canonicalStatus, "completed");
+});
+
+test("projection: sign-off moves the entry from Outstanding to Signed off in HUMAN-UAT-PENDING.md", async () => {
+  const basePath = await prepareValidatedFixture();
+  const registration = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/projection-register"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: projection test",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+
+  resolveGate2HumanUatPending({
+    invocation: invocation("fixture/gate2-drain/projection-resolve"),
+    entryId: registration.entryId,
+    disposition: "signed-off",
+  });
+  assert.equal(renderHumanUatPendingLedger(basePath), true);
+
+  const content = readFileSync(join(basePath, ".gsd", "HUMAN-UAT-PENDING.md"), "utf-8");
+  const outstandingSection = content.split("## Signed off")[0]!;
+  const signedOffSection = content.split("## Signed off")[1] ?? "";
+  assert.doesNotMatch(outstandingSection, new RegExp(registration.entryId));
+  assert.match(signedOffSection, new RegExp(registration.entryId));
 });
