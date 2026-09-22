@@ -751,8 +751,16 @@ export class RuleRegistry {
     const config = resolvePostUnitHooks(basePath).find(h => h.name === block.hookName);
     if (!config) return this._dequeueNextHook(basePath);
     const outcome = this._readGateOutcome(config, block, basePath);
-    // WR-02 decision record: see the identical `case "pass": case
-    // "advisory":` branch in `_handleBlockingGateCompletion` below.
+    // WR-02 (resolved): aggregateSelfUat (verify-agentic-log.ts) gives an
+    // all-PARTIAL SELF-UAT run (result: "has_partial") its own verdict,
+    // "needs-attention", distinct from "advisory" (reserved for the true
+    // no_criteria case). "needs-attention" does NOT satisfy this pass/advisory
+    // fast path -- it falls through below, which re-arms `activeHook` and
+    // returns a fresh dispatch instead of dequeuing past the block, so a
+    // restored all-PARTIAL block stays outstanding (mirroring
+    // `_handleBlockingGateCompletion` below routing the same verdict through
+    // `_pauseForGate`) rather than silently clearing a blocking correctness
+    // gate on resume.
     if (outcome.verdict === "pass" || outcome.verdict === "advisory") {
       return this._dequeueNextHook(basePath);
     }
@@ -861,18 +869,28 @@ export class RuleRegistry {
   ): "skip" | HookDispatchResult | null {
     const outcome = this._readGateOutcome(config, trigger, basePath);
     switch (outcome.verdict) {
-      // WR-02 decision record: see the identical `case "pass": case
-      // "advisory":` branch in `_handleBlockingGateCompletion` below --
-      // PARTIAL-only SELF-UAT runs are intentionally non-blocking here too.
+      // WR-02 (resolved): aggregateSelfUat (verify-agentic-log.ts) gives an
+      // all-PARTIAL SELF-UAT run (result: "has_partial") its own verdict,
+      // "needs-attention", distinct from "advisory" (reserved for the true
+      // no_criteria case). "needs-attention" is NOT handled by this
+      // pass/advisory fast path -- it falls through to the
+      // needs-remediation/needs-attention case below, which routes through
+      // `_pauseForGate`: an all-PARTIAL run pauses for human review rather
+      // than silently clearing a blocking correctness gate.
       case "pass":
       case "advisory":
         return "skip";
       case "needs-rework":
         return this._routeNeedsRework(config, trigger, outcome);
       case "needs-remediation":
-      case "needs-attention":
-        this._pauseForGate(config, trigger, outcome, `gate reported ${outcome.verdict}`);
+      case "needs-attention": {
+        const reason =
+          config.name === AGENTIC_GATE1_HOOK_NAME
+            ? "SELF-UAT partial -- no criterion fully verified"
+            : `gate reported ${outcome.verdict}`;
+        this._pauseForGate(config, trigger, outcome, reason);
         return null;
+      }
       case "failed":
       case undefined:
         return this._rerunGateOrBlock(config, trigger, basePath, {
@@ -924,22 +942,15 @@ export class RuleRegistry {
 
     const outcome = this._readGateOutcome(config, hook, basePath);
     switch (outcome.verdict) {
-      // WR-02 decision record: `aggregateSelfUat` (verify-agentic-log.ts)
-      // derives `verdict: "advisory"` for a SELF-UAT run where every graded
-      // criterion is PASS or PARTIAL (no FAIL) -- i.e. a `result: "has_partial"`
-      // outcome clears the gate exactly like a clean pass. This is
-      // pre-existing behavior, unchanged by Phase 11 (it follows
-      // `uat-policy.ts`'s precedent of treating PARTIAL as non-blocking
-      // advisory), and is INTENTIONALLY carried through to this *blocking*
-      // gate: a slice-level SELF-UAT that only ever produces partial
-      // evidence (never an outright FAIL) is not treated as a hard blocker.
-      // If partial failures should instead block, this branch would need to
-      // distinguish a `result: "has_partial"` artifact from a true
-      // `result: "all_pass"`/generic-advisory one (the `result:` frontmatter
-      // field is written alongside `verdict:` but not currently parsed by
-      // `extractFrontmatterVerdict`) and route the former through
-      // `_routeNeedsRework` before this fast path -- that would be a
-      // deliberate behavior change, not a bug fix.
+      // WR-02 (resolved): aggregateSelfUat (verify-agentic-log.ts) gives an
+      // all-PARTIAL SELF-UAT run (result: "has_partial") its own verdict,
+      // "needs-attention", distinct from "advisory" (reserved for the true
+      // no_criteria case). "needs-attention" is NOT handled by this
+      // pass/advisory fast path -- it falls through to the
+      // needs-remediation/needs-attention case below, which routes through
+      // `_pauseForGate`: an all-PARTIAL run pauses for human review
+      // ("SELF-UAT partial -- no criterion fully verified") rather than
+      // silently clearing a blocking correctness gate.
       case "pass":
       case "advisory":
         this.activeHook = null;
@@ -947,8 +958,13 @@ export class RuleRegistry {
       case "needs-rework":
         return this._routeNeedsRework(config, hook, outcome);
       case "needs-remediation":
-      case "needs-attention":
-        return this._pauseForGate(config, hook, outcome, `gate reported ${outcome.verdict}`);
+      case "needs-attention": {
+        const reason =
+          config.name === AGENTIC_GATE1_HOOK_NAME
+            ? "SELF-UAT partial -- no criterion fully verified"
+            : `gate reported ${outcome.verdict}`;
+        return this._pauseForGate(config, hook, outcome, reason);
+      }
       case "failed":
       case undefined:
         return this._rerunGateOrBlock(config, hook, basePath, {

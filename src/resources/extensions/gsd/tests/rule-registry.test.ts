@@ -1004,6 +1004,48 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
     }
   });
 
+  test("WR-02 (resolved): a needs-attention verdict (all-PARTIAL SELF-UAT run) pauses the blocking gate, never clears and never auto-reworks", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      // CR-01: artifact is keyed by the full "{milestone}/{slice}" unit id.
+      const fileName = selfUatLogFileName("M001/S01", new Date().toISOString());
+      // Represents an all-PARTIAL SELF-UAT run: aggregateSelfUat now derives
+      // verdict "needs-attention" (not "advisory") for result "has_partial".
+      writeFileSync(join(selfUatDir, fileName), "---\nresult: has_partial\nverdict: needs-attention\n---\n", "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a needs-attention verdict must not clear the gate or auto-dispatch again");
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "needs-attention must produce an observable gate block, not a silent clear");
+      assert.equal(block?.action, "pause", "on_block.action must be pause, never retry-unit/retry-task");
+      assert.equal(
+        block?.reason,
+        "SELF-UAT partial -- no criterion fully verified",
+        "the pause reason must name the SELF-UAT-partial cause for the agentic-gate1 hook specifically",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   test("a halted run with no SELF-UAT artifact still produces an observable block, never a silent hang", () => {
     const { projectRoot, cleanup } = setupGate1Fixture([
       "---",

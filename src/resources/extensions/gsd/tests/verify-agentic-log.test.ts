@@ -722,13 +722,13 @@ describe("aggregateSelfUat", () => {
     assert.deepEqual(aggregateSelfUat([]), { result: "no_criteria", verdict: "advisory" });
   });
 
-  it("returns { result: has_partial, verdict: advisory } for one PASS and one PARTIAL (SC2)", () => {
+  it("returns { result: has_partial, verdict: needs-attention } for one PASS and one PARTIAL (SC2)", () => {
     assert.deepEqual(
       aggregateSelfUat([
         { criterion: "a", verdict: "PASS", evidence: "e1" },
         { criterion: "b", verdict: "PARTIAL", evidence: "e2" },
       ]),
-      { result: "has_partial", verdict: "advisory" },
+      { result: "has_partial", verdict: "needs-attention" },
     );
   });
 
@@ -770,6 +770,10 @@ describe("isSelfUatResult / isSelfUatVerdict", () => {
   it("isSelfUatVerdict accepts pass and rejects passed", () => {
     assert.equal(isSelfUatVerdict("pass"), true);
     assert.equal(isSelfUatVerdict("passed"), false);
+  });
+
+  it("isSelfUatVerdict accepts needs-attention", () => {
+    assert.equal(isSelfUatVerdict("needs-attention"), true);
   });
 
   it("isSelfUatResult accepts all_pass and rejects allpass", () => {
@@ -823,7 +827,7 @@ describe("renderSelfUat frontmatter channel", () => {
     assert.equal(extractFrontmatterVerdict(doc), "needs-rework");
   });
 
-  it("extractFrontmatterVerdict reads advisory for a render containing a PARTIAL and no FAIL", () => {
+  it("extractFrontmatterVerdict reads needs-attention for a render containing a PARTIAL and no FAIL", () => {
     const doc = renderSelfUat(
       [
         { criterion: "a", verdict: "PASS", evidence: "e1" },
@@ -831,7 +835,7 @@ describe("renderSelfUat frontmatter channel", () => {
       ],
       BASE_META,
     );
-    assert.equal(extractFrontmatterVerdict(doc), "advisory");
+    assert.equal(extractFrontmatterVerdict(doc), "needs-attention");
   });
 });
 

@@ -55,8 +55,15 @@ export function isSelfUatResult(value: string): value is SelfUatResult {
  * or as evidence the run completed — a halted run is arguably the worst
  * outcome (the surface never became testable), so silently passing it would
  * be worse than misreading a real `needs-rework`.
+ *
+ * There are now FOUR closed outcomes, not three: `pass` (all_pass),
+ * `needs-rework` (has_fail), `needs-attention` (has_partial), and `advisory`
+ * (no_criteria only). `advisory` no longer covers `has_partial` (WR-02,
+ * resolved) — an all-PARTIAL run gets its own distinct `needs-attention`
+ * verdict so a blocking gate consumer routes it through a human-pause path
+ * instead of silently clearing.
  */
-export const SELF_UAT_VERDICTS = ["pass", "needs-rework", "advisory"] as const;
+export const SELF_UAT_VERDICTS = ["pass", "needs-rework", "needs-attention", "advisory"] as const;
 export type SelfUatVerdict = (typeof SELF_UAT_VERDICTS)[number];
 
 /** Check whether a string is a valid {@link SelfUatVerdict}. */
@@ -228,6 +235,14 @@ function validateResults(results: SelfUatCriterionResult[]): void {
  * This is the ONLY producer of {@link SelfUatResult} / {@link SelfUatVerdict}
  * values inside this module — `renderSelfUat` takes no aggregate parameter,
  * so a caller has no channel to self-declare its own outcome (T-09-04).
+ *
+ * Four closed outcomes, one verdict each: `no_criteria` -> `advisory`,
+ * `has_fail` -> `needs-rework`, `has_partial` -> `needs-attention` (WR-02,
+ * resolved), `all_pass` -> `pass`. `advisory` is reserved for the true
+ * "nothing to check" case — an all-PARTIAL run (`has_partial`) is NOT
+ * `advisory`: it gets its own `needs-attention` verdict so a blocking gate
+ * consumer routes it through a human-pause path rather than treating it as
+ * equivalent to a clean pass.
  */
 export function aggregateSelfUat(results: SelfUatCriterionResult[]): SelfUatAggregate {
   // D-02: zero graded criteria is its own distinct non-pass aggregate — it
@@ -243,7 +258,7 @@ export function aggregateSelfUat(results: SelfUatCriterionResult[]): SelfUatAggr
     return { result: "has_fail", verdict: "needs-rework" };
   }
   if (results.some((result) => result.verdict === "PARTIAL")) {
-    return { result: "has_partial", verdict: "advisory" };
+    return { result: "has_partial", verdict: "needs-attention" };
   }
   return { result: "all_pass", verdict: "pass" };
 }

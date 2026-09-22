@@ -387,7 +387,7 @@ describe("write-self-uat.mjs — aggregate verdict channel (PARTIAL, GATE-01)", 
     );
   }
 
-  it("accepts a single PARTIAL result and writes a file whose frontmatter reads has_partial / advisory", () => {
+  it("accepts a single PARTIAL result and writes a file whose frontmatter reads has_partial / needs-attention", () => {
     const inv = invoke({
       target: "S09",
       surface: "cli",
@@ -399,7 +399,7 @@ describe("write-self-uat.mjs — aggregate verdict channel (PARTIAL, GATE-01)", 
 
     const written = writtenContent(inv);
     assertTwoEntryFrontmatter(written, "has_partial");
-    assert.equal(extractFrontmatterVerdict(written), "advisory");
+    assert.equal(extractFrontmatterVerdict(written), "needs-attention");
   });
 
   it("writes has_fail / needs-rework when a PASS/PARTIAL/FAIL mix includes a FAIL with a distinct root cause", () => {
