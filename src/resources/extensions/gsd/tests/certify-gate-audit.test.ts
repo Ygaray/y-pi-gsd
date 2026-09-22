@@ -73,15 +73,15 @@ test("a slice with a pending quality_gates row yields one fixable gate-pending g
   insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
   db().prepare(`
     INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
-    VALUES ('M001', 'S01', 'CERT01', 'slice', '', 'pending')
+    VALUES ('M001', 'S01', 'Q8', 'slice', '', 'pending')
   `).run();
 
   const gaps = auditMilestoneSliceGates({ projectId, milestoneId: "M001" });
   assert.equal(gaps.length, 1);
   assert.equal(gaps[0]!.gapClass, "gate-pending");
   assert.equal(gaps[0]!.fixable, true);
-  assert.equal(gaps[0]!.gateId, "CERT01");
-  assert.equal(gaps[0]!.ownerTurn, getOwnerTurn("CERT01"));
+  assert.equal(gaps[0]!.gateId, "Q8");
+  assert.equal(gaps[0]!.ownerTurn, getOwnerTurn("Q8"));
 });
 
 test("a slice with a complete/flag quality_gates row yields one fixable gate-flagged gap", () => {
@@ -89,13 +89,29 @@ test("a slice with a complete/flag quality_gates row yields one fixable gate-fla
   insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
   db().prepare(`
     INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status, verdict, findings, evaluated_at)
-    VALUES ('M001', 'S01', 'CERT01', 'slice', '', 'complete', 'flag', 'stale evidence', '2026-09-22T00:00:00.000Z')
+    VALUES ('M001', 'S01', 'Q8', 'slice', '', 'complete', 'flag', 'stale evidence', '2026-09-22T00:00:00.000Z')
   `).run();
 
   const gaps = auditMilestoneSliceGates({ projectId, milestoneId: "M001" });
   assert.equal(gaps.length, 1);
   assert.equal(gaps[0]!.gapClass, "gate-flagged");
   assert.equal(gaps[0]!.fixable, true);
+});
+
+test("certify's own CERT01/CERT02 rows never feed back in as gate-pending/gate-flagged gaps", () => {
+  const { projectId } = openFixture();
+  insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
+  db().prepare(`
+    INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status, verdict, evaluated_at)
+    VALUES ('M001', 'S01', 'CERT01', 'slice', '', 'complete', 'flag', '2026-09-22T00:00:00.000Z')
+  `).run();
+  db().prepare(`
+    INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
+    VALUES ('M001', 'S01', 'CERT02', 'slice', '', 'pending')
+  `).run();
+
+  const gaps = auditMilestoneSliceGates({ projectId, milestoneId: "M001" });
+  assert.equal(gaps.length, 0);
 });
 
 test("a terminal slice with no rework briefs, no human_uat_pending, and no evaluated CERT01 row yields one non-fixable gate1-record-missing gap", () => {
@@ -201,17 +217,17 @@ test("gaps are sorted by sliceId then gapId ascending and repeated calls are dee
   insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
   db().prepare(`
     INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
-    VALUES ('M001', 'S02', 'CERT01', 'slice', '', 'pending')
+    VALUES ('M001', 'S02', 'Q8', 'slice', '', 'pending')
   `).run();
   db().prepare(`
     INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
-    VALUES ('M001', 'S01', 'CERT01', 'slice', '', 'pending')
+    VALUES ('M001', 'S01', 'Q8', 'slice', '', 'pending')
   `).run();
 
   const first = auditMilestoneSliceGates({ projectId, milestoneId: "M001" });
   const expected = [
-    { gapId: certifyGapId("gate-pending", "S01", "CERT01"), sliceId: "S01" },
-    { gapId: certifyGapId("gate-pending", "S02", "CERT01"), sliceId: "S02" },
+    { gapId: certifyGapId("gate-pending", "S01", "Q8"), sliceId: "S01" },
+    { gapId: certifyGapId("gate-pending", "S02", "Q8"), sliceId: "S02" },
   ];
   assert.deepEqual(first.map((g) => ({ gapId: g.gapId, sliceId: g.sliceId })), expected);
 
@@ -233,7 +249,7 @@ test("auditMilestoneSliceGates reads only the database — no .gsd/milestones di
   insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
   db().prepare(`
     INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
-    VALUES ('M001', 'S01', 'CERT01', 'slice', '', 'pending')
+    VALUES ('M001', 'S01', 'Q8', 'slice', '', 'pending')
   `).run();
 
   const gaps = auditMilestoneSliceGates({ projectId, milestoneId: "M001" });

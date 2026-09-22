@@ -1,8 +1,11 @@
 // Project/App: gsd-pi
 // File Purpose: End-to-end contract proving certifyMilestone() commits a durable,
 // replayable "milestone.certify.recorded" verdict through the real domain-operation
-// stack, writes only milestone-certify:-namespaced criteria, and refuses an
-// out-of-namespace criterionKey (14-01-PLAN.md Task 1).
+// stack, writes only milestone-certify:-namespaced criteria, and derives its own
+// criteria/verdict rather than accepting a caller-supplied one (14-01-PLAN.md
+// Task 1; contract updated by 14-02-PLAN.md Task 3, which made certify derive
+// its own criteria — see tests/certify-milestone-end-to-end.test.ts for full
+// gap-derivation/self-fix/escalation coverage).
 
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,7 +28,6 @@ import {
 } from "../gsd-db.ts";
 import {
   certifyMilestone,
-  type CertifyMilestoneCriterionInput,
   type CertifyMilestoneInput,
 } from "../milestone-certify-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
@@ -97,6 +99,17 @@ function makeBase(): string {
   assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
   insertMilestone({ id: "M001", title: "Certify stage", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  // A satisfied, evaluated Gate-1 signal — without this, S01 is a terminal
+  // slice with zero durable Gate-1 evidence, which auditMilestoneSliceGates
+  // (Task 2) correctly reports as a gate1-record-missing gap rather than a
+  // silent pass. These fixtures test certifyMilestone()'s domain-operation
+  // contract, not gap derivation itself (see certify-gate-audit.test.ts and
+  // certify-milestone-end-to-end.test.ts for that), so the fixture must be
+  // genuinely gap-free to keep repeated calls deterministic under replay.
+  db().prepare(`
+    INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status, verdict, evaluated_at)
+    VALUES ('M001', 'S01', 'CERT01', 'slice', '', 'complete', 'pass', '2026-09-22T00:00:00.000Z')
+  `).run();
 
   executeAtFence("test.certify.fixture", "fixture/certify/adopt", (context) => {
     adoptOrTransitionLifecycle(context, {
@@ -104,29 +117,6 @@ function makeBase(): string {
     });
   });
   return basePath;
-}
-
-function certifyCriterion(
-  overrides: Partial<CertifyMilestoneCriterionInput> = {},
-): CertifyMilestoneCriterionInput {
-  return {
-    criterionKey: "milestone-certify:gate-audit",
-    evidenceClass: "artifact",
-    description: "Every slice's durable gate evidence is current and passing.",
-    verdict: "pass",
-    rationale: "All slice quality_gates rows read pass with no open rework.",
-    evidence: [{
-      evidenceClass: "artifact",
-      commandOrTool: "certify-milestone-audit",
-      workingDirectory: "/tmp",
-      startedAt: "2026-09-22T10:00:00.000Z",
-      endedAt: "2026-09-22T10:00:01.000Z",
-      observation: "passed",
-      durableOutputRef: "artifact://certify/gate-audit",
-      environment: { runner: "certify" },
-    }],
-    ...overrides,
-  };
 }
 
 function certifyInput(
@@ -137,13 +127,6 @@ function certifyInput(
     invocation: invocation(idempotencyKey),
     milestoneId: "M001",
     testedSourceRevision: "sha256:fixture-revision",
-    verdict: "pass",
-    rationale: "Certify stage found no unresolved gaps.",
-    outcome: "succeeded",
-    failureClass: "none",
-    summary: "Certify recorded a passing verdict.",
-    output: { stage: "certify" },
-    criteria: [certifyCriterion()],
     ...overrides,
   };
 }
@@ -223,31 +206,39 @@ test("a different idempotency key commits a second, additional certify event", (
   assert.equal(eventRows.length, 2);
 });
 
-test("a criterionKey outside the certify namespace throws and writes nothing", () => {
+test("certifyMilestone always derives exactly the gate-audit and integration-check criteria — no caller-supplied criteria input exists", () => {
   makeBase();
-  const beforeEvents = Number(row(`
-    SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'milestone.certify.recorded'
-  `).count);
-  const beforeCriteria = Number(row(`SELECT COUNT(*) AS count FROM workflow_acceptance_criteria`).count);
+  certifyMilestone(certifyInput("certify/public/derived-criteria"));
 
-  assert.throws(() => {
-    certifyMilestone(certifyInput("certify/public/wrong-namespace", {
-      criteria: [certifyCriterion({ criterionKey: "milestone-validation:contract" })],
-    }));
-  }, /milestone-certify:/);
-
-  assert.equal(Number(row(`
-    SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'milestone.certify.recorded'
-  `).count), beforeEvents);
-  assert.equal(
-    Number(row(`SELECT COUNT(*) AS count FROM workflow_acceptance_criteria`).count),
-    beforeCriteria,
-  );
+  const criteriaRows = rows(`
+    SELECT criterion_key FROM workflow_acceptance_criteria ORDER BY criterion_key
+  `).map((r) => String(r["criterion_key"]));
+  assert.deepEqual(criteriaRows, [
+    "milestone-certify:gate-audit",
+    "milestone-certify:integration-check",
+  ]);
 });
 
-test("certifyMilestone with an empty criteria array throws", () => {
-  makeBase();
-  assert.throws(() => {
-    certifyMilestone(certifyInput("certify/public/empty-criteria", { criteria: [] }));
-  }, /objective criteria/i);
+test("certifyMilestone with a milestone that has zero slices records an inconclusive verdict, never pass", () => {
+  const basePath = mkdtempSync(join(tmpdir(), "gsd-milestone-certify-empty-"));
+  tempDirs.add(basePath);
+  mkdirSync(join(basePath, ".gsd", "milestones", "M002"), { recursive: true });
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M002", title: "Empty certify stage", status: "active" });
+  executeAtFence("test.certify.fixture", "fixture/certify-empty/adopt", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "milestone", milestoneId: "M002", lifecycleStatus: "ready",
+    });
+  });
+
+  const receipt = certifyMilestone(certifyInput("certify/public/empty-slices", { milestoneId: "M002" }));
+  assert.equal(receipt.verdict, "inconclusive");
+
+  const rationaleRow = row(`
+    SELECT verdict.rationale AS rationale
+    FROM workflow_technical_verdicts verdict
+    JOIN workflow_acceptance_criteria criterion ON criterion.criterion_id = verdict.criterion_id
+    WHERE criterion.criterion_key = 'milestone-certify:gate-audit'
+  `);
+  assert.match(String(rationaleRow["rationale"]), /no slices/i);
 });

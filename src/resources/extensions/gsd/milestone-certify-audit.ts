@@ -8,7 +8,7 @@
 
 import { getDb } from "./db/engine.js";
 import { getGateResults, getMilestoneSlices } from "./db/queries.js";
-import { getOwnerTurn } from "./gate-registry.js";
+import { getGateIdsForTurn, getOwnerTurn } from "./gate-registry.js";
 import { countReworkBriefsForSlice } from "./gsd-db.js";
 import { readOutstandingGate2HumanUat } from "./milestone-gate2-human-uat-domain-operation.js";
 import type { CertifyGap, CertifyGapClass } from "./milestone-certify-self-fix.js";
@@ -17,6 +17,15 @@ import { RAW_CLOSED_STATUSES } from "./status-guards.js";
 export type { CertifyGap, CertifyGapClass } from "./milestone-certify-self-fix.js";
 
 const RAW_CLOSED_STATUS_SET: ReadonlySet<string> = new Set(RAW_CLOSED_STATUSES);
+
+/**
+ * Certify's OWN gate ids (CERT01/CERT02) — every prior certify pass's own
+ * `quality_gates` row must never feed back in as an audited gap on the NEXT
+ * pass, or a genuinely fixed slice would compound a `gate-flagged` gap from
+ * certify's own most recent "flag" verdict forever. Only OTHER turns' gate
+ * rows are eligible for `gate-pending`/`gate-flagged` derivation.
+ */
+const CERTIFY_OWN_GATE_IDS: ReadonlySet<string> = getGateIdsForTurn("certify-milestone");
 
 function isTerminalSliceStatus(status: string): boolean {
   return RAW_CLOSED_STATUS_SET.has(status);
@@ -82,6 +91,11 @@ export function auditMilestoneSliceGates(input: {
     const gateRows = getGateResults(milestoneId, sliceId);
 
     for (const gateRow of gateRows) {
+      // Certify's own CERT01/CERT02 rows are OUTPUT, not an audited input —
+      // skip them here so a prior pass's own "flag" verdict never re-enters
+      // as a gap on the next pass. The gate1-record-missing check below still
+      // reads gateRows directly for its CERT01-evaluated signal.
+      if (CERTIFY_OWN_GATE_IDS.has(gateRow.gate_id)) continue;
       if (gateRow.status === "pending") {
         gaps.push({
           gapId: certifyGapId("gate-pending", sliceId, gateRow.gate_id),

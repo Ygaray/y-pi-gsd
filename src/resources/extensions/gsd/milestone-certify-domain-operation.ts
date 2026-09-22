@@ -5,8 +5,11 @@
 // operationType, event type, criterionKey namespace, projection) is genuinely
 // separate from validate-milestone's — D-01/D-03.
 
+import { getMilestoneSlices } from "./db/queries.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
+import { getDb } from "./db/engine.js";
 import type { Gate2HumanUatPartialCriterion } from "./db/writers/milestone-gate2-human-uat.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import {
   MILESTONE_CERTIFY_POLICY,
   type MilestoneValidationEvidenceClass,
@@ -14,11 +17,22 @@ import {
   type MilestoneValidationVerdict,
 } from "./db/writers/milestone-validation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { auditMilestoneSliceGates } from "./milestone-certify-audit.js";
 import {
   registerGate2HumanUatPending,
   type Gate2HumanUatRegistrationReceipt,
 } from "./milestone-gate2-human-uat-domain-operation.js";
-import type { CertifyGap } from "./milestone-certify-self-fix.js";
+import {
+  insertCertifyGates,
+  type CertifyAuditGateVerdict,
+  type CertifyGatePerSliceInput,
+} from "./milestone-close-gates.js";
+import {
+  CERTIFY_SELF_FIX_MAX_ATTEMPTS,
+  countCertifySelfFixAttemptsForGap,
+  recordCertifySelfFixAttempt,
+  type CertifyGap,
+} from "./milestone-certify-self-fix.js";
 import {
   recordMilestoneVerdict,
   type ValidateMilestoneReceipt,
@@ -52,33 +66,20 @@ export interface CertifyMilestoneCriterionInput {
 }
 
 /**
- * Mirrors `ValidateMilestoneInput` but deliberately omits `policyId`/
- * `policyVersion` — those are locked module constants for certify, not a
- * caller-supplied free string (D-01/T-14-01).
+ * Certify now derives its own verdict, criteria, and evidence from durable DB
+ * state (Task 3) — the caller supplies only enough identity to run the pass.
+ * `policyId`/`policyVersion` are locked module constants, never caller-supplied
+ * (D-01/T-14-01), and `criteria` is no longer a caller input at all: a
+ * caller-supplied criterion would reopen exactly the "certify trusts its own
+ * unverified self-report" hole D-01 exists to close.
  */
 export interface CertifyMilestoneInput {
   invocation: ExecutionInvocation;
   milestoneId: string;
   testedSourceRevision: string;
-  verdict: MilestoneValidationVerdict;
-  rationale: string;
-  outcome: "succeeded" | "failed" | "interrupted";
-  failureClass: string;
-  summary: string;
-  output: DomainJsonValue;
-  criteria: CertifyMilestoneCriterionInput[];
 }
 
 export type CertifyMilestoneReceipt = ValidateMilestoneReceipt;
-
-export function certifyMilestone(input: CertifyMilestoneInput): CertifyMilestoneReceipt {
-  return recordMilestoneVerdict({
-    ...input,
-    policyId: MILESTONE_CERTIFY_POLICY_ID,
-    policyVersion: MILESTONE_CERTIFY_POLICY_VERSION,
-    policy: MILESTONE_CERTIFY_POLICY,
-  });
-}
 
 /** Every gap certify derives lands in exactly one of these buckets — none may vanish. */
 export type CertifyGapDisposition = "self-fix-attempted" | "escalated" | "already-escalated";
@@ -151,4 +152,286 @@ export function escalateCertifyGapsToGate2(
     entryId: receipt.entryId,
     receipt,
   };
+}
+
+export interface CertifyMilestoneGapOutcome {
+  gap: CertifyGap;
+  disposition: CertifyGapDisposition;
+  cycle?: number;
+  priorAttempts?: number;
+}
+
+/**
+ * `certifyMilestone`'s receipt extends the underlying verdict receipt with
+ * the full gap-accounting Task 3 requires: every gap the audit derived lands
+ * in exactly one of `selfFixAttempted` / `escalated` / `alreadyEscalated` —
+ * the mechanical form of the "no gap may vanish" prohibition.
+ */
+export interface CertifyMilestoneFullReceipt extends CertifyMilestoneReceipt {
+  gaps: CertifyGap[];
+  selfFixAttempted: CertifyMilestoneGapOutcome[];
+  escalated: CertifyMilestoneGapOutcome[];
+  alreadyEscalated: CertifyMilestoneGapOutcome[];
+}
+
+function findingsForSlice(gaps: CertifyGap[], dispositionByGapId: ReadonlyMap<string, CertifyGapDisposition>): string {
+  if (gaps.length === 0) return "";
+  return gaps
+    .map((gap) => `${gap.gapId} (${gap.gapClass}): ${dispositionByGapId.get(gap.gapId) ?? "unresolved"}`)
+    .join("; ");
+}
+
+function evidenceEnvironment(extra: Record<string, string>): { [key: string]: DomainJsonValue } {
+  return { runner: "certify-milestone", ...extra };
+}
+
+/**
+ * On a replay of the SAME outer idempotency key, `certifyMilestone` must
+ * reproduce byte-identical evidence timestamps or the verdict Domain
+ * Operation's request-hash check rejects the replay as a conflict (mirrors
+ * `readMilestoneValidationAggregateTimestamp`'s identical role for
+ * validate-milestone).
+ */
+function readCertifyEvaluatedAt(idempotencyKey: string): string | null {
+  const row = getDb().prepare(`
+    SELECT evidence.started_at AS started_at
+    FROM workflow_operations operation
+    JOIN workflow_technical_verdicts verdict
+      ON verdict.operation_id = operation.operation_id AND verdict.project_id = operation.project_id
+    JOIN workflow_acceptance_criteria criterion
+      ON criterion.criterion_id = verdict.criterion_id AND criterion.project_id = verdict.project_id
+    JOIN workflow_verification_evidence evidence
+      ON evidence.verdict_id = verdict.verdict_id AND evidence.project_id = verdict.project_id
+    WHERE operation.idempotency_key = :idempotency_key
+      AND operation.operation_type = 'milestone.certify'
+      AND criterion.criterion_key = 'milestone-certify:gate-audit'
+    LIMIT 1
+  `).get({ ":idempotency_key": idempotencyKey }) as Record<string, unknown> | undefined;
+  return row ? String(row["started_at"]) : null;
+}
+
+function buildAggregateCriterion(
+  criterionKey: string,
+  description: string,
+  milestoneId: string,
+  scopedGaps: CertifyGap[],
+  sliceCount: number,
+  dispositionByGapId: ReadonlyMap<string, CertifyGapDisposition>,
+  evaluatedAt: string,
+): CertifyMilestoneCriterionInput {
+  const verdict: MilestoneValidationVerdict = sliceCount === 0
+    ? "inconclusive"
+    : scopedGaps.length === 0
+      ? "pass"
+      : "fail";
+  const observation: MilestoneValidationObservation = verdict === "pass"
+    ? "passed"
+    : verdict === "fail"
+      ? "failed"
+      : "inconclusive";
+  const rationale = sliceCount === 0
+    ? "No slices were available to audit."
+    : scopedGaps.length === 0
+      ? "No gaps found for this check."
+      : `Found ${scopedGaps.length} gap(s): `
+        + scopedGaps.map((gap) => `${gap.gapId} (${dispositionByGapId.get(gap.gapId) ?? "unresolved"})`).join(", ");
+  return {
+    criterionKey,
+    evidenceClass: "artifact",
+    description,
+    verdict,
+    rationale,
+    evidence: [{
+      evidenceClass: "artifact",
+      commandOrTool: "certify-milestone",
+      workingDirectory: "certify",
+      startedAt: evaluatedAt,
+      endedAt: evaluatedAt,
+      observation,
+      durableOutputRef: `certify/${milestoneId}`,
+      environment: evidenceEnvironment({ sliceCount: String(sliceCount), gapCount: String(scopedGaps.length) }),
+    }],
+  };
+}
+
+/**
+ * Run the full certify pass (CERT-01): derive every slice's gaps from
+ * durable state (`auditMilestoneSliceGates`), self-fix fixable gaps under
+ * the durable per-gap cap of 3 (`recordCertifySelfFixAttempt`), batch every
+ * remaining gap into one Gate-2 escalation per slice
+ * (`escalateCertifyGapsToGate2`), then record certify's own CERT01/CERT02
+ * gate rows and its `milestone.certify.recorded` verdict. Every gap lands in
+ * exactly one disposition bucket — implemented as an exhaustive switch so an
+ * unhandled disposition is a compile error, never a silently dropped gap.
+ */
+export function certifyMilestone(input: CertifyMilestoneInput): CertifyMilestoneFullReceipt {
+  const milestoneId = input.milestoneId;
+  const fence = readDomainOperationFence(input.invocation.idempotencyKey);
+  const projectId = fence.projectId;
+
+  const sliceCount = getMilestoneSlices(milestoneId).length;
+  const gaps = auditMilestoneSliceGates({ projectId, milestoneId });
+
+  const dispositionByGapId = new Map<string, CertifyGapDisposition>();
+  const selfFixAttempted: CertifyMilestoneGapOutcome[] = [];
+  const escalationBySlice = new Map<string, CertifyEscalationGap[]>();
+
+  function bucketForEscalation(gap: CertifyGap, attemptCount?: number): void {
+    const bucket = escalationBySlice.get(gap.sliceId) ?? [];
+    bucket.push({ gap, ...(attemptCount === undefined ? {} : { attemptCount }) });
+    escalationBySlice.set(gap.sliceId, bucket);
+  }
+
+  for (const gap of gaps) {
+    if (!gap.fixable) {
+      bucketForEscalation(gap);
+      continue;
+    }
+    const priorAttempts = countCertifySelfFixAttemptsForGap(projectId, milestoneId, gap.sliceId, gap.gapId);
+    if (priorAttempts >= CERTIFY_SELF_FIX_MAX_ATTEMPTS) {
+      bucketForEscalation(gap, priorAttempts);
+      continue;
+    }
+    const result = recordCertifySelfFixAttempt({
+      invocation: {
+        ...input.invocation,
+        idempotencyKey: `${input.invocation.idempotencyKey}/self-fix/${gap.gapId}`,
+      },
+      projectId,
+      milestoneId,
+      gap,
+    });
+    if (result.disposition === "self-fix-attempted") {
+      dispositionByGapId.set(gap.gapId, "self-fix-attempted");
+      selfFixAttempted.push({
+        gap, disposition: "self-fix-attempted", cycle: result.cycle, priorAttempts: result.priorAttempts,
+      });
+    } else {
+      bucketForEscalation(gap, result.priorAttempts);
+    }
+  }
+
+  const escalated: CertifyMilestoneGapOutcome[] = [];
+  const alreadyEscalated: CertifyMilestoneGapOutcome[] = [];
+  for (const [sliceId, entries] of escalationBySlice) {
+    const result = escalateCertifyGapsToGate2({
+      invocation: {
+        ...input.invocation,
+        idempotencyKey: `${input.invocation.idempotencyKey}/escalate/${sliceId}`,
+      },
+      milestoneId,
+      sliceId,
+      gaps: entries,
+    });
+    for (const entry of entries) {
+      dispositionByGapId.set(entry.gap.gapId, result.disposition);
+      const outcome: CertifyMilestoneGapOutcome = { gap: entry.gap, disposition: result.disposition };
+      switch (result.disposition) {
+        case "escalated":
+          escalated.push(outcome);
+          break;
+        case "already-escalated":
+          alreadyEscalated.push(outcome);
+          break;
+        default: {
+          const exhaustive: never = result.disposition;
+          throw new Error(`unhandled escalation disposition: ${String(exhaustive)}`);
+        }
+      }
+    }
+  }
+
+  const evaluatedAt = readCertifyEvaluatedAt(input.invocation.idempotencyKey) ?? new Date().toISOString();
+  const integrationGaps = gaps.filter((gap) => gap.gapClass === "integration-gap");
+  const nonIntegrationGaps = gaps.filter((gap) => gap.gapClass !== "integration-gap");
+  const gateAuditCriterion = buildAggregateCriterion(
+    "milestone-certify:gate-audit",
+    "Every slice's durable gate evidence must be current and passing, with fixable gaps self-fixed or escalated.",
+    milestoneId,
+    nonIntegrationGaps,
+    sliceCount,
+    dispositionByGapId,
+    evaluatedAt,
+  );
+  const integrationCriterion = buildAggregateCriterion(
+    "milestone-certify:integration-check",
+    "Certify's own deterministic cross-slice dependency check must find every terminal slice's dependencies terminal.",
+    milestoneId,
+    integrationGaps,
+    sliceCount,
+    dispositionByGapId,
+    evaluatedAt,
+  );
+
+  const milestoneVerdict: MilestoneValidationVerdict = sliceCount === 0
+    ? "inconclusive"
+    : gaps.length === 0
+      ? "pass"
+      : "fail";
+  const outcome = milestoneVerdict === "pass"
+    ? "succeeded" as const
+    : milestoneVerdict === "fail"
+      ? "failed" as const
+      : "interrupted" as const;
+  const failureClass = milestoneVerdict === "pass"
+    ? "none"
+    : milestoneVerdict === "fail"
+      ? "certify-gap"
+      : "certify-no-slices";
+  const rationale = sliceCount === 0
+    ? `Certify found no slices to audit for milestone ${milestoneId}.`
+    : gaps.length === 0
+      ? `Certify found no gaps across ${sliceCount} slice(s).`
+      : `Certify found ${gaps.length} gap(s) across ${sliceCount} slice(s): `
+        + `${selfFixAttempted.length} self-fix-attempted, ${escalated.length} escalated, `
+        + `${alreadyEscalated.length} already-escalated.`;
+
+  const receipt = recordMilestoneVerdict({
+    invocation: input.invocation,
+    milestoneId,
+    testedSourceRevision: input.testedSourceRevision,
+    policyId: MILESTONE_CERTIFY_POLICY_ID,
+    policyVersion: MILESTONE_CERTIFY_POLICY_VERSION,
+    policy: MILESTONE_CERTIFY_POLICY,
+    verdict: milestoneVerdict,
+    rationale,
+    outcome,
+    failureClass,
+    summary: `Certify recorded ${milestoneVerdict} for ${milestoneId}.`,
+    output: {
+      stage: "certify",
+      gapCount: gaps.length,
+      selfFixAttempted: selfFixAttempted.length,
+      escalated: escalated.length,
+      alreadyEscalated: alreadyEscalated.length,
+    },
+    criteria: [gateAuditCriterion, integrationCriterion],
+  });
+
+  // Mirrors validate-milestone's own insertMilestoneValidationGates placement
+  // (tools/validate-milestone.ts): gate rows are a separate, replay-guarded
+  // write AFTER the verdict Domain Operation commits, never inside it.
+  if (receipt.status !== "replayed") {
+    const gapsBySlice = new Map<string, CertifyGap[]>();
+    for (const gap of gaps) {
+      const bucket = gapsBySlice.get(gap.sliceId) ?? [];
+      bucket.push(gap);
+      gapsBySlice.set(gap.sliceId, bucket);
+    }
+    const perSlice: CertifyGatePerSliceInput[] = getMilestoneSlices(milestoneId).map((slice) => {
+      const sliceGaps = gapsBySlice.get(slice.id) ?? [];
+      return {
+        sliceId: slice.id,
+        verdict: sliceGaps.length === 0 ? "pass" : "flag",
+        rationale: sliceGaps.length === 0
+          ? "No certify gaps found for this slice."
+          : `${sliceGaps.length} certify gap(s) found for this slice.`,
+        findings: findingsForSlice(sliceGaps, dispositionByGapId),
+      };
+    });
+    const gateVerdict: CertifyAuditGateVerdict = milestoneVerdict === "pass" ? "pass" : "flag";
+    insertCertifyGates(milestoneId, perSlice, gateVerdict, evaluatedAt);
+  }
+
+  return { ...receipt, gaps, selfFixAttempted, escalated, alreadyEscalated };
 }

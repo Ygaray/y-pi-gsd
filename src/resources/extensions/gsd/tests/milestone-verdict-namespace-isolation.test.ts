@@ -33,10 +33,7 @@ import {
   openDatabase,
   readDomainOperationFence,
 } from "../gsd-db.ts";
-import {
-  certifyMilestone,
-  type CertifyMilestoneCriterionInput,
-} from "../milestone-certify-domain-operation.ts";
+import { certifyMilestone } from "../milestone-certify-domain-operation.ts";
 import {
   validateMilestone,
   type ValidateMilestoneCriterionInput,
@@ -145,17 +142,6 @@ function validationCriteria(): ValidateMilestoneCriterionInput[] {
   ];
 }
 
-function certifyCriteria(): CertifyMilestoneCriterionInput[] {
-  return [{
-    criterionKey: "milestone-certify:gate-audit",
-    evidenceClass: "artifact",
-    description: "Certify gate-audit criterion.",
-    verdict: "pass",
-    rationale: "Gate audit passed.",
-    evidence: evidenceFor("artifact://certify/gate-audit"),
-  }];
-}
-
 function runValidate(idempotencyKey: string) {
   return validateMilestone({
     invocation: invocation(idempotencyKey),
@@ -178,13 +164,6 @@ function runCertify(idempotencyKey: string) {
     invocation: invocation(idempotencyKey),
     milestoneId: "M001",
     testedSourceRevision: "sha256:fixture-revision",
-    verdict: "pass",
-    rationale: "Certify stage found no gaps.",
-    outcome: "succeeded",
-    failureClass: "none",
-    summary: "Certify recorded a passing verdict.",
-    output: { stage: "certify" },
-    criteria: certifyCriteria(),
   });
 }
 
@@ -228,8 +207,10 @@ test("certify then validate: the milestone-certify:* criterion stays current and
   runValidate("namespace/certify-then-validate/validate");
 
   const certifyCurrent = currentCriteriaWithPrefix("milestone-certify");
-  assert.equal(certifyCurrent.length, 1);
-  assert.equal(Boolean(certifyCurrent[0]!["required"]), true);
+  assert.equal(certifyCurrent.length, 2);
+  for (const criterion of certifyCurrent) {
+    assert.equal(Boolean(criterion["required"]), true);
+  }
 });
 
 test("after certify, a validate run supplying only its own criteria is not rejected for missing the certify criterion", () => {
