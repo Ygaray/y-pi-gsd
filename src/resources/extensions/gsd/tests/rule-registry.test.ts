@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { test, describe, beforeEach } from "node:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emitJournalEvent } from "../journal.ts";
@@ -46,6 +46,7 @@ import {
 import { completeSlice, type SliceCompletionCloseout } from "../slice-lifecycle-domain-operation.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
+import { HUMAN_UAT_PENDING_PROJECTION_FILENAME } from "../human-uat-pending-projection.ts";
 
 // ─── Mock Rule Factories ──────────────────────────────────────────────────
 
@@ -1277,6 +1278,16 @@ describe("Gate-2 human-UAT ledger registration (13-02)", () => {
       const rows = humanUatPendingRows("M001", "S01");
       assert.equal(rows.length, 1, "_handleBlockingGateCompletion must register exactly one Gate-2 pending row");
       assert.equal(rows[0]!["status"], "pending");
+
+      // Backstop (13-02-PLAN must_haves): the real hook path -- not a direct
+      // registerGate2HumanUatPending call -- must also drive the .gsd
+      // projection so it matches the table after a live registration.
+      const projectionContent = readFileSync(
+        join(projectRoot, ".gsd", HUMAN_UAT_PENDING_PROJECTION_FILENAME),
+        "utf-8",
+      );
+      assert.match(projectionContent, new RegExp(String(rows[0]!["entry_id"])));
+      assert.match(projectionContent, /## Outstanding/);
     } finally {
       cleanup();
     }
