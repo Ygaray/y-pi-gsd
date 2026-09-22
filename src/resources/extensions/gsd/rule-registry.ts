@@ -1129,21 +1129,6 @@ export class RuleRegistry {
     const targetTask = tasks[tasks.length - 1]!;
     const tid = targetTask.id;
 
-    try {
-      reopenSlice({
-        invocation: internalExecutionInvocation(`gap-closure:${mid}/${sid}:cycle-${cycle}`),
-        slice: { milestoneId: mid, sliceId: sid },
-        reason: `hook/${config.name} gap-closure cycle ${cycle} of ${GAP_CLOSURE_MAX_CYCLES}: needs-rework verdict on ${trigger.triggerUnitId}`,
-      });
-    } catch (e) {
-      return this._pauseForGate(
-        config,
-        trigger,
-        outcome,
-        `gap-closure cannot proceed: reopenSlice failed for ${mid}/${sid}: ${(e as Error).message}`,
-      );
-    }
-
     // Cycle-numbered ids are mandatory (RESEARCH Pitfall 2): the default
     // reworkBriefIdFromTask id plus saveReworkBrief's ON CONFLICT(id) DO
     // UPDATE would upsert every cycle onto one row and freeze the cap COUNT
@@ -1173,6 +1158,18 @@ export class RuleRegistry {
       };
     });
 
+    // WR-01 (12-REVIEW.md): saveReworkBrief is written BEFORE reopenSlice —
+    // deliberately reordered from this method's original reopen-then-save
+    // sequence. saveReworkBrief has no dependency on the slice already being
+    // reopened (it only writes rework_briefs/rework_brief_findings rows), so
+    // a crash between the two non-transactional writes now leaves either
+    // "brief written, slice still terminal" (safe: the next evaluation of
+    // this same needs-rework artifact just re-attempts reopenSlice against
+    // the still-terminal slice, using the SAME cycle number since the brief
+    // already counts toward countReworkBriefsForSlice) or "both done"
+    // (success) — never "reopened with no brief recording why," which
+    // silently discarded the FAIL/PARTIAL diagnosis that triggered the
+    // reopen in the first place.
     try {
       saveReworkBrief({
         briefId: `RB-${mid}-${sid}-${tid}-gap-${cycle}`,
@@ -1187,6 +1184,21 @@ export class RuleRegistry {
         trigger,
         outcome,
         `gap-closure cannot proceed: saveReworkBrief failed for ${mid}/${sid}/${tid}: ${(e as Error).message}`,
+      );
+    }
+
+    try {
+      reopenSlice({
+        invocation: internalExecutionInvocation(`gap-closure:${mid}/${sid}:cycle-${cycle}`),
+        slice: { milestoneId: mid, sliceId: sid },
+        reason: `hook/${config.name} gap-closure cycle ${cycle} of ${GAP_CLOSURE_MAX_CYCLES}: needs-rework verdict on ${trigger.triggerUnitId}`,
+      });
+    } catch (e) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: reopenSlice failed for ${mid}/${sid}: ${(e as Error).message}`,
       );
     }
 
