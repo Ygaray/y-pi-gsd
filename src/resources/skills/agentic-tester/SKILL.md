@@ -169,8 +169,10 @@ For a completed (non-halt) run, the written document opens with a `---`-fenced f
 carrying a `result` key and a `verdict` key. Both are computed by `renderSelfUat` from the
 per-criterion grades you supply — you do not write or supply either value yourself, and there is no
 payload field for either. The `result` value is one of the four closed outcomes `all_pass`,
-`has_fail`, `has_partial`, or `no_criteria`; the corresponding `verdict` value is one of the three
-closed outcomes `pass`, `needs-rework`, or `advisory`. This frontmatter channel is a machine-readable
+`has_fail`, `has_partial`, or `no_criteria`; the corresponding `verdict` value is one of the four
+closed outcomes `pass` (for `all_pass`), `needs-rework` (for `has_fail`), `needs-attention` (for
+`has_partial`), or `advisory` (for `no_criteria` only — `advisory` no longer covers `has_partial`).
+This frontmatter channel is a machine-readable
 summary for downstream gates, not a substitute for what you report to the dispatching turn — you
 still report the full per-criterion evidence, root cause, and gap-closure routing exactly as Steps 4
 and 5 produced them; `prompts/verify-agentic.md` already forbids summarizing a FAIL down to a bare
