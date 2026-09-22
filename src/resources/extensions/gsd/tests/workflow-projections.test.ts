@@ -37,6 +37,7 @@ function makeSlice(overrides: Partial<SliceRow> = {}): SliceRow {
     replan_triggered_at: null,
     is_sketch: 0,
     sketch_scope: '',
+    surface: 'cli',
     ...overrides,
   };
 }

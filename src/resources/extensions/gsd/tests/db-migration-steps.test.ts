@@ -19,6 +19,7 @@ import {
   applyMigrationV20MemoryRelations,
   applyMigrationV22QualityGateRepair,
   applyMigrationV48TaskToolRequirements,
+  applyMigrationV51SliceSurface,
 } from "../db-migration-steps.ts";
 
 class FakeStatement implements DbStatement {
@@ -128,6 +129,16 @@ describe("db-migration-steps", () => {
 
     assert.deepEqual(db.execCalls, [
       "ALTER TABLE tasks ADD COLUMN required_workflow_tools TEXT NOT NULL DEFAULT '[]'",
+    ]);
+  });
+
+  test("v51 adds default-cli slice surface column", () => {
+    const db = new FakeAdapter();
+
+    applyMigrationV51SliceSurface(db);
+
+    assert.deepEqual(db.execCalls, [
+      "ALTER TABLE slices ADD COLUMN surface TEXT NOT NULL DEFAULT 'cli'",
     ]);
   });
 
