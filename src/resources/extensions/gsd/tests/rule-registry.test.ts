@@ -727,6 +727,34 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
     }
   });
 
+  test("an unrecognized slices.surface value throws loudly rather than silently defaulting to cli (D-02, Pitfall 4)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+      _getAdapter()!.prepare("UPDATE slices SET surface = ? WHERE milestone_id = ? AND id = ?")
+        .run("bogus-surface", "M001", "S01");
+
+      const registry = new RuleRegistry([]);
+      assert.throws(
+        () => registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot),
+        /slices\.surface value "bogus-surface" is not one of/,
+        "an unrecognized surface value must throw, never silently route through the cli driver",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   test("a real passing timestamped SELF-UAT artifact clears the block and evaluatePostUnit returns null", () => {
     const { projectRoot, cleanup } = setupGate1Fixture([
       "---",
