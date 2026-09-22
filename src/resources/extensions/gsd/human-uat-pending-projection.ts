@@ -58,7 +58,13 @@ function parsePartialCriteria(value: unknown): Gate2HumanUatPartialCriterion[] {
     if (!Array.isArray(parsed)) throw new Error("partial_criteria_json is not an array");
     return parsed.filter(
       (entry): entry is Gate2HumanUatPartialCriterion =>
-        Boolean(entry) && typeof entry === "object" && typeof (entry as { criterion?: unknown }).criterion === "string",
+        Boolean(entry) && typeof entry === "object"
+        && typeof (entry as { criterion?: unknown }).criterion === "string"
+        && typeof (entry as { evidence?: unknown }).evidence === "string"
+        && (
+          (entry as { rootCause?: unknown }).rootCause === undefined
+          || typeof (entry as { rootCause?: unknown }).rootCause === "string"
+        ),
     );
   } catch {
     return [{ criterion: "(criteria unavailable)", evidence: "" }];
