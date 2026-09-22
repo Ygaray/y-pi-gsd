@@ -288,9 +288,14 @@ function resolveAgenticGateArtifactPath(basePath: string, target: string): strin
     .filter(name => name.startsWith(prefix) && name.endsWith(SELF_UAT_SUFFIX))
     .map(name => {
       const fullPath = join(dir, name);
-      return { fullPath, mtimeMs: statSync(fullPath).mtimeMs };
+      return { fullPath, stat: statSync(fullPath) };
     })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    // IN-01: exclude non-regular-file matches (e.g. a same-named directory)
+    // so a naming coincidence can't reach `readFileSync` downstream and
+    // throw an opaque EISDIR instead of this function's clear
+    // "missing required gate artifact" fallback.
+    .filter(({ stat }) => stat.isFile())
+    .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
   return matches.length > 0 ? matches[0]!.fullPath : null;
 }
 
