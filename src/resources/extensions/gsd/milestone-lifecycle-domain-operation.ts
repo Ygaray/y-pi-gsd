@@ -8,6 +8,7 @@ import {
   type DomainOperationResult,
 } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
+import { readOutstandingGate2HumanUat } from "./milestone-gate2-human-uat-domain-operation.js";
 import { MILESTONE_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
 import { readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
@@ -521,6 +522,28 @@ export function completeMilestone(input: {
       if (unresolvedGate) {
         throw new MilestoneLifecycleValidationError(
           `Milestone ${milestoneId} quality gate ${unresolvedGate.gate_id} is still pending for ${unresolvedGate.slice_id}`,
+        );
+      }
+      // Gate-2 close guard (LEDGER-03, D-01/D-03): derive "outstanding" from
+      // the Gate-2 event head only, never from a materialized read surface.
+      // A failed read must block the close, not be treated as "nothing
+      // outstanding" — a guard that fails open is a no-op exactly when
+      // something is wrong (must_haves.prohibitions).
+      let outstandingGate2HumanUat;
+      try {
+        outstandingGate2HumanUat = readOutstandingGate2HumanUat({
+          projectId: context.projectId,
+          milestoneId,
+        });
+      } catch (error) {
+        throw new MilestoneLifecycleValidationError(
+          `Milestone ${milestoneId} Gate-2 human-UAT event head could not be read: ${(error as Error).message}`,
+        );
+      }
+      if (outstandingGate2HumanUat.length > 0) {
+        const pairs = outstandingGate2HumanUat.map((entry) => `${entry.milestoneId}/${entry.sliceId}`);
+        throw new MilestoneLifecycleValidationError(
+          `Milestone ${milestoneId} has outstanding Gate-2 human UAT: ${pairs.join(", ")}`,
         );
       }
       const result = completeMilestoneHierarchy(context, { milestoneId, sourceRevision });
