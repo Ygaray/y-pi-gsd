@@ -551,9 +551,23 @@ function renderSlicePlanMarkdown(slice: SliceRow, tasks: TaskRow[], gates: GateR
 
   lines.push("## Must-Haves");
   lines.push("");
-  const successCriteria = normalizeAcceptanceCriteriaText(slice.success_criteria);
-  if (successCriteria.length > 0) {
-    for (const line of successCriteria) {
+  // CR-01 (10-REVIEW.md): `normalizeAcceptanceCriteriaText`'s marker strip is
+  // `^-\s+` — greedy on whitespace and blind to dash-leading residual text —
+  // so re-deriving a marker from ITS stripped output is not byte-identical to
+  // the pre-retrofit renderer for "-   foo" (multi-space/tab after the dash)
+  // or "- -foo" (text that itself starts with "-"). Use the normalizer only
+  // to decide whether the slice has ANY declared criteria (placeholder/empty
+  // detection); render from the raw, only-outer-trimmed lines exactly as the
+  // pre-retrofit renderer did, so an already-marked line is pushed verbatim
+  // instead of stripped-then-reprefixed.
+  const hasSuccessCriteria = normalizeAcceptanceCriteriaText(slice.success_criteria).length > 0;
+  if (hasSuccessCriteria) {
+    const rawLines = (slice.success_criteria ?? "")
+      .trim()
+      .split(/\n+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    for (const line of rawLines) {
       lines.push(line.startsWith("-") ? line : `- ${line}`);
     }
   } else {

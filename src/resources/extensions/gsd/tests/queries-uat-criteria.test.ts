@@ -558,15 +558,28 @@ describe("queries-uat-criteria: no data loss across the reconciliation", () => {
 });
 
 describe("queries-uat-criteria: renderer output parity", () => {
-  // Reproduces markdown-renderer.ts's Must-Haves bullet-prefix rule exactly:
-  // an entry that already begins with a hyphen renders unchanged; anything
-  // else gets a hyphen-space prefix. This pins today's rendered output as a
-  // contract BEFORE the renderer is retrofitted to source its lines from
-  // normalizeAcceptanceCriteriaText instead of its own inline parse.
+  // Reproduces markdown-renderer.ts's actual Must-Haves line construction
+  // (post CR-01 fix, 10-REVIEW.md): `normalizeAcceptanceCriteriaText` decides
+  // ONLY whether the slice has any declared criteria at all (placeholder/empty
+  // detection) — the rendered lines themselves come from the raw,
+  // only-outer-trimmed input, exactly like the pre-retrofit renderer, so an
+  // already-marked line is pushed verbatim instead of being stripped by
+  // `normalizeAcceptanceCriteriaText` and then re-prefixed from scratch.
+  //
+  // CR-01 is exactly the bug that a naive
+  // `normalizeAcceptanceCriteriaText(input).map(prefix)` round trip is NOT
+  // byte-identical to the pre-retrofit renderer for a dash marker followed by
+  // 2+ whitespace characters, or for marked text whose residual itself starts
+  // with a literal dash — both are covered below.
   function toRenderedLines(input: string): string[] {
-    return normalizeAcceptanceCriteriaText(input).map((entry) =>
-      entry.startsWith("-") ? entry : `- ${entry}`,
-    );
+    const hasCriteria = normalizeAcceptanceCriteriaText(input).length > 0;
+    if (!hasCriteria) return [];
+    return input
+      .trim()
+      .split(/\n+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((line) => (line.startsWith("-") ? line : `- ${line}`));
   }
 
   test("an already-hyphen-marked line renders unchanged", () => {
@@ -592,6 +605,32 @@ describe("queries-uat-criteria: renderer output parity", () => {
   test("an empty value and a placeholder value both render zero criteria lines", () => {
     assert.deepEqual(toRenderedLines(""), []);
     assert.deepEqual(toRenderedLines("Not provided"), []);
+  });
+
+  // CR-01 regression: a dash marker followed by 2+ whitespace characters (or
+  // a tab) must render byte-identical to the input, not have its internal
+  // whitespace collapsed to a single space by a strip-then-reprefix round
+  // trip through normalizeAcceptanceCriteriaText.
+  test("CR-01: a dash marker followed by multiple spaces renders verbatim, not collapsed", () => {
+    assert.deepEqual(toRenderedLines("-   foo"), ["-   foo"]);
+  });
+
+  test("CR-01: a dash marker followed by a tab renders verbatim, not collapsed", () => {
+    assert.deepEqual(toRenderedLines("-\tfoo"), ["-\tfoo"]);
+  });
+
+  // CR-01 regression: a dash-marked line whose own text begins with a literal
+  // dash must render verbatim — the pre-retrofit renderer never re-parsed an
+  // already-`-`-prefixed line, so it never dropped this "inner" marker's `- `.
+  test("CR-01: a dash-marked line whose text itself starts with a dash renders verbatim, no content dropped", () => {
+    assert.deepEqual(toRenderedLines("- -foo"), ["- -foo"]);
+  });
+
+  test("CR-01: multi-line input mixing both failure shapes renders every line verbatim", () => {
+    assert.deepEqual(
+      toRenderedLines("-   foo\n- -bar\n- normal"),
+      ["-   foo", "- -bar", "- normal"],
+    );
   });
 });
 
