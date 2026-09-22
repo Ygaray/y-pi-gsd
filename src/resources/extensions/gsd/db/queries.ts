@@ -1684,16 +1684,24 @@ export function getTaskAcceptanceCriteria(
   sliceId: string,
   taskId: string,
 ): TaskAcceptanceCriteria | null {
-  const task = getTask(milestoneId, sliceId, taskId);
-  if (!task) return null;
-  const slice = getSliceAcceptanceCriteria(milestoneId, sliceId);
-  if (!slice) return null;
-  return {
-    milestoneId,
-    sliceId,
-    taskId,
-    criteria: slice.criteria,
-    hasCriteria: slice.hasCriteria,
-    inheritedFromSliceId: slice.sliceId,
-  };
+  if (!getDbOrNull()) return null;
+  // WR-01 (10-REVIEW.md): wrap both composed reads in the same readTransaction
+  // pattern getMilestoneUatCriteriaState uses, so the task-existence check and
+  // the slice's criteria describe the same database snapshot — otherwise a
+  // write landing between the two calls (slice edited/deleted concurrently)
+  // could return a task from one snapshot paired with a slice from another.
+  return readTransaction(() => {
+    const task = getTask(milestoneId, sliceId, taskId);
+    if (!task) return null;
+    const slice = getSliceAcceptanceCriteria(milestoneId, sliceId);
+    if (!slice) return null;
+    return {
+      milestoneId,
+      sliceId,
+      taskId,
+      criteria: slice.criteria,
+      hasCriteria: slice.hasCriteria,
+      inheritedFromSliceId: slice.sliceId,
+    };
+  });
 }
