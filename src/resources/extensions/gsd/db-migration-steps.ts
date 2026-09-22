@@ -591,3 +591,12 @@ export function applyMigrationV49MilestoneVerdictScope(db: DbAdapter): void {
 export function applyMigrationV50BlockerAcceptedCloseout(db: DbAdapter): void {
   createBlockerAcceptedCloseoutSchemaV50(db);
 }
+
+export function applyMigrationV51SliceSurface(db: DbAdapter): void {
+  ensureColumn(
+    db,
+    "slices",
+    "surface",
+    "ALTER TABLE slices ADD COLUMN surface TEXT NOT NULL DEFAULT 'cli'",
+  );
+}

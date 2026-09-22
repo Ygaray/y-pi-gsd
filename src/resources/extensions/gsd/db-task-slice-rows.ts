@@ -22,6 +22,7 @@ export interface SliceRow {
   replan_triggered_at: string | null;
   is_sketch: number;
   sketch_scope: string;
+  surface: string;
   target_repositories?: string[];
 }
 
@@ -111,6 +112,7 @@ export function rowToSlice(row: DbRow): SliceRow {
     replan_triggered_at: (row["replan_triggered_at"] as string) ?? null,
     is_sketch: (row["is_sketch"] as number) ?? 0,
     sketch_scope: (row["sketch_scope"] as string) ?? "",
+    surface: (row["surface"] as string) ?? "cli",
     target_repositories: parseTaskArrayColumn(row["target_repositories"]),
   };
 }

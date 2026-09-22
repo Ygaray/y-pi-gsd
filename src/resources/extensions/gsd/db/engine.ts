@@ -93,6 +93,7 @@ import {
   applyMigrationV48TaskToolRequirements,
   applyMigrationV49MilestoneVerdictScope,
   applyMigrationV50BlockerAcceptedCloseout,
+  applyMigrationV51SliceSurface,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -163,7 +164,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 50;
+export const SCHEMA_VERSION = 51;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -414,6 +415,7 @@ function initSchema(
         applyMigrationV48TaskToolRequirements(db);
         applyMigrationV49MilestoneVerdictScope(db);
         applyMigrationV50BlockerAcceptedCloseout(db);
+        applyMigrationV51SliceSurface(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -827,6 +829,16 @@ function migrateSchema(
       applyMigrationV50BlockerAcceptedCloseout(db);
       stampStateCutoverPragmas(db, 50);
       recordSchemaVersion(db, 50);
+    }
+
+    if (currentVersion < 51) {
+      // V51 — agentic-tester Gate-1 surface routing (Phase 11): additive
+      // slices.surface column ('cli'|'browser'|'android', default 'cli') so
+      // the blocking complete-slice gate can dispatch each slice on its
+      // declared driver rather than the filesystem or a generic default.
+      applyMigrationV51SliceSurface(db);
+      stampStateCutoverPragmas(db, 51);
+      recordSchemaVersion(db, 51);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

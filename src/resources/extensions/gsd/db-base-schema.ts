@@ -174,6 +174,7 @@ export function createBaseSchemaObjects(db: DbAdapter, hooks: BaseSchemaHooks): 
       replan_triggered_at TEXT DEFAULT NULL,
       is_sketch INTEGER NOT NULL DEFAULT 0,
       sketch_scope TEXT NOT NULL DEFAULT '',
+      surface TEXT NOT NULL DEFAULT 'cli',
       PRIMARY KEY (milestone_id, id),
       FOREIGN KEY (milestone_id) REFERENCES milestones(id)
     )
