@@ -17,6 +17,7 @@ import {
 } from "./human-uat-pending-projection.js";
 import { resolveGate2HumanUatPending } from "./milestone-gate2-human-uat-domain-operation.js";
 import { gsdProjectionRoot } from "./paths.js";
+import { logWarning } from "./workflow-logger.js";
 
 const USAGE = 'Usage: /gsd human-uat [list] | /gsd human-uat sign-off <entry-id> [--gap] [--note "..."]';
 
@@ -125,7 +126,15 @@ async function signOff(
       disposition,
       ...(args.note ? { note: args.note } : {}),
     });
-    renderHumanUatPendingLedger(basePath);
+    try {
+      renderHumanUatPendingLedger(basePath);
+    } catch (err) {
+      // A projection-render failure must NOT lose the already-committed
+      // resolution -- log and still report success (mirrors
+      // rule-registry.ts's _registerGate2HumanUat pattern).
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarning("command", `human-uat sign-off projection render failed after sign-off ${resolution.entryId}: ${msg}`);
+    }
     ctx.ui.notify(
       `Signed off ${resolution.entryId} (${resolution.disposition}) — `
         + `${resolution.milestoneId}/${resolution.sliceId} no longer blocks close.`,
