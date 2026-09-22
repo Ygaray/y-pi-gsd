@@ -584,6 +584,17 @@ test("mixed valid/invalid/unknown keys handled correctly", () => {
   assert.equal(preferences.budget_ceiling, undefined);
 });
 
+test("agentic_gate1_enabled boolean-coerces true/false and stays undefined when omitted (Phase 11)", () => {
+  const onResult = validatePreferences({ agentic_gate1_enabled: true } as any);
+  assert.equal(onResult.preferences.agentic_gate1_enabled, true);
+
+  const offResult = validatePreferences({ agentic_gate1_enabled: false } as any);
+  assert.equal(offResult.preferences.agentic_gate1_enabled, false);
+
+  const omittedResult = validatePreferences({} as any);
+  assert.equal(omittedResult.preferences.agentic_gate1_enabled, undefined);
+});
+
 test("disabled_model_providers validates and normalizes string arrays", () => {
   const { preferences, errors } = validatePreferences({
     disabled_model_providers: ["google-gemini-cli", "  google-gemini-cli  ", "openai-codex", "   "],

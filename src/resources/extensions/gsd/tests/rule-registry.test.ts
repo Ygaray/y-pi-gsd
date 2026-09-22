@@ -879,6 +879,71 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
       cleanup();
     }
   });
+
+  test("a needs-rework verdict pauses via the engine's existing block mechanism, never auto-retrying (D-01)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const fileName = selfUatLogFileName("S01", new Date().toISOString());
+      writeFileSync(join(selfUatDir, fileName), "---\nresult: has_fail\nverdict: needs-rework\n---\n", "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a needs-rework verdict must not auto-retry/dispatch again");
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "needs-rework must produce an observable gate block");
+      assert.equal(block?.action, "pause", "on_block.action must be pause, never retry-unit/retry-task (D-01)");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a halted run with no SELF-UAT artifact still produces an observable block, never a silent hang", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      // No SELF-UAT artifact written at all — simulates a halted run.
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a halted run with no artifact must not hang — max_cycles:1 blocks immediately");
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "the blocked state must be observable");
+      assert.equal(typeof block?.reason, "string");
+      assert.ok((block?.reason ?? "").length > 0, "the block must carry a non-empty, actionable reason");
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("resolveHookArtifactPath", () => {
