@@ -69,6 +69,29 @@ function requireNonBlank(value: string, field: string): string {
 }
 
 /**
+ * Internal-only signal thrown by the mid-transaction re-check below to abort
+ * the Domain Operation's write (rolling back the SQL transaction) without
+ * committing an event. Caught immediately around the `executeDomainOperation`
+ * call in `recordCertifySelfFixAttempt` and translated into the documented
+ * `{ disposition: "escalated" }` return — this class must never escape that
+ * catch, so `recordCertifySelfFixAttempt` keeps its "never throws past the
+ * caller" contract even when the cap is hit by a concurrent racer between
+ * the pre-check and this transaction opening.
+ */
+class CertifySelfFixCapExceededMidTransactionError extends Error {
+  readonly attemptsAtRecheck: number;
+
+  constructor(attemptsAtRecheck: number) {
+    super(
+      `certify self-fix cap reached mid-transaction `
+      + `(${attemptsAtRecheck} attempt(s) already recorded, max ${CERTIFY_SELF_FIX_MAX_ATTEMPTS})`,
+    );
+    this.name = "CertifySelfFixCapExceededMidTransactionError";
+    this.attemptsAtRecheck = attemptsAtRecheck;
+  }
+}
+
+/**
  * Sole cap authority for certify's per-gap self-fix budget (D-02). Counts
  * durable `milestone.certify.self-fix-attempted` events keyed to the exact
  * `(projectId, milestoneId, sliceId, gapId)` tuple. Mirrors
@@ -148,64 +171,73 @@ export function recordCertifySelfFixAttempt(
   const cycle = priorAttempts + 1;
 
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
-  const receipt = executeDomainOperation({
-    operationType: "milestone.certify.self-fix",
-    idempotencyKey: input.invocation.idempotencyKey,
-    expectedRevision: fence.revision,
-    expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: input.invocation.actorType,
-    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
-    sourceTransport: input.invocation.sourceTransport,
-    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
-    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
-    payload: {
-      milestoneId,
-      sliceId: gap.sliceId,
-      gapId: gap.gapId,
-      gapClass: gap.gapClass,
-      gateId: gap.gateId,
-      ownerTurn: gap.ownerTurn,
-      cycle,
-    },
-  }, (context) => {
-    // Concurrency-safe re-check: abort before any write if the cap was hit
-    // between the pre-check above and this transaction opening.
-    const inTransactionCount = countCertifySelfFixAttemptsForGap(
-      context.projectId, milestoneId, gap.sliceId, gap.gapId,
-    );
-    if (inTransactionCount >= CERTIFY_SELF_FIX_MAX_ATTEMPTS) {
-      throw new Error(
-        `certify self-fix cap reached mid-transaction for gap ${gap.gapId} `
-        + `(${inTransactionCount} attempt(s) already recorded, max ${CERTIFY_SELF_FIX_MAX_ATTEMPTS})`,
+  let receipt: DomainOperationResult;
+  try {
+    receipt = executeDomainOperation({
+      operationType: "milestone.certify.self-fix",
+      idempotencyKey: input.invocation.idempotencyKey,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: input.invocation.actorType,
+      ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+      sourceTransport: input.invocation.sourceTransport,
+      ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+      ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+      payload: {
+        milestoneId,
+        sliceId: gap.sliceId,
+        gapId: gap.gapId,
+        gapClass: gap.gapClass,
+        gateId: gap.gateId,
+        ownerTurn: gap.ownerTurn,
+        cycle,
+      },
+    }, (context) => {
+      // Concurrency-safe re-check: abort before any write if the cap was hit
+      // between the pre-check above and this transaction opening. Throwing
+      // here rolls back the SQL transaction (no event, no gate reopen is
+      // committed); the throw is caught immediately below and translated
+      // into the documented "escalated" disposition rather than propagating
+      // to the caller.
+      const inTransactionCount = countCertifySelfFixAttemptsForGap(
+        context.projectId, milestoneId, gap.sliceId, gap.gapId,
       );
+      if (inTransactionCount >= CERTIFY_SELF_FIX_MAX_ATTEMPTS) {
+        throw new CertifySelfFixCapExceededMidTransactionError(inTransactionCount);
+      }
+      const reopenedAt = new Date().toISOString();
+      reopenOwningGateForGap(gap, reopenedAt);
+      const payload: DomainJsonValue = {
+        milestoneId,
+        sliceId: gap.sliceId,
+        gapId: gap.gapId,
+        gapClass: gap.gapClass,
+        gateId: gap.gateId,
+        ownerTurn: gap.ownerTurn,
+        cycle,
+        reopenedAt,
+      };
+      return {
+        events: [{
+          eventType: "milestone.certify.self-fix-attempted",
+          entityType: "milestone",
+          entityId: milestoneId,
+          payload,
+          destinations: ["projection"],
+        }],
+        projections: [{
+          projectionKey: `certify/${milestoneId}`.toLowerCase(),
+          projectionKind: "milestone-certify",
+          rendererVersion: "1",
+        }],
+      };
+    });
+  } catch (error) {
+    if (error instanceof CertifySelfFixCapExceededMidTransactionError) {
+      return { disposition: "escalated", priorAttempts: error.attemptsAtRecheck };
     }
-    const reopenedAt = new Date().toISOString();
-    reopenOwningGateForGap(gap, reopenedAt);
-    const payload: DomainJsonValue = {
-      milestoneId,
-      sliceId: gap.sliceId,
-      gapId: gap.gapId,
-      gapClass: gap.gapClass,
-      gateId: gap.gateId,
-      ownerTurn: gap.ownerTurn,
-      cycle,
-      reopenedAt,
-    };
-    return {
-      events: [{
-        eventType: "milestone.certify.self-fix-attempted",
-        entityType: "milestone",
-        entityId: milestoneId,
-        payload,
-        destinations: ["projection"],
-      }],
-      projections: [{
-        projectionKey: `certify/${milestoneId}`.toLowerCase(),
-        projectionKind: "milestone-certify",
-        rendererVersion: "1",
-      }],
-    };
-  });
+    throw error;
+  }
 
   return { disposition: "self-fix-attempted", priorAttempts, cycle, receipt };
 }
