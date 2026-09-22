@@ -10,7 +10,10 @@ import {
 import { getDb } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import {
+  drainGate2HumanUatOutbox,
   registerGate2HumanUatPendingRow,
+  resolveGate2HumanUatPendingRow,
+  type Gate2HumanUatDisposition,
   type Gate2HumanUatPartialCriterion,
 } from "./db/writers/milestone-gate2-human-uat.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
@@ -44,9 +47,44 @@ export interface OutstandingGate2HumanUat {
   eventId: string;
 }
 
+export interface ResolveGate2HumanUatPendingInput {
+  invocation: ExecutionInvocation;
+  entryId: string;
+  disposition: Gate2HumanUatDisposition;
+  signedOffBy?: string;
+  note?: string;
+}
+
+export interface Gate2HumanUatResolution {
+  status: "committed" | "replayed";
+  operationId: string;
+  resultingRevision: number;
+  resultingAuthorityEpoch: number;
+  eventIds: string[];
+  outboxIds: number[];
+  projectionWorkIds: string[];
+  entryId: string;
+  milestoneId: string;
+  sliceId: string;
+  disposition: Gate2HumanUatDisposition;
+  signedOffBy: string | null;
+  note: string | null;
+  resolvedAt: string;
+}
+
 interface RegisteredEventPayload {
   entryId: string;
   created: boolean;
+}
+
+interface ResolvedEventPayload {
+  entryId: string;
+  milestoneId: string;
+  sliceId: string;
+  disposition: Gate2HumanUatDisposition;
+  signedOffBy: string | null;
+  note: string | null;
+  resolvedAt: string;
 }
 
 interface OutstandingRow {
@@ -92,6 +130,48 @@ function storedRegistration(operationId: string): RegisteredEventPayload {
     throw new Error("Gate-2 human-UAT registration receipt entryId is invalid");
   }
   return { entryId, created: false };
+}
+
+/**
+ * On an idempotent replay, `executeDomainOperation`'s `mutate()` callback
+ * does not run — the resolution's payload must be recovered from the
+ * durable event instead (mirrors `storedRegistration` above).
+ */
+function storedGate2Resolution(operationId: string): ResolvedEventPayload {
+  const row = getDb().prepare(`
+    SELECT payload_json FROM workflow_domain_events
+    WHERE operation_id = :operation_id AND event_type = 'milestone.gate2-human-uat-resolved'
+  `).get({ ":operation_id": operationId }) as Record<string, unknown> | undefined;
+  if (!row) throw new Error("Gate-2 human-UAT resolution receipt is missing");
+  const payload = JSON.parse(String(row["payload_json"])) as Record<string, unknown>;
+  const entryId = payload["entryId"];
+  const milestoneId = payload["milestoneId"];
+  const sliceId = payload["sliceId"];
+  const disposition = payload["disposition"];
+  const resolvedAt = payload["resolvedAt"];
+  if (typeof entryId !== "string" || entryId.trim().length === 0) {
+    throw new Error("Gate-2 human-UAT resolution receipt entryId is invalid");
+  }
+  if (typeof milestoneId !== "string" || typeof sliceId !== "string") {
+    throw new Error("Gate-2 human-UAT resolution receipt milestone/slice is invalid");
+  }
+  if (disposition !== "signed-off" && disposition !== "signed-off-with-gap") {
+    throw new Error("Gate-2 human-UAT resolution receipt disposition is invalid");
+  }
+  if (typeof resolvedAt !== "string" || resolvedAt.trim().length === 0) {
+    throw new Error("Gate-2 human-UAT resolution receipt resolvedAt is invalid");
+  }
+  const signedOffBy = payload["signedOffBy"];
+  const note = payload["note"];
+  return {
+    entryId,
+    milestoneId,
+    sliceId,
+    disposition,
+    signedOffBy: typeof signedOffBy === "string" ? signedOffBy : null,
+    note: typeof note === "string" ? note : null,
+    resolvedAt,
+  };
 }
 
 /**
@@ -176,6 +256,89 @@ export function registerGate2HumanUatPending(
     ...operationReceipt(operation),
     entryId: stored.entryId,
     created: stored.created,
+  };
+}
+
+/**
+ * Resolve (sign off) a Gate-2 human-UAT pending entry: ONE Domain Operation
+ * transaction flips the `human_uat_pending` row's status, commits the linked
+ * `milestone.gate2-human-uat-resolved` event (correlated via the payload's
+ * `entryId`, the only correlation the kernel allows across operations), and
+ * drains every matching `workflow_outbox` row — both D-03 trip-wires clear
+ * together (D-03 #1). Operator-invoked only, via `/gsd human-uat sign-off`
+ * (LEDGER-03, T-13-11) — never call this from any agent-callable surface.
+ */
+export function resolveGate2HumanUatPending(
+  input: ResolveGate2HumanUatPendingInput,
+): Gate2HumanUatResolution {
+  const entryId = requireNonBlank(input.entryId, "entryId");
+  if (input.disposition !== "signed-off" && input.disposition !== "signed-off-with-gap") {
+    throw new Error("disposition must be 'signed-off' or 'signed-off-with-gap'");
+  }
+  const disposition = input.disposition;
+  const signedOffBy = input.signedOffBy === undefined
+    ? null
+    : requireNonBlank(input.signedOffBy, "signedOffBy");
+  const note = input.note === undefined ? null : requireNonBlank(input.note, "note");
+
+  const fence = readDomainOperationFence(input.invocation.idempotencyKey);
+  let resolved: ResolvedEventPayload | undefined;
+  const operation = executeDomainOperation({
+    operationType: "milestone.gate2-human-uat.resolve",
+    idempotencyKey: input.invocation.idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: {
+      entryId,
+      disposition,
+      signedOffBy,
+      note,
+    },
+  }, (context) => {
+    const resolvedAt = new Date().toISOString();
+    const { milestoneId, sliceId } = resolveGate2HumanUatPendingRow(context, {
+      entryId,
+      disposition,
+      signedOffBy,
+      note,
+      resolvedAt,
+    });
+    drainGate2HumanUatOutbox(context, { entryId, deliveredAt: resolvedAt });
+    resolved = { entryId, milestoneId, sliceId, disposition, signedOffBy, note, resolvedAt };
+    const eventPayload: DomainJsonValue = {
+      entryId,
+      milestoneId,
+      sliceId,
+      disposition,
+      signedOffBy,
+      note,
+      resolvedAt,
+    };
+    return {
+      events: [{
+        eventType: "milestone.gate2-human-uat-resolved",
+        entityType: "milestone",
+        entityId: milestoneId,
+        payload: eventPayload,
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `human-uat-pending/${milestoneId}/${sliceId}`.toLowerCase(),
+        projectionKind: "human-uat-pending",
+        rendererVersion: "1",
+      }],
+    };
+  });
+
+  const stored = resolved ?? storedGate2Resolution(operation.operationId);
+  return {
+    ...operationReceipt(operation),
+    ...stored,
   };
 }
 

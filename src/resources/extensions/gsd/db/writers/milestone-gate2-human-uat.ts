@@ -46,8 +46,34 @@ export interface RegisterGate2HumanUatPendingRowResult {
   created: boolean;
 }
 
+export type Gate2HumanUatDisposition = "signed-off" | "signed-off-with-gap";
+
+export interface ResolveGate2HumanUatPendingRowInput {
+  entryId: string;
+  disposition: Gate2HumanUatDisposition;
+  signedOffBy: string | null;
+  note: string | null;
+  resolvedAt: string;
+}
+
+export interface ResolveGate2HumanUatPendingRowResult {
+  milestoneId: string;
+  sliceId: string;
+}
+
+export interface DrainGate2HumanUatOutboxInput {
+  entryId: string;
+  deliveredAt: string;
+}
+
 interface ExistingPendingRow {
   entry_id: string;
+}
+
+interface PendingRowForResolve {
+  milestone_id: string;
+  slice_id: string;
+  status: string;
 }
 
 function requireNonBlank(value: string, field: string): string {
@@ -136,4 +162,101 @@ export function registerGate2HumanUatPendingRow(
     ":authority_epoch": context.resultingAuthorityEpoch,
   });
   return { entryId, created: true };
+}
+
+/**
+ * Context-bound status flip of a Gate-2 human-UAT pending row. Must run
+ * inside `resolveGate2HumanUatPending`'s own `executeDomainOperation`
+ * `mutate()` callback, mirroring `registerGate2HumanUatPendingRow`'s guard.
+ *
+ * Identity columns are deliberately absent from the SET list —
+ * `trg_human_uat_pending_identity_immutable` aborts on them — and the
+ * pre-read throws distinct named errors for "no such entry" and "not
+ * pending" before any UPDATE runs, so an unknown or already-resolved
+ * entryId never reaches the trigger-guarded UPDATE at all.
+ */
+export function resolveGate2HumanUatPendingRow(
+  context: Readonly<DomainOperationContext>,
+  input: ResolveGate2HumanUatPendingRowInput,
+): ResolveGate2HumanUatPendingRowResult {
+  if (requireActiveDomainOperationContext(context) !== "milestone.gate2-human-uat.resolve") {
+    throw new Error("Gate-2 human-UAT resolution requires its Domain Operation");
+  }
+  const entryId = requireNonBlank(input.entryId, "entryId");
+  if (input.disposition !== "signed-off" && input.disposition !== "signed-off-with-gap") {
+    throw new Error("disposition must be 'signed-off' or 'signed-off-with-gap'");
+  }
+  const signedOffBy = requireNonBlankIfPresent(input.signedOffBy, "signedOffBy");
+  const note = requireNonBlankIfPresent(input.note, "note");
+  const resolvedAt = requireNonBlank(input.resolvedAt, "resolvedAt");
+
+  const existing = getDb().prepare(`
+    SELECT milestone_id, slice_id, status FROM human_uat_pending WHERE entry_id = :entry_id
+  `).get({ ":entry_id": entryId }) as unknown as PendingRowForResolve | undefined;
+  if (!existing) {
+    throw new Error(`Gate-2 human-UAT entry not found: ${entryId}`);
+  }
+  if (existing.status !== "pending") {
+    throw new Error(`Gate-2 human-UAT entry is not pending (status: ${existing.status}): ${entryId}`);
+  }
+
+  const updated = getDb().prepare(`
+    UPDATE human_uat_pending
+    SET status = :status,
+        signed_off_at = :resolved_at,
+        signed_off_by = :signed_off_by,
+        signoff_note = :note,
+        updated_at = :resolved_at,
+        last_operation_id = :operation_id,
+        last_project_revision = :project_revision,
+        last_authority_epoch = :authority_epoch
+    WHERE entry_id = :entry_id AND status = 'pending'
+  `).run({
+    ":status": input.disposition,
+    ":resolved_at": resolvedAt,
+    ":signed_off_by": signedOffBy,
+    ":note": note,
+    ":entry_id": entryId,
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+  if (Number((updated as { changes?: number }).changes ?? 0) !== 1) {
+    throw new Error(`Gate-2 human-UAT resolution must update exactly one pending entry: ${entryId}`);
+  }
+
+  return { milestoneId: existing.milestone_id, sliceId: existing.slice_id };
+}
+
+/**
+ * The first `workflow_outbox` settlement written in this repository
+ * (RESEARCH Pitfall 1). An additive UPDATE, never a DELETE —
+ * `trg_workflow_outbox_delete` aborts deletes. The `IN` subquery (rather
+ * than a single `event_id` parameter) settles every un-delivered outbox row
+ * belonging to this entry's `milestone.gate2-human-uat-required` event(s)
+ * together, so a repeat registration can never leave one un-drained row
+ * blocking the close forever.
+ */
+export function drainGate2HumanUatOutbox(
+  context: Readonly<DomainOperationContext>,
+  input: DrainGate2HumanUatOutboxInput,
+): number {
+  const entryId = requireNonBlank(input.entryId, "entryId");
+  const deliveredAt = requireNonBlank(input.deliveredAt, "deliveredAt");
+  const result = getDb().prepare(`
+    UPDATE workflow_outbox
+    SET delivered_at = :delivered_at
+    WHERE delivered_at IS NULL
+      AND event_id IN (
+        SELECT event_id FROM workflow_domain_events
+        WHERE event_type = 'milestone.gate2-human-uat-required'
+          AND project_id = :project_id
+          AND json_extract(payload_json, '$.entryId') = :entry_id
+      )
+  `).run({
+    ":delivered_at": deliveredAt,
+    ":project_id": context.projectId,
+    ":entry_id": entryId,
+  });
+  return Number((result as { changes?: number }).changes ?? 0);
 }
