@@ -181,6 +181,18 @@ describe("db-migration-steps", () => {
     assert.ok(index, "idx_human_uat_pending_one_open index must exist");
   });
 
+  test("v52 no-ops when the workflow_operations foundation table is absent", () => {
+    // FakeAdapter's prepare().get() always returns undefined, simulating a
+    // synthetic/partially-provisioned database with no `workflow_operations`
+    // foundation table -- createHumanUatPendingSchemaV52 must return without
+    // issuing any DDL in that case (see db-human-uat-pending-schema.ts:22-31).
+    const db = new FakeAdapter();
+
+    applyMigrationV52HumanUatPending(db);
+
+    assert.deepEqual(db.execCalls, []);
+  });
+
   test("memory FTS migration delegates data-copy backfill to caller-owned write callback", () => {
     const db = new FakeAdapter();
     let backfillCalls = 0;
