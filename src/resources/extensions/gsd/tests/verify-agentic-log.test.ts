@@ -18,6 +18,7 @@ import {
   aggregateSelfUat,
   isSelfUatResult,
   isSelfUatVerdict,
+  parseSelfUatCriteria,
   renderSelfUat,
   selfUatLogFileName,
   type SelfUatCriterionResult,
@@ -155,6 +156,87 @@ describe("renderSelfUat", () => {
       "utf8",
     );
     assert.doesNotMatch(src, /from ["']node:(fs|net|http|https|dgram|child_process)/);
+  });
+});
+
+// ─── parseSelfUatCriteria (Phase 12) ───────────────────────────────────────────
+
+describe("parseSelfUatCriteria", () => {
+  it("round-trips a mixed PASS/FAIL/PARTIAL-with-root-cause/PARTIAL-without-root-cause set through renderSelfUat, same order, absent fields staying absent", () => {
+    const results: SelfUatCriterionResult[] = [
+      { criterion: "pass criterion", verdict: "PASS", evidence: "exit 0, ok" },
+      {
+        criterion: "fail criterion",
+        verdict: "FAIL",
+        evidence: "exit 1, stderr: ENOENT",
+        rootCause: "exit 1, stderr: ENOENT — the binary was never built",
+        gapClosureRoute: "Rebuild and re-run; see src/bootstrap.ts",
+      },
+      {
+        criterion: "partial criterion with root cause",
+        verdict: "PARTIAL",
+        evidence: "exit 0, but only one of two paths verified",
+        rootCause: "the second path was never exercised due to a missing fixture",
+      },
+      {
+        criterion: "partial criterion without root cause",
+        verdict: "PARTIAL",
+        evidence: "exit 0, ambiguous output",
+      },
+    ];
+    const doc = renderSelfUat(results, BASE_META);
+    const parsed = parseSelfUatCriteria(doc);
+    assert.deepStrictEqual(parsed, results);
+  });
+
+  it("survives a criterion and evidence containing a colon without truncation at the first colon", () => {
+    const results: SelfUatCriterionResult[] = [
+      { criterion: "before: after", verdict: "PASS", evidence: "exit 0: stdout: matched: expected" },
+    ];
+    const doc = renderSelfUat(results, BASE_META);
+    const parsed = parseSelfUatCriteria(doc);
+    assert.deepStrictEqual(parsed, results);
+  });
+
+  it("returns an empty array for a rendered document with zero criteria — frontmatter and header lines are never mistaken for criterion fields", () => {
+    const doc = renderSelfUat([], BASE_META);
+    const parsed = parseSelfUatCriteria(doc);
+    assert.deepStrictEqual(parsed, []);
+  });
+
+  it("never throws on an empty string, returning an empty array", () => {
+    assert.doesNotThrow(() => parseSelfUatCriteria(""));
+    assert.deepStrictEqual(parseSelfUatCriteria(""), []);
+  });
+
+  it("never throws on a body truncated mid-criterion (heading with no verdict/evidence lines at all)", () => {
+    const truncated = "---\nresult: has_fail\nverdict: needs-rework\n---\n\n### 1. some criterion\n";
+    assert.doesNotThrow(() => parseSelfUatCriteria(truncated));
+    assert.deepStrictEqual(parseSelfUatCriteria(truncated), []);
+  });
+
+  it("drops a criterion block carrying an unknown verdict literal rather than throwing", () => {
+    const doc = "### 1. some criterion\nverdict: SKIP\nevidence: exit 0\n";
+    assert.doesNotThrow(() => parseSelfUatCriteria(doc));
+    assert.deepStrictEqual(parseSelfUatCriteria(doc), []);
+  });
+
+  it("drops a criterion block carrying a lowercase verdict literal rather than throwing (exact-case match only)", () => {
+    const doc = "### 1. some criterion\nverdict: pass\nevidence: exit 0\n";
+    assert.doesNotThrow(() => parseSelfUatCriteria(doc));
+    assert.deepStrictEqual(parseSelfUatCriteria(doc), []);
+  });
+
+  it("drops a criterion block missing its evidence: line rather than throwing", () => {
+    const doc = "### 1. some criterion\nverdict: PASS\n";
+    assert.doesNotThrow(() => parseSelfUatCriteria(doc));
+    assert.deepStrictEqual(parseSelfUatCriteria(doc), []);
+  });
+
+  it("does not open a record for a ### heading with no ordinal prefix", () => {
+    const doc = "### Not Numbered\nverdict: PASS\nevidence: exit 0\n";
+    assert.doesNotThrow(() => parseSelfUatCriteria(doc));
+    assert.deepStrictEqual(parseSelfUatCriteria(doc), []);
   });
 });
 
