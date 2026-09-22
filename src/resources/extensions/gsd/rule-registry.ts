@@ -751,6 +751,8 @@ export class RuleRegistry {
     const config = resolvePostUnitHooks(basePath).find(h => h.name === block.hookName);
     if (!config) return this._dequeueNextHook(basePath);
     const outcome = this._readGateOutcome(config, block, basePath);
+    // WR-02 decision record: see the identical `case "pass": case
+    // "advisory":` branch in `_handleBlockingGateCompletion` below.
     if (outcome.verdict === "pass" || outcome.verdict === "advisory") {
       return this._dequeueNextHook(basePath);
     }
@@ -859,6 +861,9 @@ export class RuleRegistry {
   ): "skip" | HookDispatchResult | null {
     const outcome = this._readGateOutcome(config, trigger, basePath);
     switch (outcome.verdict) {
+      // WR-02 decision record: see the identical `case "pass": case
+      // "advisory":` branch in `_handleBlockingGateCompletion` below --
+      // PARTIAL-only SELF-UAT runs are intentionally non-blocking here too.
       case "pass":
       case "advisory":
         return "skip";
@@ -919,6 +924,22 @@ export class RuleRegistry {
 
     const outcome = this._readGateOutcome(config, hook, basePath);
     switch (outcome.verdict) {
+      // WR-02 decision record: `aggregateSelfUat` (verify-agentic-log.ts)
+      // derives `verdict: "advisory"` for a SELF-UAT run where every graded
+      // criterion is PASS or PARTIAL (no FAIL) -- i.e. a `result: "has_partial"`
+      // outcome clears the gate exactly like a clean pass. This is
+      // pre-existing behavior, unchanged by Phase 11 (it follows
+      // `uat-policy.ts`'s precedent of treating PARTIAL as non-blocking
+      // advisory), and is INTENTIONALLY carried through to this *blocking*
+      // gate: a slice-level SELF-UAT that only ever produces partial
+      // evidence (never an outright FAIL) is not treated as a hard blocker.
+      // If partial failures should instead block, this branch would need to
+      // distinguish a `result: "has_partial"` artifact from a true
+      // `result: "all_pass"`/generic-advisory one (the `result:` frontmatter
+      // field is written alongside `verdict:` but not currently parsed by
+      // `extractFrontmatterVerdict`) and route the former through
+      // `_routeNeedsRework` before this fast path -- that would be a
+      // deliberate behavior change, not a bug fix.
       case "pass":
       case "advisory":
         this.activeHook = null;
