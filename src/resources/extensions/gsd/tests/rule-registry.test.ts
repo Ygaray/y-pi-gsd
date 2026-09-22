@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { test, describe, beforeEach } from "node:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emitJournalEvent } from "../journal.ts";
@@ -46,6 +46,7 @@ import {
 import { completeSlice, type SliceCompletionCloseout } from "../slice-lifecycle-domain-operation.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
+import { HUMAN_UAT_PENDING_PROJECTION_FILENAME } from "../human-uat-pending-projection.ts";
 
 // ─── Mock Rule Factories ──────────────────────────────────────────────────
 
@@ -1209,6 +1210,272 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
       assert.notEqual(block, null, "the blocked state must be observable");
       assert.equal(typeof block?.reason, "string");
       assert.ok((block?.reason ?? "").length > 0, "the block must carry a non-empty, actionable reason");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ─── Phase 13-02: Gate-2 human-UAT pending ledger registration ────────────
+
+/** Whole-table read of `human_uat_pending` for a given milestone/slice, used
+ *  only to assert on rows registered through the real hook path above (not a
+ *  direct writer call) — the backstop must_haves statement in 13-02-PLAN.md. */
+function humanUatPendingRows(milestoneId: string, sliceId: string): Array<Record<string, unknown>> {
+  return _getAdapter()!.prepare(
+    "SELECT * FROM human_uat_pending WHERE milestone_id = :mid AND slice_id = :sid ORDER BY created_at ASC",
+  ).all({ ":mid": milestoneId, ":sid": sliceId }) as Array<Record<string, unknown>>;
+}
+
+const GATE2_PASS_RESULT: SelfUatCriterionResult = {
+  criterion: "the happy path renders",
+  verdict: "PASS",
+  evidence: "exit 0, screenshot matched baseline",
+};
+
+const GATE2_PARTIAL_RESULT: SelfUatCriterionResult = {
+  criterion: "the edge case degrades gracefully",
+  verdict: "PARTIAL",
+  evidence: "manual spot-check needed on slow network",
+};
+
+describe("Gate-2 human-UAT ledger registration (13-02)", () => {
+  test("Task 1a: a needs-attention verdict via _handleBlockingGateCompletion registers exactly one Gate-2 pending row and still pauses", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const timestampIso = new Date().toISOString();
+      const fileName = selfUatLogFileName("M001/S01", timestampIso);
+      const doc = renderSelfUat([GATE2_PASS_RESULT, GATE2_PARTIAL_RESULT], {
+        target: "M001/S01",
+        surface: "cli",
+        timestampIso,
+      });
+      writeFileSync(join(selfUatDir, fileName), doc, "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a needs-attention verdict must still pause the gate");
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null);
+
+      const rows = humanUatPendingRows("M001", "S01");
+      assert.equal(rows.length, 1, "_handleBlockingGateCompletion must register exactly one Gate-2 pending row");
+      assert.equal(rows[0]!["status"], "pending");
+
+      // Backstop (13-02-PLAN must_haves): the real hook path -- not a direct
+      // registerGate2HumanUatPending call -- must also drive the .gsd
+      // projection so it matches the table after a live registration.
+      const projectionContent = readFileSync(
+        join(projectRoot, ".gsd", HUMAN_UAT_PENDING_PROJECTION_FILENAME),
+        "utf-8",
+      );
+      assert.match(projectionContent, new RegExp(String(rows[0]!["entry_id"])));
+      assert.match(projectionContent, /## Outstanding/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("Task 1b: a needs-attention verdict via _handleExistingBlockingArtifact (restored-artifact path) also registers exactly one Gate-2 pending row", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "post_unit_hooks:",
+      "  - name: review-gate",
+      "    after: [complete-slice]",
+      "    prompt: Review {sliceId}",
+      "    artifact: REVIEW.md",
+      "    criticality: blocking",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      // Pre-write the artifact BEFORE dispatch so `_dequeueNextHook` takes
+      // the `_handleExistingBlockingArtifact` branch instead of a live
+      // dispatch+completion round trip.
+      const artifactDir = join(projectRoot, ".gsd", "milestones", "M001", "slices", "S01");
+      mkdirSync(artifactDir, { recursive: true });
+      const timestampIso = new Date().toISOString();
+      const doc = renderSelfUat([GATE2_PASS_RESULT, GATE2_PARTIAL_RESULT], {
+        target: "M001/S01",
+        surface: "cli",
+        timestampIso,
+      });
+      writeFileSync(join(artifactDir, "REVIEW.md"), doc, "utf-8");
+
+      const registry = new RuleRegistry([]);
+      const result = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.equal(result, null, "a needs-attention verdict from an existing artifact must pause, not dispatch");
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null);
+
+      const rows = humanUatPendingRows("M001", "S01");
+      assert.equal(rows.length, 1, "_handleExistingBlockingArtifact must register exactly one Gate-2 pending row");
+      assert.equal(rows[0]!["status"], "pending");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("Task 1c: an advisory verdict (no_criteria) registers zero Gate-2 pending rows and takes the existing skip/dequeue fast path", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const timestampIso = new Date().toISOString();
+      const fileName = selfUatLogFileName("M001/S01", timestampIso);
+      // no_criteria -> aggregateSelfUat's "advisory" verdict.
+      const doc = renderSelfUat([], { target: "M001/S01", surface: "cli", timestampIso });
+      writeFileSync(join(selfUatDir, fileName), doc, "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "advisory dequeues cleanly (empty queue) rather than pausing");
+      assert.equal(registry.consumeGateBlock(), null, "advisory must not produce a gate block");
+
+      assert.equal(humanUatPendingRows("M001", "S01").length, 0, "advisory must never register a Gate-2 entry");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("Task 1d: a mix of 4 PASS + 1 PARTIAL criteria records only the PARTIAL criterion in partial_criteria_json", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const timestampIso = new Date().toISOString();
+      const fileName = selfUatLogFileName("M001/S01", timestampIso);
+      const results: SelfUatCriterionResult[] = [
+        { criterion: "criterion A", verdict: "PASS", evidence: "exit 0" },
+        { criterion: "criterion B", verdict: "PASS", evidence: "exit 0" },
+        { criterion: "criterion C", verdict: "PASS", evidence: "exit 0" },
+        { criterion: "criterion D", verdict: "PASS", evidence: "exit 0" },
+        {
+          criterion: "criterion E needs a human look",
+          verdict: "PARTIAL",
+          evidence: "automated probe inconclusive on slow network",
+          rootCause: "the timeout budget is too tight to distinguish slow-network from broken",
+        },
+      ];
+      const doc = renderSelfUat(results, { target: "M001/S01", surface: "cli", timestampIso });
+      writeFileSync(join(selfUatDir, fileName), doc, "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null);
+      registry.consumeGateBlock();
+
+      const rows = humanUatPendingRows("M001", "S01");
+      assert.equal(rows.length, 1);
+      const partialCriteria = JSON.parse(String(rows[0]!["partial_criteria_json"])) as Array<{ criterion: string }>;
+      assert.equal(partialCriteria.length, 1, "only the PARTIAL criterion must be recorded, not all five");
+      assert.equal(partialCriteria[0]!.criterion, "criterion E needs a human look");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("Task 1e: a thrown registerGate2HumanUatPending never escapes evaluatePostUnit — the branch pauses via _pauseForGate with a reason naming the failure", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const timestampIso = new Date().toISOString();
+      const fileName = selfUatLogFileName("M001/S01", timestampIso);
+      const doc = renderSelfUat([GATE2_PASS_RESULT, GATE2_PARTIAL_RESULT], {
+        target: "M001/S01",
+        surface: "cli",
+        timestampIso,
+      });
+      writeFileSync(join(selfUatDir, fileName), doc, "utf-8");
+
+      // Close the database so registerGate2HumanUatPending's own DB access
+      // throws -- proving the failure is caught and routed to _pauseForGate
+      // rather than escaping evaluatePostUnit. _readGateOutcome/parseSelfUatCriteria
+      // are filesystem-only, so this does not disturb the rest of the path.
+      closeDatabase();
+
+      let result: ReturnType<typeof registry.evaluatePostUnit>;
+      assert.doesNotThrow(() => {
+        result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      }, "a registration failure must never escape evaluatePostUnit as an exception");
+      assert.equal(result!, null);
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null);
+      assert.ok(
+        (block?.reason ?? "").includes("gate2 ledger write failed"),
+        `pause reason must name the Gate-2 ledger write failure, got: ${block?.reason}`,
+      );
     } finally {
       cleanup();
     }

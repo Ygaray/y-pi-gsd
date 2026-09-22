@@ -40,6 +40,8 @@ import { SELF_UAT_LOG_DIR_RELATIVE, SELF_UAT_SUFFIX, slugifyTarget, parseSelfUat
 import { countReworkBriefsForSlice, saveReworkBrief, type ReworkBriefFindingInput } from "./gsd-db.js";
 import { reopenSlice } from "./slice-lifecycle-domain-operation.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
+import { registerGate2HumanUatPending } from "./milestone-gate2-human-uat-domain-operation.js";
+import { renderHumanUatPendingLedger } from "./human-uat-pending-projection.js";
 
 // ─── Artifact Path Resolution ──────────────────────────────────────────────
 
@@ -891,6 +893,72 @@ export class RuleRegistry {
       : `gate reported ${outcome.verdict}`;
   }
 
+  /**
+   * LEDGER-02: register a Gate-2 human-UAT pending entry, host-side, from a
+   * `needs-remediation`/`needs-attention` outcome. Returns a failure reason
+   * string when the registration could not be performed (including a
+   * legitimate no-op when the artifact carries no PARTIAL criterion, e.g. a
+   * `needs-remediation` outcome), and `null` on success. Never throws --
+   * mirrors `_routeAgenticGateGapClosure`'s defensive sequence exactly, so a
+   * writer failure pauses the gate (via the caller's `_pauseForGate`) rather
+   * than escaping `evaluatePostUnit`.
+   */
+  private _registerGate2HumanUat(
+    config: PostUnitHookConfig,
+    trigger: HookTriggerRef,
+    outcome: GateOutcome,
+    basePath: string,
+  ): string | null {
+    const { milestone: mid, slice: sid, task: tid } = parseUnitId(trigger.triggerUnitId);
+    if (!mid || !sid) {
+      return `gate2 ledger cannot register: trigger unit id "${trigger.triggerUnitId}" is missing milestone/slice segments`;
+    }
+    const artifactPath = outcome.artifactPath;
+    if (!artifactPath) {
+      return `gate2 ledger cannot register: no SELF-UAT artifact path resolved for ${mid}/${sid}`;
+    }
+    let content: string;
+    try {
+      content = readFileSync(artifactPath, "utf-8");
+    } catch (e) {
+      return `gate2 ledger cannot register: could not read SELF-UAT artifact ${artifactPath}: ${(e as Error).message}`;
+    }
+
+    const criteria = parseSelfUatCriteria(content);
+    const partial = criteria.filter((c) => c.verdict === "PARTIAL");
+    // A non-has_partial needs-remediation/needs-attention outcome (e.g. a
+    // needs-remediation gate with no PARTIAL criterion at all) must not
+    // manufacture a Gate-2 entry -- this branch is also reachable there.
+    if (partial.length === 0) return null;
+
+    try {
+      registerGate2HumanUatPending({
+        invocation: internalExecutionInvocation(`gate2-human-uat:${mid}/${sid}:${basename(artifactPath)}`),
+        milestoneId: mid,
+        sliceId: sid,
+        ...(tid ? { taskId: tid } : {}),
+        artifactPath,
+        reason: this._gateAttentionReason(config, outcome),
+        partialCriteria: partial.map((c) => ({
+          criterion: c.criterion,
+          evidence: c.evidence,
+          ...(c.rootCause ? { rootCause: c.rootCause } : {}),
+        })),
+      });
+    } catch (e) {
+      return `gate2 ledger write failed for ${mid}/${sid}: ${(e as Error).message}`;
+    }
+
+    try {
+      renderHumanUatPendingLedger(basePath);
+    } catch (e) {
+      // A projection-render failure must NOT lose the already-committed
+      // ledger row -- log and still return null (success).
+      logWarning("registry", `gate2 ledger projection render failed for ${mid}/${sid}: ${(e as Error).message}`);
+    }
+    return null;
+  }
+
   private _handleExistingBlockingArtifact(
     config: PostUnitHookConfig,
     trigger: HookTriggerRef,
@@ -913,7 +981,10 @@ export class RuleRegistry {
         return this._routeNeedsRework(config, trigger, outcome, basePath);
       case "needs-remediation":
       case "needs-attention": {
-        this._pauseForGate(config, trigger, outcome, this._gateAttentionReason(config, outcome));
+        // LEDGER-02: register the Gate-2 pending entry before pausing --
+        // never on the pass/advisory fast path above.
+        const gate2Failure = this._registerGate2HumanUat(config, trigger, outcome, basePath);
+        this._pauseForGate(config, trigger, outcome, gate2Failure ?? this._gateAttentionReason(config, outcome));
         return null;
       }
       case "failed":
@@ -983,8 +1054,10 @@ export class RuleRegistry {
       case "needs-rework":
         return this._routeNeedsRework(config, hook, outcome, basePath);
       case "needs-remediation":
-      case "needs-attention":
-        return this._pauseForGate(config, hook, outcome, this._gateAttentionReason(config, outcome));
+      case "needs-attention": {
+        const gate2Failure = this._registerGate2HumanUat(config, hook, outcome, basePath);
+        return this._pauseForGate(config, hook, outcome, gate2Failure ?? this._gateAttentionReason(config, outcome));
+      }
       case "failed":
       case undefined:
         return this._rerunGateOrBlock(config, hook, basePath, {
