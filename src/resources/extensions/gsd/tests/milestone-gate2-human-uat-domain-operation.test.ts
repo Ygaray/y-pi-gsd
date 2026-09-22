@@ -9,9 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import type { DomainOperationContext } from "../db/domain-operation.ts";
+import {
+  _setDomainOperationFaultForTest,
+  type DomainOperationContext,
+} from "../db/domain-operation.ts";
 import { SCHEMA_VERSION } from "../db/engine.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { registerGate2HumanUatPendingRow } from "../db/writers/milestone-gate2-human-uat.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { clearParseCache } from "../files.ts";
 import {
@@ -48,6 +52,27 @@ function row(sql: string): Record<string, unknown> {
 
 function rows(sql: string): Array<Record<string, unknown>> {
   return db().prepare(sql).all();
+}
+
+/**
+ * Reads all three legs of a Gate-2 write together so a partial commit cannot
+ * hide in the one count a caller forgot to check (D-03 requirement 1).
+ */
+function countGate2State(): { rows: number; events: number; outbox: number } {
+  return {
+    rows: Number(row(`SELECT COUNT(*) AS count FROM human_uat_pending`).count),
+    events: Number(row(`
+      SELECT COUNT(*) AS count FROM workflow_domain_events
+      WHERE event_type = 'milestone.gate2-human-uat-required'
+    `).count),
+    outbox: Number(row(`
+      SELECT COUNT(*) AS count FROM workflow_outbox
+      WHERE event_id IN (
+        SELECT event_id FROM workflow_domain_events
+        WHERE event_type = 'milestone.gate2-human-uat-required'
+      )
+    `).count),
+  };
 }
 
 function invocation(idempotencyKey: string): ExecutionInvocation {
@@ -175,6 +200,7 @@ function completionInput(idempotencyKey: string) {
 }
 
 afterEach(() => {
+  _setDomainOperationFaultForTest(null);
   testedSourceRevision = "";
   clearPathCache();
   clearParseCache();
@@ -249,6 +275,133 @@ test("one row per slice: a second registration for the same slice does not creat
   `);
   assert.equal(pendingRows.length, 1);
   assert.equal(pendingRows[0]!["reason"], "PARTIAL: first pass");
+});
+
+test("atomicity: a fault at after-mutation leaves zero rows, events, and outbox rows", () => {
+  makeBase();
+  _setDomainOperationFaultForTest("after-mutation", "milestone.gate2-human-uat.require");
+  assert.throws(
+    () => registerGate2HumanUatPending({
+      invocation: invocation("fixture/gate2/fault-after-mutation"),
+      milestoneId: "M001",
+      sliceId: "S01",
+      reason: "PARTIAL: fault at after-mutation",
+      partialCriteria: [{ criterion: "A", evidence: "a" }],
+    }),
+    /after-mutation/,
+  );
+  _setDomainOperationFaultForTest(null);
+  assert.deepEqual(countGate2State(), { rows: 0, events: 0, outbox: 0 });
+});
+
+test("atomicity: a fault at after-events leaves zero rows, events, and outbox rows", () => {
+  makeBase();
+  _setDomainOperationFaultForTest("after-events", "milestone.gate2-human-uat.require");
+  assert.throws(
+    () => registerGate2HumanUatPending({
+      invocation: invocation("fixture/gate2/fault-after-events"),
+      milestoneId: "M001",
+      sliceId: "S01",
+      reason: "PARTIAL: fault at after-events",
+      partialCriteria: [{ criterion: "A", evidence: "a" }],
+    }),
+    /after-events/,
+  );
+  _setDomainOperationFaultForTest(null);
+  assert.deepEqual(countGate2State(), { rows: 0, events: 0, outbox: 0 });
+});
+
+test("atomicity: a fault at before-cas leaves zero rows, events, and outbox rows", () => {
+  makeBase();
+  _setDomainOperationFaultForTest("before-cas", "milestone.gate2-human-uat.require");
+  assert.throws(
+    () => registerGate2HumanUatPending({
+      invocation: invocation("fixture/gate2/fault-before-cas"),
+      milestoneId: "M001",
+      sliceId: "S01",
+      reason: "PARTIAL: fault at before-cas",
+      partialCriteria: [{ criterion: "A", evidence: "a" }],
+    }),
+    /before-cas/,
+  );
+  _setDomainOperationFaultForTest(null);
+  assert.deepEqual(countGate2State(), { rows: 0, events: 0, outbox: 0 });
+});
+
+test("clean run after a faulted run: a subsequent registration leaves no poison state", () => {
+  makeBase();
+  _setDomainOperationFaultForTest("after-mutation", "milestone.gate2-human-uat.require");
+  assert.throws(() => registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/fault-then-clean-faulted"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: faulted attempt",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  }));
+  _setDomainOperationFaultForTest(null);
+
+  const receipt = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/fault-then-clean-retry"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: clean attempt",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  assert.equal(receipt.created, true);
+  assert.deepEqual(countGate2State(), { rows: 1, events: 1, outbox: 1 });
+});
+
+test("idempotent replay: an identical idempotency key replays without duplicating anything", () => {
+  makeBase();
+  const key = "fixture/gate2/replay-key";
+  const first = registerGate2HumanUatPending({
+    invocation: invocation(key),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: replay test",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  assert.equal(first.created, true);
+
+  const second = registerGate2HumanUatPending({
+    invocation: invocation(key),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: replay test",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  assert.equal(second.status, "replayed");
+  assert.equal(second.entryId, first.entryId);
+  assert.deepEqual(countGate2State(), { rows: 1, events: 1, outbox: 1 });
+});
+
+test("second key, same slice: a distinct idempotency key does not open a second pending entry", () => {
+  makeBase();
+  const first = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/second-key-first"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: first pass",
+    partialCriteria: [{ criterion: "A", evidence: "a" }],
+  });
+  assert.equal(first.created, true);
+
+  const second = registerGate2HumanUatPending({
+    invocation: invocation("fixture/gate2/second-key-second"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "PARTIAL: second pass",
+    partialCriteria: [{ criterion: "B", evidence: "b" }],
+  });
+  assert.equal(second.created, false);
+  assert.equal(second.entryId, first.entryId);
+
+  assert.equal(
+    Number(row(`
+      SELECT COUNT(*) AS count FROM human_uat_pending WHERE status = 'pending'
+    `).count),
+    1,
+  );
 });
 
 test("close guard blocks: completeMilestone refuses while a Gate-2 entry is outstanding", async () => {
