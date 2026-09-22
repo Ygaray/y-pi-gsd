@@ -952,25 +952,32 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
         planning: { successCriteria: "- must handle X" },
       });
 
-      // Default max_cycles:1 plus the existing, unmodified one-shot
-      // lost-dispatch refund (#1246/#2194 — a repeated "complete-slice"
-      // trigger with no intervening hook/agentic-gate1 completion looks
-      // identical to a lost/interrupted dispatch) means a repeated trigger
-      // is re-dispatched exactly once, then blocks on the third call —
-      // never looping unboundedly. This is the pre-existing
-      // cycleCounts/max_cycles + redispatchedGateKeys mechanism, unmodified
-      // by this plan; this test proves it holds for the new gate hook too.
+      // The existing, unmodified one-shot lost-dispatch refund
+      // (#1246/#2194 — a repeated "complete-slice" trigger with no
+      // intervening hook/agentic-gate1 completion looks identical to a
+      // lost/interrupted dispatch) means a repeated trigger is re-dispatched
+      // at least once before ever blocking. Phase 12 (RESEARCH gap 1) raised
+      // AGENTIC_GATE1_HOOK_CONFIG.max_cycles from its 1-cycle default to 8
+      // (dispatch headroom for the gap-closure loop), so the SAME repeated
+      // trigger now re-dispatches up to that larger budget before blocking
+      // — still bounded, never unbounded, just at a bigger bound. Drive
+      // repeated triggers until the budget is genuinely exhausted, proving
+      // the loop terminates rather than hard-coding the old cycle count.
       const registry = new RuleRegistry([]);
       const first = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
       assert.notEqual(first, null, "first complete-slice trigger must dispatch");
       assert.equal(first!.unitType, "hook/agentic-gate1");
 
-      const second = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
-      assert.notEqual(second, null, "the one-shot lost-dispatch refund re-dispatches the same gate hook once");
-      assert.equal(second!.unitType, "hook/agentic-gate1");
-
-      const third = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
-      assert.equal(third, null, "a third repeated trigger — refund already spent — must block rather than dispatch a third time");
+      let sawBlock = false;
+      for (let i = 0; i < 20; i++) {
+        const next = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+        if (next === null) {
+          sawBlock = true;
+          break;
+        }
+        assert.equal(next!.unitType, "hook/agentic-gate1", "every re-dispatch before the budget exhausts must still be the same gate hook");
+      }
+      assert.ok(sawBlock, "repeated triggers must eventually block — never loop unboundedly");
       const block = registry.consumeGateBlock();
       assert.notEqual(block, null, "the blocked state must be observable, not a silent unbounded loop");
       assert.equal(block?.action, "pause");
@@ -1144,9 +1151,17 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
       const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
       assert.notEqual(dispatch, null);
 
-      // No SELF-UAT artifact written at all — simulates a halted run.
-      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
-      assert.equal(result, null, "a halted run with no artifact must not hang — max_cycles:1 blocks immediately");
+      // No SELF-UAT artifact written at all — simulates a halted run. Phase
+      // 12 (RESEARCH gap 1) raised AGENTIC_GATE1_HOOK_CONFIG.max_cycles from
+      // its 1-cycle default to 8 (dispatch headroom for the gap-closure
+      // loop), so a missing-artifact completion now re-dispatches itself up
+      // to that larger budget before finally blocking — still bounded,
+      // never hanging, just at a bigger bound.
+      let result: ReturnType<typeof registry.evaluatePostUnit> = dispatch;
+      for (let i = 0; i < 20 && result !== null; i++) {
+        result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      }
+      assert.equal(result, null, "a halted run with no artifact must eventually block — never hang unboundedly");
       const block = registry.consumeGateBlock();
       assert.notEqual(block, null, "the blocked state must be observable");
       assert.equal(typeof block?.reason, "string");
@@ -1579,6 +1594,79 @@ describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
       assert.equal(block?.action, "pause");
 
       assert.equal(reworkBriefCountForSlice("M001", "S01"), 0, "no brief may be written when no failing criterion parses");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("Pitfall 1 regression: the gate can dispatch a second time for the same slice after a gap-closure cycle completes", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+      insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+      completeGate1Slice("gap-closure-pitfall1-cycle1");
+
+      const registry = new RuleRegistry([]);
+      const firstDispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(firstDispatch, null);
+
+      writeNeedsReworkArtifact(projectRoot, "2026-09-21T14:00:00.000Z");
+
+      const gapClosureResult = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(gapClosureResult, null, "cycle 1 gap-closure must complete without a dispatch");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 1 gap-closure must leave no gate block");
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 1, "cycle 1 must author exactly one rework_briefs row");
+
+      // Re-complete the slice — as the untouched auto-loop would, once the
+      // reopened task's rework is addressed and the slice re-completes —
+      // and run a SECOND complete-slice evaluation on the SAME registry
+      // instance. Before the max_cycles bump this hard-pauses on the
+      // pre-existing, unrelated hook-level cycle budget (Pitfall 1) before
+      // any of Phase 12's gap-closure logic is ever consulted.
+      completeGate1Slice("gap-closure-pitfall1-cycle1-recomplete");
+      const secondDispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(
+        secondDispatch,
+        null,
+        "the engine must not refuse the second dispatch and hard-pause with a budget-exhausted reason (Pitfall 1)",
+      );
+      assert.equal(secondDispatch!.unitType, "hook/agentic-gate1");
+      assert.equal(registry.consumeGateBlock(), null, "the second dispatch must not itself be a gate block");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("AGENTIC_GATE1_HOOK_CONFIG.max_cycles carries headroom above GAP_CLOSURE_MAX_CYCLES (Pitfall 1)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      const hooks = resolvePostUnitHooks(projectRoot);
+      const gateConfig = hooks.find((h) => h.name === "agentic-gate1");
+      assert.ok(gateConfig, "resolvePostUnitHooks must synthesize the gate config when the toggle is on");
+      const maxCycles = gateConfig!.max_cycles;
+      assert.equal(typeof maxCycles, "number");
+      assert.ok(
+        (maxCycles as number) >= GAP_CLOSURE_MAX_CYCLES + 1,
+        `max_cycles (${maxCycles}) must be at least GAP_CLOSURE_MAX_CYCLES + 1 (${GAP_CLOSURE_MAX_CYCLES + 1})`,
+      );
+      assert.ok((maxCycles as number) <= 10, `max_cycles (${maxCycles}) must not exceed the documented ceiling of 10`);
     } finally {
       cleanup();
     }

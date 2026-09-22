@@ -1210,11 +1210,24 @@ export const AGENTIC_GATE1_HOOK_NAME = "agentic-gate1";
  * real prompt via `buildVerifyAgenticPrompt`, not the generic substitution.
  * `on_block: { action: "pause" }` is explicit (D-01) — the default `"retry-unit"`
  * would wrongly invoke real rework routing, out of scope for Phase 11.
+ * `max_cycles: 8` (Phase 12, RESEARCH gap 1) is dispatch headroom ONLY, not
+ * the gap-closure cap: the cap is `GAP_CLOSURE_MAX_CYCLES` (rule-registry.ts),
+ * enforced from `countReworkBriefsForSlice` per D-03. This hook-level cycle
+ * counter is keyed by trigger unit id (`hookCycleKey`), which never changes
+ * across gap-closure cycles for the same slice — left at its default of 1 it
+ * would hard-block the *second* `complete-slice` completion (the gate's
+ * re-run after cycle 1's rework) before any gap-closure logic is ever
+ * consulted. 8 is chosen with comfortable headroom above the 3-cycle cap (at
+ * least 4 real dispatches) so this counter can never bind first and produce
+ * a confusing budget-exhausted pause at a different boundary than the
+ * DB-derived one; it stays under the ceiling `types.ts` documents and
+ * `preferences-validation.ts` clamps user-authored hooks to.
  */
 const AGENTIC_GATE1_HOOK_CONFIG: PostUnitHookConfig = {
   name: AGENTIC_GATE1_HOOK_NAME,
   after: ["complete-slice"],
   criticality: "blocking",
+  max_cycles: 8,
   on_block: { action: "pause" },
   artifact: "<target>-SELF-UAT.md",
   prompt: "(synthesized hook — see rule-registry.ts's _buildAgenticGateDispatch, which builds the real prompt via buildVerifyAgenticPrompt)",
