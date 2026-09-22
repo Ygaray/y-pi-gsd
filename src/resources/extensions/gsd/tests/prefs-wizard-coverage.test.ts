@@ -28,6 +28,7 @@ const PREF_SAMPLE_VALUES: Record<string, unknown> = {
   skill_staleness_days: 7,
   auto_supervisor: { soft_timeout_minutes: 20, idle_timeout_minutes: 10, hard_timeout_minutes: 30 },
   uat_dispatch: true,
+  agentic_gate1_enabled: true,
   unique_milestone_ids: true,
   budget_ceiling: 12.5,
   budget_enforcement: "warn",
