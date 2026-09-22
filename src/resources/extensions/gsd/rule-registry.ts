@@ -1314,9 +1314,22 @@ export class RuleRegistry {
     const artifactPath = isAgenticGateHook(config)
       ? resolveAgenticGateArtifactPath(basePath, trigger.triggerUnitId)
       : resolveHookArtifactPath(basePath, trigger.triggerUnitId, config.artifact);
+    // IN-01 (12-REVIEW.md): for the agentic-gate1 hook, `config.artifact` is
+    // the non-resolvable placeholder literal `"<target>-SELF-UAT.md"`
+    // (preferences.ts), never the real timestamped filename. Once a real
+    // path has been resolved, prefer its basename for the `GateOutcome`
+    // returned to callers (including `_routeAgenticGateGapClosure`'s pause
+    // paths and `_setGateBlock`'s persisted block) so a pause reason or
+    // status surface never displays the unhelpful literal placeholder.
+    // Falls back to `config.artifact` when no real path was resolved (e.g.
+    // the artifact is genuinely missing) or for every other hook, which
+    // never carries a placeholder in the first place.
+    const displayArtifact = isAgenticGateHook(config) && artifactPath
+      ? basename(artifactPath)
+      : config.artifact;
     if (artifactPath === null || !existsSync(artifactPath)) {
       return {
-        artifact: config.artifact,
+        artifact: displayArtifact,
         artifactPath: artifactPath ?? undefined,
         reason: `missing required gate artifact ${config.artifact}`,
       };
@@ -1326,7 +1339,7 @@ export class RuleRegistry {
       content = readFileSync(artifactPath, "utf-8");
     } catch (e) {
       return {
-        artifact: config.artifact,
+        artifact: displayArtifact,
         artifactPath,
         reason: `could not read gate artifact ${config.artifact}: ${(e as Error).message}`,
       };
@@ -1335,14 +1348,14 @@ export class RuleRegistry {
     const rawVerdict = extractFrontmatterVerdict(content);
     if (!rawVerdict) {
       return {
-        artifact: config.artifact,
+        artifact: displayArtifact,
         artifactPath,
         reason: `gate artifact ${config.artifact} is missing frontmatter verdict`,
       };
     }
     if (rawVerdict === "failed") {
       return {
-        artifact: config.artifact,
+        artifact: displayArtifact,
         artifactPath,
         verdict: "failed",
         reason: `gate artifact ${config.artifact} reported verdict=failed`,
@@ -1350,13 +1363,13 @@ export class RuleRegistry {
     }
     if (!HOOK_OUTCOME_VERDICTS.has(rawVerdict as PostUnitHookOutcomeVerdict)) {
       return {
-        artifact: config.artifact,
+        artifact: displayArtifact,
         artifactPath,
         reason: `gate artifact ${config.artifact} has unsupported verdict=${rawVerdict}`,
       };
     }
     return {
-      artifact: config.artifact,
+      artifact: displayArtifact,
       artifactPath,
       verdict: rawVerdict as PostUnitHookOutcomeVerdict,
     };

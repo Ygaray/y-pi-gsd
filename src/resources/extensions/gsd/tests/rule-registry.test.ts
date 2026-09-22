@@ -1024,6 +1024,46 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
     }
   });
 
+  test("IN-01 (resolved): the persisted gate block's artifact is the real resolved filename, never the config placeholder (12-REVIEW.md)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const fileName = selfUatLogFileName("M001/S01", new Date().toISOString());
+      writeFileSync(join(selfUatDir, fileName), "---\nresult: has_fail\nverdict: needs-rework\n---\n", "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null);
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null);
+      // config.artifact for the agentic-gate1 hook is the literal,
+      // non-resolvable placeholder "<target>-SELF-UAT.md" (preferences.ts).
+      // A real timestamped artifact was resolved and read, so the block's
+      // `artifact` field must reflect that real filename, not the literal
+      // placeholder string.
+      assert.equal(block?.artifact, fileName, "block.artifact must be the real resolved filename");
+      assert.notEqual(block?.artifact, "<target>-SELF-UAT.md", "block.artifact must never be the config placeholder");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("WR-02 (resolved): a needs-attention verdict (all-PARTIAL SELF-UAT run) pauses the blocking gate, never clears and never auto-reworks", () => {
     const { projectRoot, cleanup } = setupGate1Fixture([
       "---",
