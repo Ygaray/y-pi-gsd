@@ -1423,18 +1423,58 @@ const GAP_CLOSURE_FAIL_RESULT: SelfUatCriterionResult = {
   gapClosureRoute: "Add a null guard in src/handler.ts before the .foo access and re-run this criterion",
 };
 
-/** Writes a real needs-rework SELF-UAT artifact (via the real renderer) for M001/S01 and returns its basename. */
-function writeNeedsReworkArtifact(projectRoot: string, timestampIso: string): string {
+/** The second criterion re-graded PASS — pairs with GAP_CLOSURE_PASS_RESULT to
+ *  produce an all-PASS artifact (aggregateSelfUat -> verdict: pass) once a
+ *  gap-closure cycle's rework has (notionally) landed. */
+const GAP_CLOSURE_FAIL_RESULT_NOW_PASSING: SelfUatCriterionResult = {
+  criterion: "the second criterion holds",
+  verdict: "PASS",
+  evidence: "exit 0, stderr empty after the null-guard fix",
+};
+
+/** Writes a real needs-rework (or, with an all-PASS `results` override, a
+ *  clean-pass) SELF-UAT artifact via the real renderer for M001/S01 and
+ *  returns its basename. */
+function writeNeedsReworkArtifact(
+  projectRoot: string,
+  timestampIso: string,
+  results: SelfUatCriterionResult[] = [GAP_CLOSURE_PASS_RESULT, GAP_CLOSURE_FAIL_RESULT],
+): string {
   const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
   mkdirSync(selfUatDir, { recursive: true });
   const fileName = selfUatLogFileName("M001/S01", timestampIso);
-  const doc = renderSelfUat([GAP_CLOSURE_PASS_RESULT, GAP_CLOSURE_FAIL_RESULT], {
+  const doc = renderSelfUat(results, {
     target: "M001/S01",
     surface: "cli",
     timestampIso,
   });
   writeFileSync(join(selfUatDir, fileName), doc, "utf-8");
   return fileName;
+}
+
+/**
+ * Drives one full gap-closure cycle against a genuinely completed slice: a
+ * fresh runId re-seeds slice-completion authority and re-completes M001/S01
+ * for real (mirroring the "Pitfall 1 regression" test's re-complete step),
+ * dispatches the gate, writes a needs-rework SELF-UAT artifact at a fresh
+ * timestamp (so resolveAgenticGateArtifactPath's newest-mtime resolution
+ * picks THIS cycle's file), then runs the hook completion. Every cycle uses
+ * a distinct runId/timestamp — reusing either is what makes a multi-cycle
+ * test pass for the wrong reason (12-02-PLAN Task 1).
+ */
+function runGapClosureCycle(
+  registry: RuleRegistry,
+  projectRoot: string,
+  cycleLabel: string,
+  timestampIso: string,
+  results: SelfUatCriterionResult[] = [GAP_CLOSURE_PASS_RESULT, GAP_CLOSURE_FAIL_RESULT],
+): ReturnType<typeof registry.evaluatePostUnit> {
+  completeGate1Slice(`gap-closure-multi-${cycleLabel}`);
+  const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+  assert.notEqual(dispatch, null, `cycle ${cycleLabel} dispatch must fire`);
+  assert.equal(dispatch!.unitType, "hook/agentic-gate1");
+  writeNeedsReworkArtifact(projectRoot, timestampIso, results);
+  return registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
 }
 
 describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
@@ -1667,6 +1707,122 @@ describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
         `max_cycles (${maxCycles}) must be at least GAP_CLOSURE_MAX_CYCLES + 1 (${GAP_CLOSURE_MAX_CYCLES + 1})`,
       );
       assert.ok((maxCycles as number) <= 10, `max_cycles (${maxCycles}) must not exceed the documented ceiling of 10`);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("three cycles author three distinct rework briefs and finding sets, then a 4th needs-rework attempt escalates via the cap (D-03, ROADMAP SC3/SC4)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+      insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+      const registry = new RuleRegistry([]);
+
+      let result = runGapClosureCycle(registry, projectRoot, "1", "2026-09-22T01:00:00.000Z");
+      assert.equal(result, null, "cycle 1 gap-closure must complete without a dispatch");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 1 must leave no gate block");
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 1, "cycle 1 COUNT must be 1");
+
+      result = runGapClosureCycle(registry, projectRoot, "2", "2026-09-22T02:00:00.000Z");
+      assert.equal(result, null, "cycle 2 gap-closure must complete without a dispatch");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 2 must leave no gate block");
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 2, "cycle 2 COUNT must be 2");
+
+      result = runGapClosureCycle(registry, projectRoot, "3", "2026-09-22T03:00:00.000Z");
+      assert.equal(result, null, "cycle 3 gap-closure must complete without a dispatch");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 3 must leave no gate block");
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 3, "cycle 3 COUNT must be 3");
+
+      const briefIds = [1, 2, 3].map((n) => `RB-M001-S01-T02-gap-${n}`);
+      for (const [index, briefId] of briefIds.entries()) {
+        const brief = reworkBriefRow(briefId);
+        assert.ok(brief, `expected a rework_briefs row with id ${briefId}`);
+        assert.ok(String(brief!["id"]).endsWith(`-gap-${index + 1}`), `brief id must end with -gap-${index + 1}`);
+      }
+      assert.equal(new Set(briefIds).size, 3, "the three brief ids must be pairwise distinct");
+
+      const allFindingIds = briefIds.flatMap((id) => findingsForBrief(id).map((f) => String(f["finding_id"])));
+      assert.equal(
+        new Set(allFindingIds).size,
+        allFindingIds.length,
+        "finding ids must be pairwise distinct across all three cycles — no id reused",
+      );
+      assert.ok(allFindingIds.some((id) => id.startsWith("GC1-")), "cycle 1 findings must carry the GC1- prefix");
+      assert.ok(allFindingIds.some((id) => id.startsWith("GC2-")), "cycle 2 findings must carry the GC2- prefix");
+      assert.ok(allFindingIds.some((id) => id.startsWith("GC3-")), "cycle 3 findings must carry the GC3- prefix");
+
+      // 4th attempt: the cap (GAP_CLOSURE_MAX_CYCLES=3) has already been
+      // reached by three real cycles — this must escalate via _pauseForGate
+      // rather than author a 4th row.
+      result = runGapClosureCycle(registry, projectRoot, "4", "2026-09-22T04:00:00.000Z");
+      assert.equal(result, null);
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "the 4th needs-rework verdict must produce an observable pause, not a 4th cycle");
+      assert.equal(block?.action, "pause");
+      assert.match(String(block?.reason ?? ""), /3/, "the pause reason must name the cap count");
+      assert.equal(
+        reworkBriefCountForSlice("M001", "S01"),
+        3,
+        "no 4th rework_briefs row may be written once the cap is reached",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a pass verdict after a gap-closure cycle clears the block and authors no additional rework brief (ROADMAP SC2)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+      insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+      const registry = new RuleRegistry([]);
+      const cycle1 = runGapClosureCycle(registry, projectRoot, "pass-fixture-1", "2026-09-22T05:00:00.000Z");
+      assert.equal(cycle1, null);
+      assert.equal(registry.consumeGateBlock(), null);
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 1, "cycle 1 must author exactly one brief");
+
+      // Re-complete the slice — as the untouched auto-loop would once the
+      // reopened task's rework is addressed — and re-run the gate with an
+      // ALL-PASS artifact so aggregateSelfUat yields verdict: pass.
+      const result = runGapClosureCycle(
+        registry,
+        projectRoot,
+        "pass-fixture-2",
+        "2026-09-22T06:00:00.000Z",
+        [GAP_CLOSURE_PASS_RESULT, GAP_CLOSURE_FAIL_RESULT_NOW_PASSING],
+      );
+      assert.equal(result, null, "a pass verdict must clear cleanly with no dispatch");
+      assert.equal(registry.consumeGateBlock(), null, "no gate block may remain outstanding after a pass verdict");
+      assert.equal(
+        reworkBriefCountForSlice("M001", "S01"),
+        1,
+        "a pass verdict must not author an additional rework brief",
+      );
     } finally {
       cleanup();
     }
