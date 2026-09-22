@@ -32,6 +32,9 @@ import {
   openDatabase,
   _getAdapter,
   saveReworkBrief,
+  applyReworkResolutions,
+  getBlockingReworkFindingsForTask,
+  getUnresolvedBlockingReworkFindingsForTask,
 } from "../gsd-db.ts";
 import { resolvePostUnitHooks } from "../preferences.ts";
 import {
@@ -2039,5 +2042,77 @@ describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
         cleanup();
       }
     });
+  });
+
+  test("cross-cycle resolution isolation: resolving only the cycle-2 finding leaves the cycle-1 finding pending (T-12-08)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+      insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+      const registry = new RuleRegistry([]);
+      const cycle1 = runGapClosureCycle(registry, projectRoot, "isolation-1", "2026-09-22T13:00:00.000Z");
+      assert.equal(cycle1, null);
+      assert.equal(registry.consumeGateBlock(), null);
+      const cycle2 = runGapClosureCycle(registry, projectRoot, "isolation-2", "2026-09-22T14:00:00.000Z");
+      assert.equal(cycle2, null);
+      assert.equal(registry.consumeGateBlock(), null);
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 2, "two briefs must exist for the same task (T02)");
+
+      // Documents the plural-identity union behaviour BEFORE any resolution:
+      // getBlockingReworkFindingsForTask returns findings sourced from BOTH
+      // brief ids for the shared task.
+      const beforeResolution = getBlockingReworkFindingsForTask("M001", "S01", "T02");
+      const briefIdsSeen = new Set(
+        beforeResolution.map((f) => f.brief_id),
+      );
+      assert.ok(briefIdsSeen.has("RB-M001-S01-T02-gap-1"), "must include the cycle-1 brief's findings");
+      assert.ok(briefIdsSeen.has("RB-M001-S01-T02-gap-2"), "must include the cycle-2 brief's findings");
+
+      // Resolve ONLY the cycle-2 finding.
+      applyReworkResolutions([{
+        milestoneId: "M001",
+        sliceId: "S01",
+        taskId: "T02",
+        findingId: "GC2-01",
+        status: "resolved",
+        evidence: "Added the null guard in src/handler.ts and re-ran the criterion — exit 0.",
+      }]);
+
+      const cycle2Finding = findingsForBrief("RB-M001-S01-T02-gap-2").find((f) => f["finding_id"] === "GC2-01");
+      assert.ok(cycle2Finding, "the cycle-2 finding row must exist");
+      assert.equal(cycle2Finding!["status"], "resolved");
+
+      const cycle1Finding = findingsForBrief("RB-M001-S01-T02-gap-1").find((f) => f["finding_id"] === "GC1-01");
+      assert.ok(cycle1Finding, "the cycle-1 finding row must exist");
+      assert.equal(
+        cycle1Finding!["status"],
+        "pending",
+        "resolving only the cycle-2 id must NOT flip the cycle-1 finding — this is what makes GC{cycle}-{NN} ids load-bearing",
+      );
+
+      const unresolved = getUnresolvedBlockingReworkFindingsForTask("M001", "S01", "T02");
+      assert.ok(
+        unresolved.some((f) => f.finding_id === "GC1-01"),
+        "getUnresolvedBlockingReworkFindingsForTask must still return the still-pending cycle-1 finding",
+      );
+      assert.ok(
+        !unresolved.some((f) => f.finding_id === "GC2-01"),
+        "the now-resolved cycle-2 finding must no longer appear as unresolved",
+      );
+    } finally {
+      cleanup();
+    }
   });
 });
