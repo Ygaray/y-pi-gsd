@@ -264,6 +264,23 @@ export function aggregateSelfUat(results: SelfUatCriterionResult[]): SelfUatAggr
 }
 
 /**
+ * WR-02 (12-REVIEW.md): every per-criterion field renderSelfUat emits as a
+ * single `field: value` line (`criterion`, `evidence`, `rootCause`,
+ * `gapClosureRoute`) is collapsed to one physical line first. Realistic
+ * diagnostic content — command output, stack traces — routinely contains
+ * embedded newlines; left unnormalized, only the first line would land
+ * after the field's prefix and every subsequent line would land as bare,
+ * unprefixed prose in the document body, silently truncating what
+ * `parseSelfUatCriteria` reads back for gap-closure. Collapsing at the
+ * render boundary (rather than making the parser continuation-aware) keeps
+ * the on-disk format's one-line-per-field invariant exact, so the parser
+ * never has to guess where a continuation line belongs.
+ */
+function collapseNewlines(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, " ");
+}
+
+/**
  * Render the SELF-UAT log document for a completed verification run.
  *
  * Pure function: takes plain data, returns a markdown string. Performs no
@@ -304,14 +321,14 @@ export function renderSelfUat(
 
   results.forEach((result, index) => {
     const n = index + 1;
-    lines.push(`### ${n}. ${result.criterion}`);
+    lines.push(`### ${n}. ${collapseNewlines(result.criterion)}`);
     lines.push(`verdict: ${result.verdict}`);
-    lines.push(`evidence: ${result.evidence}`);
+    lines.push(`evidence: ${collapseNewlines(result.evidence)}`);
     if (result.verdict === "FAIL" || (result.verdict === "PARTIAL" && result.rootCause?.trim())) {
-      lines.push(`root_cause: ${result.rootCause?.trim()}`);
+      lines.push(`root_cause: ${collapseNewlines(result.rootCause?.trim() ?? "")}`);
     }
     if (result.gapClosureRoute) {
-      lines.push(`gap_closure: ${result.gapClosureRoute}`);
+      lines.push(`gap_closure: ${collapseNewlines(result.gapClosureRoute)}`);
     }
     lines.push("");
   });

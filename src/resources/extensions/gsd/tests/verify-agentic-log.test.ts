@@ -189,6 +189,37 @@ describe("parseSelfUatCriteria", () => {
     assert.deepStrictEqual(parsed, results);
   });
 
+  it("collapses embedded newlines in evidence/rootCause/gapClosureRoute to spaces rather than truncating on round trip (WR-02, 12-REVIEW.md)", () => {
+    const results: SelfUatCriterionResult[] = [
+      {
+        criterion: "fail criterion",
+        verdict: "FAIL",
+        evidence: "exit 1, stderr:\nTypeError: Cannot read properties of undefined (reading 'foo')\n  at handler.ts:12",
+        rootCause: "the handler never checked for a null payload\nbefore dereferencing its foo field",
+        gapClosureRoute: "Add a null guard in src/handler.ts\nbefore the .foo access and re-run this criterion",
+      },
+    ];
+    const doc = renderSelfUat(results, BASE_META);
+    // Each field must land on exactly one physical line — a naive render
+    // would have split `evidence` across three raw lines, only the first
+    // of which carries the `evidence: ` prefix `parseSelfUatCriteria` scans
+    // for; the other two would become bare, unprefixed body text and be
+    // silently dropped by the parser.
+    assert.match(doc, /^evidence: exit 1, stderr: TypeError:.*at handler\.ts:12$/m);
+    assert.match(doc, /^root_cause: the handler never checked.*dereferencing its foo field$/m);
+    assert.match(doc, /^gap_closure: Add a null guard.*re-run this criterion$/m);
+    const parsed = parseSelfUatCriteria(doc);
+    assert.deepStrictEqual(parsed, [
+      {
+        criterion: "fail criterion",
+        verdict: "FAIL",
+        evidence: "exit 1, stderr: TypeError: Cannot read properties of undefined (reading 'foo')   at handler.ts:12",
+        rootCause: "the handler never checked for a null payload before dereferencing its foo field",
+        gapClosureRoute: "Add a null guard in src/handler.ts before the .foo access and re-run this criterion",
+      },
+    ]);
+  });
+
   it("survives a criterion and evidence containing a colon without truncation at the first colon", () => {
     const results: SelfUatCriterionResult[] = [
       { criterion: "before: after", verdict: "PASS", evidence: "exit 0: stdout: matched: expected" },
