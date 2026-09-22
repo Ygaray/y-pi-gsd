@@ -214,6 +214,7 @@ test("#1678: opening a pre-v1.14 v46 database bootstraps liveness schema without
     {
       ...rowsAfter,
       tasks: rowsAfter.tasks.map(({ required_workflow_tools: _requiredWorkflowTools, ...row }) => row),
+      slices: rowsAfter.slices.map(({ surface: _surface, ...row }) => row),
     },
     rowsBefore,
     "startup repair must not rewrite workflow-owned rows",
