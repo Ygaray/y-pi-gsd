@@ -693,7 +693,13 @@ export class RuleRegistry {
     const criteriaState = getSliceAcceptanceCriteria(mid, sid);
     const criteria = criteriaState?.criteria.join("\n");
     const prompt = buildVerifyAgenticPrompt({
-      target: sid,
+      // Full "{milestone}/{slice}" unit id, not the bare slice id -- slice
+      // ids are conventionally reused across milestones (every milestone's
+      // first slice is "S01"), so scoping the SELF-UAT artifact lookup by
+      // bare slice id would let one milestone's verdict bleed into another's
+      // (CR-01). `slugifyTarget` collapses "/" to "-", so this remains a
+      // valid, distinct filename-safe slug.
+      target: triggerUnitId,
       criteria,
       surface: sliceRow.surface as Surface,
       basePath,
@@ -1055,8 +1061,12 @@ export class RuleRegistry {
     if (!config.artifact) {
       return { reason: "blocking gate has no configured artifact" };
     }
+    // Read back by the full "{milestone}/{slice}" unit id, matching the
+    // `target` now used at dispatch time in `_buildAgenticGateDispatch`
+    // (CR-01) -- a bare slice id would collide across milestones that reuse
+    // the same slice id (e.g. every milestone's "S01").
     const artifactPath = isAgenticGateHook(config)
-      ? resolveAgenticGateArtifactPath(basePath, parseUnitId(trigger.triggerUnitId).slice ?? trigger.triggerUnitId)
+      ? resolveAgenticGateArtifactPath(basePath, trigger.triggerUnitId)
       : resolveHookArtifactPath(basePath, trigger.triggerUnitId, config.artifact);
     if (artifactPath === null || !existsSync(artifactPath)) {
       return {

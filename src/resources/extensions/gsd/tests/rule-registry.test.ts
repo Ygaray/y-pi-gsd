@@ -777,7 +777,10 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
 
       const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
       mkdirSync(selfUatDir, { recursive: true });
-      const fileName = selfUatLogFileName("S01", new Date().toISOString());
+      // CR-01: artifact is keyed by the full "{milestone}/{slice}" unit id,
+      // not the bare slice id, so it must match what `_readGateOutcome` now
+      // looks up.
+      const fileName = selfUatLogFileName("M001/S01", new Date().toISOString());
       writeFileSync(join(selfUatDir, fileName), "---\nresult: all_pass\nverdict: pass\n---\n", "utf-8");
 
       const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
@@ -839,6 +842,64 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
       assert.ok(dispatch1!.prompt.includes("S01"));
       assert.ok(dispatch2!.prompt.includes("S02"));
       assert.equal(dispatch1!.prompt.includes("S02"), false, "S01's dispatch must not bleed S02's target");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("CR-01 regression: two different milestones' same-numbered slice each read back their own SELF-UAT artifact, no cross-milestone bleed", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      // Slice IDs conventionally restart per milestone (every milestone's
+      // first slice is "S01" in this codebase's own fixtures) -- this is
+      // exactly the collision CR-01 describes.
+      insertMilestone({ id: "M002", title: "Second Milestone", status: "active" });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+      insertSlice({
+        id: "S01",
+        milestoneId: "M002",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+
+      const registryM001 = new RuleRegistry([]);
+      assert.notEqual(registryM001.evaluatePostUnit("complete-slice", "M001/S01", projectRoot), null);
+      const registryM002 = new RuleRegistry([]);
+      assert.notEqual(registryM002.evaluatePostUnit("complete-slice", "M002/S01", projectRoot), null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+
+      // M001/S01's own run genuinely found a defect and wrote needs-rework...
+      const m001File = selfUatLogFileName("M001/S01", "2026-09-21T10:00:00.000Z");
+      writeFileSync(join(selfUatDir, m001File), "---\nresult: has_fail\nverdict: needs-rework\n---\n", "utf-8");
+
+      // ...then, independently and LATER (newer mtime), M002/S01's own run
+      // genuinely passed. Before CR-01's fix, resolveAgenticGateArtifactPath
+      // was keyed by the bare slice id "S01" and would return whichever
+      // artifact was most-recently modified -- M002's newer `pass` -- even
+      // when evaluating M001's gate.
+      const m002File = selfUatLogFileName("M002/S01", "2026-09-21T11:00:00.000Z");
+      writeFileSync(join(selfUatDir, m002File), "---\nresult: all_pass\nverdict: pass\n---\n", "utf-8");
+
+      const m001Result = registryM001.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(m001Result, null, "M001/S01's needs-rework must not auto-dispatch/retry");
+      const m001Block = registryM001.consumeGateBlock();
+      assert.notEqual(m001Block, null, "M001/S01 must still be blocked by its OWN needs-rework verdict, not cleared by M002's newer pass");
+
+      const m002Result = registryM002.evaluatePostUnit("hook/agentic-gate1", "M002/S01", projectRoot);
+      assert.equal(m002Result, null, "M002/S01's own pass verdict clears its block");
+      assert.equal(registryM002.consumeGateBlock(), null, "M002/S01 must clear based on its OWN pass artifact");
     } finally {
       cleanup();
     }
@@ -929,7 +990,8 @@ describe("agentic-gate1 blocking dispatch (Phase 11)", () => {
 
       const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
       mkdirSync(selfUatDir, { recursive: true });
-      const fileName = selfUatLogFileName("S01", new Date().toISOString());
+      // CR-01: artifact is keyed by the full "{milestone}/{slice}" unit id.
+      const fileName = selfUatLogFileName("M001/S01", new Date().toISOString());
       writeFileSync(join(selfUatDir, fileName), "---\nresult: has_fail\nverdict: needs-rework\n---\n", "utf-8");
 
       const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
