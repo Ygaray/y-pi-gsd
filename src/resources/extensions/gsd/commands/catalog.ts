@@ -106,6 +106,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "worktree", desc: "Manage worktrees from the TUI (list, merge, clean, remove)" },
   { cmd: "eval-review", desc: "Audit a slice's AI evaluation strategy and write a scored EVAL-REVIEW.md (--force, --show)" },
   { cmd: "verify-agentic", desc: "Dispatch the agentic-tester subagent for behavioral SELF-UAT (--criteria, --surface)" },
+  { cmd: "human-uat", desc: "List outstanding Gate-2 human-UAT entries and sign one off (list, sign-off --gap --note)" },
   // Additional commands (commands-gsd-core.ts) run real prompt-driven workflows;
   // namespace aliases (gsd-core-aliases.ts) redirect to /gsd help.
   ...GSD_CORE_IMPLEMENTED_CATALOG,
@@ -142,6 +143,12 @@ const NESTED_COMPLETIONS: CompletionMap = {
   "verify-agentic": [
     { cmd: "--criteria", desc: "State the acceptance criteria to verify" },
     { cmd: "--surface", desc: "cli | browser | android" },
+  ],
+  "human-uat": [
+    { cmd: "list", desc: "Show outstanding Gate-2 entries" },
+    { cmd: "sign-off", desc: "Sign off an entry by id" },
+    { cmd: "--gap", desc: "Record the sign-off as signed-off-with-gap" },
+    { cmd: "--note", desc: "Explain the sign-off or the accepted gap" },
   ],
   mode: [
     { cmd: "global", desc: "Edit global workflow mode" },

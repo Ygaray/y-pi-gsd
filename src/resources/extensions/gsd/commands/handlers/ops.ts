@@ -352,6 +352,11 @@ Examples:
     await handleVerifyAgentic(trimmed.replace(/^verify-agentic\s*/, "").trim(), ctx, pi);
     return true;
   }
+  if (trimmed === "human-uat" || trimmed.startsWith("human-uat ")) {
+    const { handleHumanUat } = await import("../../commands-human-uat.js");
+    await handleHumanUat(trimmed.replace(/^human-uat\s*/, "").trim(), ctx, pi);
+    return true;
+  }
   if (trimmed === "extract-learnings" || trimmed.startsWith("extract-learnings ")) {
     const { handleExtractLearnings } = await import("../../commands-extract-learnings.js");
     await handleExtractLearnings(trimmed.replace(/^extract-learnings\s*/, "").trim(), ctx, pi);
