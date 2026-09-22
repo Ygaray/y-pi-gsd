@@ -11,6 +11,7 @@
 
 import { getDb } from "./db/engine.js";
 import { getActiveRequirements, getGateResults, getMilestoneSlices } from "./db/queries.js";
+import { getGateIdsForTurn } from "./gate-registry.js";
 import { RAW_CLOSED_STATUSES } from "./status-guards.js";
 
 export type RequirementCoverageFindingClass =
@@ -91,9 +92,23 @@ function dedupePreserveOrder(tokens: string[]): string[] {
   return result;
 }
 
+/**
+ * Self-attestation gate ids from BOTH the certify and audit stages
+ * themselves — never valid evidence that a requirement's slice is
+ * "genuinely satisfied" for AUD02's own independent check (D-01: audit
+ * must never be a function of the signal it independently checks).
+ */
+const SELF_ATTESTATION_GATE_IDS: ReadonlySet<string> = new Set([
+  ...getGateIdsForTurn("certify-milestone"),
+  ...getGateIdsForTurn("audit-milestone"),
+]);
+
 function sliceHasPassingGate(milestoneId: string, sliceId: string): boolean {
   return getGateResults(milestoneId, sliceId).some(
-    (gate) => gate.status === "complete" && gate.verdict === "pass",
+    (gate) =>
+      gate.status === "complete" &&
+      gate.verdict === "pass" &&
+      !SELF_ATTESTATION_GATE_IDS.has(gate.gate_id),
   );
 }
 

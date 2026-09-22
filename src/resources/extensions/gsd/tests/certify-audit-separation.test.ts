@@ -167,10 +167,15 @@ function runAllThreeStagesClean(): void {
     full_content: "",
     superseded_by: null,
   });
-  // A single complete+pass CERT01 row satisfies BOTH certify's own
-  // gate1-record-missing avoidance AND audit's no-passing-gate coverage
-  // check — a genuinely clean, gap-free slice for all three stages.
+  // The complete+pass CERT01 row satisfies certify's own
+  // gate1-record-missing avoidance (an evaluated CERT01 row proves a durable
+  // Gate-1 record exists). It does NOT — and must not — satisfy audit's
+  // no-passing-gate coverage check on its own: CERT01/CERT02/AUD01/AUD02 are
+  // self-attestation gate ids, excluded from `sliceHasPassingGate` (CR-01).
+  // A real Gate-1 gate (Q8) is seeded separately so audit's coverage check
+  // has genuine, independent evidence to find.
   insertGateRow("S01", "CERT01", "pass");
+  insertGateRow("S01", "Q8", "pass");
 
   const validateReceipt = validateMilestone({
     invocation: invocation("separation/all-three/validate"),
@@ -283,7 +288,14 @@ test("Test 3: three disjoint milestone.*.recorded event types, exactly one row e
 test("Test 4: quality_gates holds MV01-MV04, CERT01/CERT02, AUD01/AUD02 — eight distinct ids, each owned by its own turn", () => {
   runAllThreeStagesClean();
 
-  const gateRows = rows(`SELECT DISTINCT gate_id FROM quality_gates WHERE milestone_id = 'M001'`);
+  // Excludes Q8 — runAllThreeStagesClean also seeds a real Gate-1 (Q8) row
+  // so audit's independent coverage check has genuine, non-self-attestation
+  // evidence to find (CR-01); Q8 is owned by "complete-slice", outside this
+  // test's three-turn (validate/certify/audit) D-01 disjointness assertion.
+  const gateRows = rows(`
+    SELECT DISTINCT gate_id FROM quality_gates
+    WHERE milestone_id = 'M001' AND gate_id != 'Q8'
+  `);
   const gateIds = gateRows.map((r) => String(r["gate_id"])).sort();
   assert.deepEqual(gateIds, [
     "AUD01", "AUD02", "CERT01", "CERT02", "MV01", "MV02", "MV03", "MV04",

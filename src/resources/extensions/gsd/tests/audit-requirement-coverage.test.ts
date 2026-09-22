@@ -224,6 +224,33 @@ test("a requirement mapping to a terminal slice carrying a complete+pass gate pr
   assert.equal(result.mappedRequirementCount, 1);
 });
 
+// ─── CR-01 regression: certify/audit self-attestation rows never satisfy
+// audit's own independent coverage check (D-01) ──────────────────────────
+
+test("a terminal slice carrying ONLY a complete+pass CERT01 row (certify's own self-attestation, no real Gate-1 evidence) still produces no-passing-gate", () => {
+  openFixture();
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertReq({ id: "R001", primary_owner: "S01" });
+  insertPassingGate("M001", "S01", "CERT01");
+
+  const result = auditRequirementCoverage({ milestoneId: "M001" });
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]!.findingClass, "no-passing-gate");
+  assert.equal(result.mappedRequirementCount, 1);
+});
+
+test("a terminal slice carrying ONLY a complete+pass AUD02 row (a prior audit run's own self-attestation) still produces no-passing-gate", () => {
+  openFixture();
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertReq({ id: "R001", primary_owner: "S01" });
+  insertPassingGate("M001", "S01", "AUD02");
+
+  const result = auditRequirementCoverage({ milestoneId: "M001" });
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]!.findingClass, "no-passing-gate");
+  assert.equal(result.mappedRequirementCount, 1);
+});
+
 // ─── Test 7: empty edge — nothing mapped -> inconclusive, never pass ──────
 
 test("auditMilestone records inconclusive, never pass, when no requirement maps to any slice of the milestone", () => {
