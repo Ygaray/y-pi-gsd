@@ -20,8 +20,8 @@ import type {
   PostUnitGateBlock,
   PostUnitHookOutcomeVerdict,
 } from "./types.js";
-import { resolvePostUnitHooks, resolvePreDispatchHooks } from "./preferences.js";
-import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolvePostUnitHooks, resolvePreDispatchHooks, AGENTIC_GATE1_HOOK_NAME } from "./preferences.js";
+import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseUnitId } from "./unit-id.js";
 import {
@@ -34,6 +34,9 @@ import { queryJournal, type JournalEntry } from "./journal.js";
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
 import { extractFrontmatterVerdict } from "./verdict-parser.js";
 import { getDbOrNull } from "./db/engine.js";
+import { getSlice, getSliceAcceptanceCriteria } from "./db/queries.js";
+import { buildVerifyAgenticPrompt, SURFACES, TARGET_ID_PATTERN, type Surface } from "./commands-verify-agentic.js";
+import { SELF_UAT_LOG_DIR_RELATIVE, SELF_UAT_SUFFIX, slugifyTarget } from "./verify-agentic-log.js";
 
 // ─── Artifact Path Resolution ──────────────────────────────────────────────
 
@@ -251,6 +254,46 @@ function isBlockingHook(config: PostUnitHookConfig | undefined): boolean {
   return config?.criticality === "blocking";
 }
 
+/** True for the synthesized, code-owned Phase 11 blocking Gate-1 hook. */
+function isAgenticGateHook(config: PostUnitHookConfig | undefined): boolean {
+  return config?.name === AGENTIC_GATE1_HOOK_NAME;
+}
+
+/**
+ * Resolve the newest SELF-UAT artifact written for `target` under
+ * `.gsd/verify-agentic/` (Pitfall 1: `write-self-uat.mjs` always writes a
+ * timestamped filename, never the single static name the generic hook
+ * engine's artifact model assumes). Scans the flat SELF-UAT log directory for
+ * files matching `${slugifyTarget(target)}-*-SELF-UAT.md` and returns the
+ * most-recently-modified match's full path, or `null` if none exists (or the
+ * directory itself doesn't exist yet).
+ *
+ * Accepted residual limitation (T-11-05, documented in
+ * `.planning/phases/11-blocking-complete-slice-gate/11-CONTEXT.md`'s
+ * `<flagged_assumptions>`): if a slice already has an older SELF-UAT artifact
+ * on disk for the same slugified target (e.g. from a prior manual
+ * `/gsd verify-agentic` run) and the auto-gate's own dispatched run halts
+ * without writing a new one, this will return that older artifact's path
+ * rather than `null` — `_readGateOutcome` then reads its stale verdict. This
+ * is accepted given the bounded blast radius of a local, single-operator dev
+ * tool and the recoverability (re-running the gate manually); a fully
+ * airtight fix would require persisting a dispatch-start timestamp across
+ * process restarts, a larger surface change out of proportion to this phase.
+ */
+function resolveAgenticGateArtifactPath(basePath: string, target: string): string | null {
+  const dir = join(basePath, SELF_UAT_LOG_DIR_RELATIVE);
+  if (!existsSync(dir)) return null;
+  const prefix = `${slugifyTarget(target)}-`;
+  const matches = readdirSync(dir)
+    .filter(name => name.startsWith(prefix) && name.endsWith(SELF_UAT_SUFFIX))
+    .map(name => {
+      const fullPath = join(dir, name);
+      return { fullPath, mtimeMs: statSync(fullPath).mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return matches.length > 0 ? matches[0]!.fullPath : null;
+}
+
 function hookMaxCycles(config: PostUnitHookConfig): number {
   return config.max_cycles ?? 1;
 }
@@ -432,7 +475,14 @@ export class RuleRegistry {
 
       // Advisory hooks preserve existing idempotency: any configured artifact
       // means the hook already ran. Blocking gates must verify outcome first.
-      if (config.artifact && !forceRun) {
+      // The agentic-gate1 hook's artifact is a non-resolvable placeholder
+      // (its real artifact is a timestamped file resolved by
+      // resolveAgenticGateArtifactPath, not a static pre-known name) — a
+      // fresh, non-forced attempt always proceeds straight to dispatch;
+      // duplicate-dispatch protection for repeated triggers is already
+      // provided by the existing, unmodified cycleCounts/max_cycles
+      // mechanism inside _startHook.
+      if (config.artifact && !forceRun && !isAgenticGateHook(config)) {
         const artifactPath = resolveHookArtifactPath(basePath, triggerUnitId, config.artifact);
         if (existsSync(artifactPath)) {
           const completion = this._assessConfiguredHookCompletion(basePath, config.name, triggerUnitId);
@@ -462,7 +512,7 @@ export class RuleRegistry {
         triggerUnitId,
         completionOperationId,
         legacyCompletedAt,
-      });
+      }, basePath);
       if (dispatch) return dispatch;
       if (isBlockingHook(config)) {
         const cycleKey = hookCycleKey(config, { triggerUnitType, triggerUnitId });
@@ -536,6 +586,7 @@ export class RuleRegistry {
   private _startHook(
     config: PostUnitHookConfig,
     trigger: HookTriggerRef,
+    basePath: string,
   ): HookDispatchResult | null {
     const { triggerUnitType, triggerUnitId, completionOperationId, legacyCompletedAt } = trigger;
     const cycleKey = `${config.name}/${triggerUnitType}/${triggerUnitId}`;
@@ -555,21 +606,34 @@ export class RuleRegistry {
       legacyCompletedAt,
     };
 
-    return this._buildHookDispatch(config, triggerUnitId);
+    return this._buildHookDispatch(config, triggerUnitId, basePath);
   }
 
   /** Construct the sidecar dispatch for a hook without mutating registry state. */
   private _buildHookDispatch(
     config: PostUnitHookConfig,
     triggerUnitId: string,
+    basePath: string,
+  ): HookDispatchResult {
+    const result = isAgenticGateHook(config)
+      ? this._buildAgenticGateDispatch(triggerUnitId, basePath)
+      : this._buildGenericHookDispatch(config, triggerUnitId);
+
+    result.prompt += "\n\n**Browser tool safety:** Do NOT use `browser_wait_for` with `condition: \"network_idle\"` — it hangs indefinitely when dev servers keep persistent connections (Vite HMR, WebSocket). Use `selector_visible`, `text_visible`, or `delay` instead.";
+
+    return result;
+  }
+
+  /** The generic `{milestoneId}`/`{sliceId}`/`{taskId}` substitution dispatch, used by every hook except the synthesized agentic-gate1 hook. */
+  private _buildGenericHookDispatch(
+    config: PostUnitHookConfig,
+    triggerUnitId: string,
   ): HookDispatchResult {
     const { milestone: mid, slice: sid, task: tid } = parseUnitId(triggerUnitId);
-    let prompt = config.prompt
+    const prompt = config.prompt
       .replace(/\{milestoneId\}/g, mid ?? "")
       .replace(/\{sliceId\}/g, sid ?? "")
       .replace(/\{taskId\}/g, tid ?? "");
-
-    prompt += "\n\n**Browser tool safety:** Do NOT use `browser_wait_for` with `condition: \"network_idle\"` — it hangs indefinitely when dev servers keep persistent connections (Vite HMR, WebSocket). Use `selector_visible`, `text_visible`, or `delay` instead.";
 
     return {
       hookName: config.name,
@@ -577,6 +641,49 @@ export class RuleRegistry {
       // Model selection (including fallbacks[]) is handled by
       // resolveModelWithFallbacksForUnit for the `hook/<name>` unit type (#1229).
       unitType: `hook/${config.name}`,
+      unitId: triggerUnitId,
+    };
+  }
+
+  /**
+   * Build the agentic-gate1 hook's dispatch by reading the slice's own
+   * DB-derived target/criteria/surface and reusing `buildVerifyAgenticPrompt`
+   * so the auto-gate and the manual `/gsd verify-agentic` command can never
+   * silently diverge (GATE-03, D-02, RESEARCH.md Pattern 4).
+   */
+  private _buildAgenticGateDispatch(triggerUnitId: string, basePath: string): HookDispatchResult {
+    const { milestone: mid, slice: sid } = parseUnitId(triggerUnitId);
+    if (!mid || !sid) {
+      throw new Error(
+        `Cannot dispatch ${AGENTIC_GATE1_HOOK_NAME}: complete-slice unit id "${triggerUnitId}" is missing milestone/slice segments`,
+      );
+    }
+    if (!TARGET_ID_PATTERN.test(sid)) {
+      throw new Error(
+        `Cannot dispatch ${AGENTIC_GATE1_HOOK_NAME}: slice id "${sid}" does not match the required target ID pattern`,
+      );
+    }
+    const sliceRow = getSlice(mid, sid);
+    if (!sliceRow) {
+      throw new Error(`Cannot dispatch ${AGENTIC_GATE1_HOOK_NAME}: no slice row found for ${mid}/${sid}`);
+    }
+    if (!(SURFACES as readonly string[]).includes(sliceRow.surface)) {
+      throw new Error(
+        `Cannot dispatch ${AGENTIC_GATE1_HOOK_NAME} for ${mid}/${sid}: slices.surface value "${sliceRow.surface}" is not one of ${SURFACES.join(", ")}`,
+      );
+    }
+    const criteriaState = getSliceAcceptanceCriteria(mid, sid);
+    const criteria = criteriaState?.criteria.join("\n");
+    const prompt = buildVerifyAgenticPrompt({
+      target: sid,
+      criteria,
+      surface: sliceRow.surface as Surface,
+      basePath,
+    });
+    return {
+      hookName: AGENTIC_GATE1_HOOK_NAME,
+      prompt,
+      unitType: `hook/${AGENTIC_GATE1_HOOK_NAME}`,
       unitId: triggerUnitId,
     };
   }
@@ -594,7 +701,7 @@ export class RuleRegistry {
       h => h.name === this.activeHook!.hookName,
     );
     if (!config) return null;
-    return this._buildHookDispatch(config, this.activeHook.triggerUnitId);
+    return this._buildHookDispatch(config, this.activeHook.triggerUnitId, basePath);
   }
 
   /**
@@ -632,7 +739,7 @@ export class RuleRegistry {
       ...(block.completionOperationId ? { completionOperationId: block.completionOperationId } : {}),
       ...(block.legacyCompletedAt ? { legacyCompletedAt: block.legacyCompletedAt } : {}),
     };
-    return this._buildHookDispatch(config, block.triggerUnitId);
+    return this._buildHookDispatch(config, block.triggerUnitId, basePath);
   }
 
   private _assessHookCompletion(
@@ -705,7 +812,7 @@ export class RuleRegistry {
     reason: string,
   ): HookDispatchResult | null {
     if (config) {
-      const retry = this._startHook(config, hook);
+      const retry = this._startHook(config, hook, basePath);
       if (retry) return retry;
     }
 
@@ -930,11 +1037,13 @@ export class RuleRegistry {
     if (!config.artifact) {
       return { reason: "blocking gate has no configured artifact" };
     }
-    const artifactPath = resolveHookArtifactPath(basePath, trigger.triggerUnitId, config.artifact);
-    if (!existsSync(artifactPath)) {
+    const artifactPath = isAgenticGateHook(config)
+      ? resolveAgenticGateArtifactPath(basePath, parseUnitId(trigger.triggerUnitId).slice ?? trigger.triggerUnitId)
+      : resolveHookArtifactPath(basePath, trigger.triggerUnitId, config.artifact);
+    if (artifactPath === null || !existsSync(artifactPath)) {
       return {
         artifact: config.artifact,
-        artifactPath,
+        artifactPath: artifactPath ?? undefined,
         reason: `missing required gate artifact ${config.artifact}`,
       };
     }

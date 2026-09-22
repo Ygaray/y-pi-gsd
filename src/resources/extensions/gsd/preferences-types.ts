@@ -155,6 +155,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "skill_staleness_days",
   "auto_supervisor",
   "uat_dispatch",
+  "agentic_gate1_enabled",
   "unique_milestone_ids",
   "budget_ceiling",
   "budget_enforcement",
@@ -526,6 +527,8 @@ export interface GSDPreferences {
   skill_staleness_days?: number;  // Skills unused for N days get deprioritized (#599). 0 = disabled. Default: 60.
   auto_supervisor?: AutoSupervisorConfig;
   uat_dispatch?: boolean;
+  /** Opt-in blocking Gate-1 self-UAT on complete-slice (Phase 11, GATE-02). Default off — undefined, never set in MODE_DEFAULTS. */
+  agentic_gate1_enabled?: boolean;
   unique_milestone_ids?: boolean;
   budget_ceiling?: number;
   budget_enforcement?: BudgetEnforcementMode;

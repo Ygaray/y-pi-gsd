@@ -901,6 +901,7 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     skill_staleness_days: override.skill_staleness_days ?? base.skill_staleness_days,
     auto_supervisor: { ...(base.auto_supervisor ?? {}), ...(override.auto_supervisor ?? {}) },
     uat_dispatch: override.uat_dispatch ?? base.uat_dispatch,
+    agentic_gate1_enabled: override.agentic_gate1_enabled ?? base.agentic_gate1_enabled,
     unique_milestone_ids: override.unique_milestone_ids ?? base.unique_milestone_ids,
     budget_ceiling: override.budget_ceiling ?? base.budget_ceiling,
     budget_enforcement: override.budget_enforcement ?? base.budget_enforcement,
@@ -1196,14 +1197,41 @@ export function renderLanguageDirectiveForPrompt(preferences: GSDPreferences | u
 
 // ─── Hook Resolution ──────────────────────────────────────────────────────────
 
+/** Name of the synthesized, opt-in blocking Gate-1 hook (Phase 11, GATE-02/GATE-03). */
+export const AGENTIC_GATE1_HOOK_NAME = "agentic-gate1";
+
+/**
+ * Code-synthesized (never user-authored) PostUnitHookConfig for the opt-in blocking
+ * Gate-1 self-UAT on complete-slice. `artifact` is a non-resolvable descriptive
+ * placeholder — truthy so `_readGateOutcome`'s `if (!config.artifact)` guard does not
+ * short-circuit; `rule-registry.ts`'s gate-specific branches resolve the real,
+ * timestamped artifact path (Pitfall 1), never this literal string. `prompt` is a
+ * placeholder too — `rule-registry.ts`'s `_buildAgenticGateDispatch` builds this hook's
+ * real prompt via `buildVerifyAgenticPrompt`, not the generic substitution.
+ * `on_block: { action: "pause" }` is explicit (D-01) — the default `"retry-unit"`
+ * would wrongly invoke real rework routing, out of scope for Phase 11.
+ */
+const AGENTIC_GATE1_HOOK_CONFIG: PostUnitHookConfig = {
+  name: AGENTIC_GATE1_HOOK_NAME,
+  after: ["complete-slice"],
+  criticality: "blocking",
+  on_block: { action: "pause" },
+  artifact: "<target>-SELF-UAT.md",
+  prompt: "(synthesized hook — see rule-registry.ts's _buildAgenticGateDispatch, which builds the real prompt via buildVerifyAgenticPrompt)",
+};
+
 /**
  * Resolve enabled post-unit hooks from effective preferences.
  * Returns an empty array when no hooks are configured.
  */
 export function resolvePostUnitHooks(basePath?: string): PostUnitHookConfig[] {
   const prefs = loadEffectiveGSDPreferences(basePath);
-  return (prefs?.preferences.post_unit_hooks ?? [])
+  const hooks = (prefs?.preferences.post_unit_hooks ?? [])
     .filter(h => h.enabled !== false);
+  if (prefs?.preferences.agentic_gate1_enabled) {
+    hooks.push(AGENTIC_GATE1_HOOK_CONFIG);
+  }
+  return hooks;
 }
 
 /**

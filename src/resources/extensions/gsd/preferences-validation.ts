@@ -293,6 +293,10 @@ export function validatePreferences(preferences: GSDPreferences): {
     validated.uat_dispatch = !!preferences.uat_dispatch;
   }
 
+  if (preferences.agentic_gate1_enabled !== undefined) {
+    validated.agentic_gate1_enabled = !!preferences.agentic_gate1_enabled;
+  }
+
   if (preferences.unique_milestone_ids !== undefined) {
     validated.unique_milestone_ids = !!preferences.unique_milestone_ids;
   }

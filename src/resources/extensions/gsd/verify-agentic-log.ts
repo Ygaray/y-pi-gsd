@@ -305,7 +305,7 @@ export function renderSelfUat(
 }
 
 /** Lowercase-alphanumeric-and-dashes slug used by {@link selfUatLogFileName}. */
-function slugifyTarget(target: string): string {
+export function slugifyTarget(target: string): string {
   const slug = target
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
