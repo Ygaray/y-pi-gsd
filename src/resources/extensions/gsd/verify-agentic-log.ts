@@ -319,6 +319,94 @@ export function renderSelfUat(
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
+/**
+ * Parse a SELF-UAT log document's body back into per-criterion results
+ * (Phase 12, GATE-04), inverting {@link renderSelfUat}'s own per-criterion
+ * emission line-for-line: a `### N. <criterion>` heading (with a leading
+ * ordinal) opens a new record; while a record is open, `verdict: `,
+ * `evidence: `, `root_cause: `, and `gap_closure: ` prefixed lines fill the
+ * corresponding field (value = remainder of the line, trimmed); the next
+ * `### ` heading (ordinal or not) closes the current record, but only an
+ * ordinal-prefixed heading opens a new one. A record is accepted into the
+ * returned array only when its criterion and evidence are non-empty after
+ * trimming and its verdict is an exact-case member of
+ * {@link SELF_UAT_CRITERION_VERDICTS} — any other record is dropped
+ * silently. Frontmatter and the header block (`target:`/`surface:`/
+ * `timestamp:`/`log location:` lines) are never mistaken for criterion
+ * fields because they appear before any `### N.` heading opens a record, so
+ * the field-line checks below (gated on a record being open) never fire for
+ * them.
+ *
+ * This function must never throw: it reads a file written by a separate
+ * process (the spawned `agentic-tester` child, or a halted/truncated run),
+ * so malformed or truncated input yields the records it can trust
+ * (possibly an empty array), never an exception.
+ */
+export function parseSelfUatCriteria(content: string): SelfUatCriterionResult[] {
+  const results: SelfUatCriterionResult[] = [];
+  let current: {
+    criterion: string;
+    verdict?: string;
+    evidence?: string;
+    rootCause?: string;
+    gapClosureRoute?: string;
+  } | null = null;
+
+  const flush = (): void => {
+    if (!current) return;
+    const record = current;
+    current = null;
+    const criterion = record.criterion.trim();
+    const evidence = (record.evidence ?? "").trim();
+    const verdict = record.verdict;
+    if (
+      criterion.length === 0 ||
+      evidence.length === 0 ||
+      typeof verdict !== "string" ||
+      !(SELF_UAT_CRITERION_VERDICTS as readonly string[]).includes(verdict)
+    ) {
+      return;
+    }
+    const rootCause = record.rootCause?.trim();
+    const gapClosureRoute = record.gapClosureRoute?.trim();
+    results.push({
+      criterion,
+      verdict: verdict as SelfUatCriterionVerdict,
+      evidence,
+      ...(rootCause ? { rootCause } : {}),
+      ...(gapClosureRoute ? { gapClosureRoute } : {}),
+    });
+  };
+
+  for (const line of content.split("\n")) {
+    const orderedHeading = line.match(/^### (\d+)\. (.*)$/);
+    if (orderedHeading) {
+      flush();
+      current = { criterion: orderedHeading[2] ?? "" };
+      continue;
+    }
+    if (line.startsWith("### ")) {
+      // A `### ` heading with no ordinal prefix never opens a record; it
+      // only closes whatever record (if any) was already open.
+      flush();
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith("verdict: ")) {
+      current.verdict = line.slice("verdict: ".length).trim();
+    } else if (line.startsWith("evidence: ")) {
+      current.evidence = line.slice("evidence: ".length).trim();
+    } else if (line.startsWith("root_cause: ")) {
+      current.rootCause = line.slice("root_cause: ".length).trim();
+    } else if (line.startsWith("gap_closure: ")) {
+      current.gapClosureRoute = line.slice("gap_closure: ".length).trim();
+    }
+  }
+  flush();
+
+  return results;
+}
+
 /** Lowercase-alphanumeric-and-dashes slug used by {@link selfUatLogFileName}. */
 export function slugifyTarget(target: string): string {
   const slug = target

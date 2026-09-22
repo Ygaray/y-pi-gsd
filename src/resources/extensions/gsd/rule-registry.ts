@@ -22,7 +22,7 @@ import type {
 } from "./types.js";
 import { resolvePostUnitHooks, resolvePreDispatchHooks, AGENTIC_GATE1_HOOK_NAME } from "./preferences.js";
 import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseUnitId } from "./unit-id.js";
 import {
   buildFlatTaskFileName,
@@ -34,9 +34,12 @@ import { queryJournal, type JournalEntry } from "./journal.js";
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
 import { extractFrontmatterVerdict } from "./verdict-parser.js";
 import { getDbOrNull } from "./db/engine.js";
-import { getSlice, getSliceAcceptanceCriteria } from "./db/queries.js";
+import { getSlice, getSliceAcceptanceCriteria, getSliceTasks } from "./db/queries.js";
 import { buildVerifyAgenticPrompt, SURFACES, TARGET_ID_PATTERN, type Surface } from "./commands-verify-agentic.js";
-import { SELF_UAT_LOG_DIR_RELATIVE, SELF_UAT_SUFFIX, slugifyTarget } from "./verify-agentic-log.js";
+import { SELF_UAT_LOG_DIR_RELATIVE, SELF_UAT_SUFFIX, slugifyTarget, parseSelfUatCriteria } from "./verify-agentic-log.js";
+import { countReworkBriefsForSlice, saveReworkBrief, type ReworkBriefFindingInput } from "./gsd-db.js";
+import { reopenSlice } from "./slice-lifecycle-domain-operation.js";
+import { internalExecutionInvocation } from "./execution-invocation.js";
 
 // ─── Artifact Path Resolution ──────────────────────────────────────────────
 
@@ -306,6 +309,16 @@ function hookMaxCycles(config: PostUnitHookConfig): number {
 function hookCycleKey(config: PostUnitHookConfig, trigger: HookTriggerRef): string {
   return `${config.name}/${trigger.triggerUnitType}/${trigger.triggerUnitId}`;
 }
+
+/**
+ * Bounded cap on gap-closure cycles per slice (Phase 12, D-03). Enforced
+ * from `countReworkBriefsForSlice`'s DB-derived COUNT — the sole cap
+ * authority — never from hook-state or any `.gsd` file. Distinct from
+ * `AGENTIC_GATE1_HOOK_CONFIG.max_cycles` (preferences.ts), which is
+ * dispatch headroom only and is deliberately set well above this value so
+ * it never binds first.
+ */
+export const GAP_CLOSURE_MAX_CYCLES = 3;
 
 export class RuleRegistry {
   /** Static dispatch rules provided at construction time. */
@@ -897,7 +910,7 @@ export class RuleRegistry {
       case "advisory":
         return "skip";
       case "needs-rework":
-        return this._routeNeedsRework(config, trigger, outcome);
+        return this._routeNeedsRework(config, trigger, outcome, basePath);
       case "needs-remediation":
       case "needs-attention": {
         this._pauseForGate(config, trigger, outcome, this._gateAttentionReason(config, outcome));
@@ -968,7 +981,7 @@ export class RuleRegistry {
         this.activeHook = null;
         return this._dequeueNextHook(basePath);
       case "needs-rework":
-        return this._routeNeedsRework(config, hook, outcome);
+        return this._routeNeedsRework(config, hook, outcome, basePath);
       case "needs-remediation":
       case "needs-attention":
         return this._pauseForGate(config, hook, outcome, this._gateAttentionReason(config, outcome));
@@ -989,7 +1002,16 @@ export class RuleRegistry {
     config: PostUnitHookConfig,
     trigger: HookTriggerRef,
     outcome: GateOutcome,
+    basePath: string,
   ): null {
+    // Phase 12 (GATE-04): the agentic-gate1 hook's needs-rework verdict
+    // drives a bounded, DB-capped gap-closure loop through pi-gsd's
+    // pre-existing rework/task model, instead of the generic
+    // retry-task/retry-unit/pause routing below (which every OTHER
+    // blocking hook still uses, byte-identical to before this phase).
+    if (isAgenticGateHook(config)) {
+      return this._routeAgenticGateGapClosure(config, trigger, outcome, basePath);
+    }
     const action = config.on_block?.action ?? "retry-unit";
     if (action === "retry-task" || action === "retry-unit") {
       if (this._requestTriggerRetry(config, trigger, config.on_block?.artifact)) {
@@ -1006,6 +1028,174 @@ export class RuleRegistry {
       return null;
     }
     return this._pauseForGate(config, trigger, outcome, `gate reported needs-rework; configured on_block action is ${action}`);
+  }
+
+  /**
+   * Gap-closure branch for the agentic-gate1 hook's needs-rework verdict
+   * (Phase 12, GATE-04, D-01/D-02/D-03). Reopens the slice first (a
+   * task-level reopen is rejected by `requireOpenParents` while the parent
+   * slice is terminal), authors a cycle-numbered rework brief from the
+   * SELF-UAT artifact's per-criterion failures, and clears the gate's
+   * in-flight state WITHOUT calling `_setGateBlock` so the untouched
+   * auto-loop proceeds to the now-pending task. Every failure mode (T-12-03)
+   * — unusable trigger unit id, cap reached, unreadable/missing artifact, no
+   * failing criterion, no task, `reopenSlice` throw, `saveReworkBrief` throw
+   * — exits through the pre-existing `_pauseForGate`; no exception escapes
+   * this method into `evaluatePostUnit`.
+   */
+  private _routeAgenticGateGapClosure(
+    config: PostUnitHookConfig,
+    trigger: HookTriggerRef,
+    outcome: GateOutcome,
+    basePath: string,
+  ): null {
+    const { milestone: mid, slice: sid } = parseUnitId(trigger.triggerUnitId);
+    if (!mid || !sid) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: trigger unit id "${trigger.triggerUnitId}" is missing milestone/slice segments`,
+      );
+    }
+
+    // D-03: the DB-derived COUNT over rework_briefs for this slice is the
+    // sole cap authority — never hook state, never a .gsd file.
+    const priorCycles = countReworkBriefsForSlice(mid, sid);
+    if (priorCycles >= GAP_CLOSURE_MAX_CYCLES) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cap reached: ${priorCycles} rework cycle(s) already recorded for ${mid}/${sid} (max ${GAP_CLOSURE_MAX_CYCLES})`,
+      );
+    }
+    const cycle = priorCycles + 1;
+
+    // Phase 11's resolveAgenticGateArtifactPath already resolved this,
+    // newest-mtime-scoped to the trigger unit id — never re-derive a path,
+    // never accept a path named inside artifact content (T-12-02).
+    const artifactPath = outcome.artifactPath;
+    if (!artifactPath) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: no SELF-UAT artifact path resolved for ${mid}/${sid}`,
+      );
+    }
+    let content: string;
+    try {
+      content = readFileSync(artifactPath, "utf-8");
+    } catch (e) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: could not read SELF-UAT artifact ${artifactPath}: ${(e as Error).message}`,
+      );
+    }
+
+    const criteria = parseSelfUatCriteria(content);
+    // Mirrors renderSelfUat's own root_cause emission rule: a FAIL, or a
+    // PARTIAL that carries a non-empty root cause.
+    const failing = criteria.filter(
+      (c) => c.verdict === "FAIL" || (c.verdict === "PARTIAL" && Boolean(c.rootCause?.trim())),
+    );
+    if (failing.length === 0) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: SELF-UAT artifact ${basename(artifactPath)} carries no parsable FAIL/PARTIAL-with-root-cause criterion`,
+      );
+    }
+
+    const tasks = getSliceTasks(mid, sid);
+    if (tasks.length === 0) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: slice ${mid}/${sid} has no tasks to attach a rework brief to`,
+      );
+    }
+    // Open Question 1 (RESEARCH.md A1): no criterion-to-task signal exists
+    // in the data model — SelfUatCriterionResult carries no taskId, and the
+    // gate targets the whole slice's acceptance criteria. The
+    // highest-sequence task (getSliceTasks orders by sequence, id) is the
+    // deliberate, revisitable default: the task most likely to have been
+    // "in flight" when complete-slice fired.
+    const targetTask = tasks[tasks.length - 1]!;
+    const tid = targetTask.id;
+
+    try {
+      reopenSlice({
+        invocation: internalExecutionInvocation(`gap-closure:${mid}/${sid}:cycle-${cycle}`),
+        slice: { milestoneId: mid, sliceId: sid },
+        reason: `hook/${config.name} gap-closure cycle ${cycle} of ${GAP_CLOSURE_MAX_CYCLES}: needs-rework verdict on ${trigger.triggerUnitId}`,
+      });
+    } catch (e) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: reopenSlice failed for ${mid}/${sid}: ${(e as Error).message}`,
+      );
+    }
+
+    // Cycle-numbered ids are mandatory (RESEARCH Pitfall 2): the default
+    // reworkBriefIdFromTask id plus saveReworkBrief's ON CONFLICT(id) DO
+    // UPDATE would upsert every cycle onto one row and freeze the cap COUNT
+    // at 1. findingId embeds the cycle too (T-12-05): the unmodified
+    // applyReworkResolutions matches by finding_id across every brief for
+    // the task, so a reused id would let a later cycle's resolution flip an
+    // earlier cycle's still-open row.
+    const artifactBasename = basename(artifactPath);
+    const findings: ReworkBriefFindingInput[] = failing.map((criterion, index) => {
+      const findingIndex = String(index + 1).padStart(2, "0");
+      const rootCause = criterion.rootCause?.trim();
+      const gapClosureRoute = criterion.gapClosureRoute?.trim();
+      const description = rootCause
+        ? `[${criterion.verdict}] ${criterion.criterion} — ${rootCause}`
+        : `[${criterion.verdict}] ${criterion.criterion}`;
+      const requiredFix = gapClosureRoute
+        || `Close the gap named in the root cause and re-verify: ${rootCause || criterion.criterion}`;
+      const evidence = criterion.evidence.trim() || `(no evidence captured for "${criterion.criterion}")`;
+      return {
+        findingId: `GC${cycle}-${findingIndex}`,
+        severity: "blocking",
+        description,
+        requiredFix,
+        verificationCommands: [],
+        evidence,
+        decisionRef: artifactBasename,
+      };
+    });
+
+    try {
+      saveReworkBrief({
+        briefId: `RB-${mid}-${sid}-${tid}-gap-${cycle}`,
+        milestoneId: mid,
+        sliceId: sid,
+        taskId: tid,
+        findings,
+      });
+    } catch (e) {
+      return this._pauseForGate(
+        config,
+        trigger,
+        outcome,
+        `gap-closure cannot proceed: saveReworkBrief failed for ${mid}/${sid}/${tid}: ${(e as Error).message}`,
+      );
+    }
+
+    // Success exit: the only needs-rework path that leaves no outstanding
+    // block — this is what lets the auto-loop proceed to the now-pending
+    // task instead of pausing.
+    this.activeHook = null;
+    this.hookQueue = [];
+    return null;
   }
 
   private _pauseForGate(

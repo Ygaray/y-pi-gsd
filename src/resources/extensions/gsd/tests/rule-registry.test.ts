@@ -18,6 +18,7 @@ import {
   convertDispatchRules,
   getOrCreateRegistry,
   resolveHookArtifactPath,
+  GAP_CLOSURE_MAX_CYCLES,
 } from "../rule-registry.ts";
 import type { UnifiedRule } from "../rule-types.ts";
 import type { DispatchAction, DispatchContext } from "../auto-dispatch.ts";
@@ -30,9 +31,18 @@ import {
   insertTask,
   openDatabase,
   _getAdapter,
+  saveReworkBrief,
 } from "../gsd-db.ts";
 import { resolvePostUnitHooks } from "../preferences.ts";
-import { SELF_UAT_LOG_DIR_RELATIVE, selfUatLogFileName } from "../verify-agentic-log.ts";
+import {
+  SELF_UAT_LOG_DIR_RELATIVE,
+  selfUatLogFileName,
+  renderSelfUat,
+  type SelfUatCriterionResult,
+} from "../verify-agentic-log.ts";
+import { completeSlice, type SliceCompletionCloseout } from "../slice-lifecycle-domain-operation.ts";
+import { internalExecutionInvocation } from "../execution-invocation.ts";
+import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
 
 // ─── Mock Rule Factories ──────────────────────────────────────────────────
 
@@ -1298,6 +1308,279 @@ describe("resolveHookArtifactPath", () => {
       else process.env.GSD_HOME = originalGsdHome;
       rmSync(projectRoot, { recursive: true, force: true });
       rmSync(tempGsdHome, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── Phase 12: agentic-gate1 gap-closure loop ──────────────────────────────
+
+function gapClosureCloseout(): SliceCompletionCloseout {
+  return {
+    sliceTitle: "Gap-closure fixture",
+    oneLiner: "A genuinely completed slice, ready to prove the gap-closure loop.",
+    narrative: "Seeded via seedSliceCompletionAuthority, then completed for real via completeSlice.",
+    verification: "Phase 12 gap-closure loop test harness.",
+    uatContent: "## UAT Type\n\n- UAT mode: runtime-executable\n\nPASS",
+    operationalReadiness: "N/A — test fixture.",
+    deviations: "None.",
+    knownLimitations: "None.",
+    followUps: "None.",
+    provides: [],
+    requires: [],
+    affects: [],
+    keyFiles: [],
+    keyDecisions: [],
+    patternsEstablished: [],
+    observabilitySurfaces: [],
+    drillDownPaths: [],
+    requirementsAdvanced: [],
+    requirementsValidated: [],
+    requirementsSurfaced: [],
+    requirementsInvalidated: [],
+    filesModified: [],
+  };
+}
+
+/**
+ * Genuinely completes M001/S01 (T01+T02) via the real domain operations,
+ * mirroring slice-lifecycle-convergence.test.ts's prepareOperation("complete")
+ * ordering exactly. reopenSlice refuses a non-terminal slice, so nothing
+ * weaker proves the gap-closure path.
+ */
+function completeGate1Slice(runId: string): void {
+  seedSliceCompletionAuthority({
+    milestoneId: "M001",
+    sliceId: "S01",
+    completedTaskIds: ["T01", "T02"],
+    runId,
+  });
+  completeSlice({
+    invocation: internalExecutionInvocation(`gap-closure-test:${runId}`),
+    slice: { milestoneId: "M001", sliceId: "S01" },
+    closeout: gapClosureCloseout(),
+  });
+}
+
+function reworkBriefRow(briefId: string): Record<string, unknown> | undefined {
+  return _getAdapter()!.prepare("SELECT * FROM rework_briefs WHERE id = :id").get({ ":id": briefId }) as
+    | Record<string, unknown>
+    | undefined;
+}
+
+function reworkBriefCountForSlice(milestoneId: string, sliceId: string): number {
+  const row = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS n FROM rework_briefs WHERE milestone_id = :mid AND slice_id = :sid",
+  ).get({ ":mid": milestoneId, ":sid": sliceId }) as { n: number };
+  return row.n;
+}
+
+function findingsForBrief(briefId: string): Array<Record<string, unknown>> {
+  return _getAdapter()!.prepare(
+    "SELECT * FROM rework_brief_findings WHERE brief_id = :id ORDER BY finding_id",
+  ).all({ ":id": briefId }) as Array<Record<string, unknown>>;
+}
+
+function gate1TaskStatus(taskId: string): string {
+  const row = _getAdapter()!.prepare(
+    "SELECT status FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = :tid",
+  ).get({ ":tid": taskId }) as { status: string };
+  return row.status;
+}
+
+function gate1SliceStatus(): string {
+  const row = _getAdapter()!.prepare(
+    "SELECT status FROM slices WHERE milestone_id = 'M001' AND id = 'S01'",
+  ).get() as { status: string };
+  return row.status;
+}
+
+const GAP_CLOSURE_PASS_RESULT: SelfUatCriterionResult = {
+  criterion: "the first criterion holds",
+  verdict: "PASS",
+  evidence: "exit 0, stdout matched the expected shape",
+};
+
+const GAP_CLOSURE_FAIL_RESULT: SelfUatCriterionResult = {
+  criterion: "the second criterion holds",
+  verdict: "FAIL",
+  evidence: "exit 1, stderr: TypeError: Cannot read properties of undefined (reading 'foo')",
+  rootCause: "the handler never checked for a null payload before dereferencing its foo field",
+  gapClosureRoute: "Add a null guard in src/handler.ts before the .foo access and re-run this criterion",
+};
+
+/** Writes a real needs-rework SELF-UAT artifact (via the real renderer) for M001/S01 and returns its basename. */
+function writeNeedsReworkArtifact(projectRoot: string, timestampIso: string): string {
+  const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+  mkdirSync(selfUatDir, { recursive: true });
+  const fileName = selfUatLogFileName("M001/S01", timestampIso);
+  const doc = renderSelfUat([GAP_CLOSURE_PASS_RESULT, GAP_CLOSURE_FAIL_RESULT], {
+    target: "M001/S01",
+    surface: "cli",
+    timestampIso,
+  });
+  writeFileSync(join(selfUatDir, fileName), doc, "utf-8");
+  return fileName;
+}
+
+describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
+  test("a needs-rework verdict on a genuinely completed slice reopens it and authors exactly one cycle-1 rework brief (D-01, D-02, D-03)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+      insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+      completeGate1Slice("gap-closure-cycle1");
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null, "a genuinely completed, criteria-bearing slice must dispatch the gate");
+      assert.equal(dispatch!.unitType, "hook/agentic-gate1");
+
+      const timestampIso = "2026-09-21T12:00:00.000Z";
+      const artifactFileName = writeNeedsReworkArtifact(projectRoot, timestampIso);
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null, "a successful gap-closure exit must not return a dispatch");
+      assert.equal(registry.consumeGateBlock(), null, "a successful gap-closure exit must leave no gate block");
+
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 1, "exactly one rework_briefs row for the slice");
+      const briefId = "RB-M001-S01-T02-gap-1";
+      const brief = reworkBriefRow(briefId);
+      assert.ok(brief, `expected a rework_briefs row with id ${briefId}`);
+      assert.ok(String(brief!["id"]).endsWith("-gap-1"), "brief id must end with -gap-1 for the first cycle");
+
+      const findings = findingsForBrief(briefId);
+      assert.equal(findings.length, 1, "exactly one finding — the FAIL criterion only, not the PASS one");
+      const finding = findings[0]!;
+      assert.ok(String(finding["finding_id"]).startsWith("GC1-"), "finding id must be cycle-scoped (GC1-...)");
+      assert.equal(finding["severity"], "blocking");
+      assert.equal(finding["status"], "pending");
+      assert.match(
+        String(finding["description"]),
+        /the second criterion holds/,
+        "description must name the failed criterion text",
+      );
+      assert.match(
+        String(finding["evidence"]),
+        /Cannot read properties of undefined/,
+        "evidence must carry the criterion's evidence line",
+      );
+      assert.equal(finding["decision_ref"], artifactFileName, "decision_ref must trace to the SELF-UAT artifact's basename");
+
+      assert.notEqual(gate1SliceStatus(), "complete", "the slice must no longer be terminal after gap-closure");
+      assert.equal(gate1TaskStatus("T01"), "pending", "every task in the slice must be back to pending");
+      assert.equal(gate1TaskStatus("T02"), "pending", "every task in the slice must be back to pending");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("reaching a pre-seeded cap of 3 rework_briefs rows pauses via _pauseForGate and writes no 4th row", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+
+      for (let cycle = 1; cycle <= GAP_CLOSURE_MAX_CYCLES; cycle++) {
+        saveReworkBrief({
+          briefId: `RB-M001-S01-T01-gap-${cycle}`,
+          milestoneId: "M001",
+          sliceId: "S01",
+          taskId: "T01",
+          findings: [{
+            findingId: `GC${cycle}-01`,
+            severity: "blocking",
+            description: `pre-seeded finding for cycle ${cycle}`,
+            requiredFix: "n/a",
+            verificationCommands: [],
+            evidence: "pre-seeded",
+            decisionRef: "pre-seeded",
+          }],
+        });
+      }
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), GAP_CLOSURE_MAX_CYCLES);
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const timestampIso = "2026-09-21T13:00:00.000Z";
+      writeNeedsReworkArtifact(projectRoot, timestampIso);
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null);
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "reaching the cap must produce an observable pause, not another gap-closure attempt");
+      assert.equal(block?.action, "pause");
+
+      assert.equal(
+        reworkBriefCountForSlice("M001", "S01"),
+        GAP_CLOSURE_MAX_CYCLES,
+        "no 4th rework_briefs row must be written once the cap is reached",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a needs-rework artifact with no parsable FAIL/PARTIAL-with-root-cause criterion pauses and writes no brief", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- must handle X" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+
+      const registry = new RuleRegistry([]);
+      const dispatch = registry.evaluatePostUnit("complete-slice", "M001/S01", projectRoot);
+      assert.notEqual(dispatch, null);
+
+      const selfUatDir = join(projectRoot, SELF_UAT_LOG_DIR_RELATIVE);
+      mkdirSync(selfUatDir, { recursive: true });
+      const fileName = selfUatLogFileName("M001/S01", new Date().toISOString());
+      // Frontmatter alone reports needs-rework, but the body carries no
+      // per-criterion block at all -- nothing for parseSelfUatCriteria to
+      // find, so gap-closure must pause rather than author an empty brief.
+      writeFileSync(join(selfUatDir, fileName), "---\nresult: has_fail\nverdict: needs-rework\n---\n", "utf-8");
+
+      const result = registry.evaluatePostUnit("hook/agentic-gate1", "M001/S01", projectRoot);
+      assert.equal(result, null);
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "a needs-rework verdict with no parsable failing criterion must pause");
+      assert.equal(block?.action, "pause");
+
+      assert.equal(reworkBriefCountForSlice("M001", "S01"), 0, "no brief may be written when no failing criterion parses");
+    } finally {
+      cleanup();
     }
   });
 });

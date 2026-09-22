@@ -1257,6 +1257,21 @@ export function getUnresolvedBlockingReworkFindingsForTask(
     .filter((finding) => finding.status === "pending");
 }
 
+/**
+ * Count of `rework_briefs` rows for a slice — the durable, DB-derived
+ * cap-authority source for Phase 12's gap-closure loop (D-03). Slice-scoped,
+ * never task-scoped: a slice's gap-closure cycles may target different
+ * tasks (no criterion-to-task signal exists in the data model), so the cap
+ * must count across the whole slice, not one task.
+ */
+export function countReworkBriefsForSlice(milestoneId: string, sliceId: string): number {
+  if (!getDbOrNull()!) return 0;
+  const row = getDbOrNull()!.prepare(
+    `SELECT COUNT(*) AS n FROM rework_briefs WHERE milestone_id = :mid AND slice_id = :sid`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId }) as Record<string, unknown> | undefined;
+  return row ? Number(row["n"] ?? 0) : 0;
+}
+
 export function applyReworkResolutions(resolutions: Array<{
   milestoneId: string;
   sliceId: string;
