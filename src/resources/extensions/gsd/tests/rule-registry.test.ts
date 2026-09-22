@@ -1796,6 +1796,99 @@ describe("agentic-gate1 gap-closure loop (Phase 12)", () => {
     }
   });
 
+  test("an unrelated gsd_rework_brief_save-style row for the slice does not pollute the gap-closure cap — 3 full cycles still run (CR-01, 12-REVIEW.md)", () => {
+    const { projectRoot, cleanup } = setupGate1Fixture([
+      "---",
+      "version: 1",
+      "agentic_gate1_enabled: true",
+      "---",
+    ]);
+    try {
+      insertSlice({
+        id: "S01",
+        milestoneId: "M001",
+        status: "active",
+        planning: { successCriteria: "- the first criterion holds\n- the second criterion holds" },
+      });
+      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 1 });
+      insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending", sequence: 2 });
+
+      // Seed a row shaped exactly like the live, agent-callable
+      // gsd_rework_brief_save tool's default output for this same
+      // milestone/slice/task — no briefId override, so saveReworkBrief
+      // falls back to reworkBriefIdFromTask's `RB-M001-S01-T02` shape (no
+      // `-gap-` segment). This is entirely unrelated to gap-closure and
+      // must not count against GAP_CLOSURE_MAX_CYCLES.
+      saveReworkBrief({
+        milestoneId: "M001",
+        sliceId: "S01",
+        taskId: "T02",
+        findings: [{
+          findingId: "MANUAL-01",
+          severity: "blocking",
+          description: "unrelated manual rework brief, not authored by gap-closure",
+          requiredFix: "n/a",
+          verificationCommands: [],
+          evidence: "pre-seeded via gsd_rework_brief_save-style call",
+          decisionRef: "manual",
+        }],
+      });
+      assert.equal(
+        reworkBriefCountForSlice("M001", "S01"),
+        1,
+        "the unrelated manual brief must be the only row before any gap-closure cycle runs",
+      );
+
+      const registry = new RuleRegistry([]);
+
+      let result = runGapClosureCycle(registry, projectRoot, "pollution-1", "2026-09-22T11:00:00.000Z");
+      assert.equal(result, null, "cycle 1 gap-closure must complete without a dispatch despite the unrelated row");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 1 must leave no gate block");
+
+      result = runGapClosureCycle(registry, projectRoot, "pollution-2", "2026-09-22T12:00:00.000Z");
+      assert.equal(result, null, "cycle 2 gap-closure must complete without a dispatch despite the unrelated row");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 2 must leave no gate block");
+
+      result = runGapClosureCycle(registry, projectRoot, "pollution-3", "2026-09-22T13:00:00.000Z");
+      assert.equal(result, null, "cycle 3 gap-closure must complete without a dispatch despite the unrelated row");
+      assert.equal(registry.consumeGateBlock(), null, "cycle 3 must leave no gate block");
+
+      // Total rows now: 1 unrelated + 3 real gap-closure cycles = 4. If the
+      // cap query were still unscoped (the CR-01 bug), the 3rd cycle above
+      // would have computed cycle = priorCycles(2 unrelated+real) + 1 and
+      // the loop would have capped out one cycle early.
+      assert.equal(
+        reworkBriefCountForSlice("M001", "S01"),
+        4,
+        "total rows must be the 1 unrelated brief plus the 3 real gap-closure briefs",
+      );
+      const gapBriefIds = [1, 2, 3].map((n) => `RB-M001-S01-T02-gap-${n}`);
+      for (const briefId of gapBriefIds) {
+        assert.ok(reworkBriefRow(briefId), `expected a rework_briefs row with id ${briefId}`);
+      }
+
+      // A 4th real needs-rework attempt must now hit the cap — scoped to the
+      // 3 real gap-closure cycles, NOT the 4 total rows in the table.
+      result = runGapClosureCycle(registry, projectRoot, "pollution-4", "2026-09-22T14:00:00.000Z");
+      assert.equal(result, null);
+      const block = registry.consumeGateBlock();
+      assert.notEqual(block, null, "the 4th needs-rework verdict must produce an observable pause");
+      assert.equal(block?.action, "pause");
+      assert.match(
+        String(block?.reason ?? ""),
+        /\b3\b/,
+        "the pause reason must cite the 3 real gap-closure cycles, not the 4 total rows in rework_briefs",
+      );
+      assert.equal(
+        reworkBriefCountForSlice("M001", "S01"),
+        4,
+        "no 4th gap-closure rework_briefs row may be written once the cap is reached",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   test("a pass verdict after a gap-closure cycle clears the block and authors no additional rework brief (ROADMAP SC2)", () => {
     const { projectRoot, cleanup } = setupGate1Fixture([
       "---",

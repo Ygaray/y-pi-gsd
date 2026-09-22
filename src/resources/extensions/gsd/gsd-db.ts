@@ -1263,13 +1263,37 @@ export function getUnresolvedBlockingReworkFindingsForTask(
  * never task-scoped: a slice's gap-closure cycles may target different
  * tasks (no criterion-to-task signal exists in the data model), so the cap
  * must count across the whole slice, not one task.
+ *
+ * CR-01 (12-REVIEW.md): `rework_briefs` is a SHARED table also written by
+ * the pre-existing, agent-callable `gsd_rework_brief_save` tool
+ * (`tools/rework-brief.ts`) for entirely unrelated purposes, using
+ * `RB-${milestoneId}-${sliceId}-${taskId}` ids with no `-gap-` segment
+ * (`reworkBriefIdFromTask`). Only `_routeAgenticGateGapClosure` ever writes
+ * ids shaped `RB-${milestoneId}-${sliceId}-${taskId}-gap-${cycle}`
+ * (rule-registry.ts). Scoping this COUNT to that id shape is what keeps an
+ * unrelated manual rework-brief save from prematurely exhausting the
+ * gap-closure cap or polluting the pause-reason count. A dedicated
+ * `source`/`kind` column would be a stronger long-term contract than a LIKE
+ * pattern on id shape, but this closes the cross-feature pollution hole
+ * with no schema migration.
  */
 export function countReworkBriefsForSlice(milestoneId: string, sliceId: string): number {
   if (!getDbOrNull()!) return 0;
   const row = getDbOrNull()!.prepare(
-    `SELECT COUNT(*) AS n FROM rework_briefs WHERE milestone_id = :mid AND slice_id = :sid`,
-  ).get({ ":mid": milestoneId, ":sid": sliceId }) as Record<string, unknown> | undefined;
+    `SELECT COUNT(*) AS n FROM rework_briefs
+     WHERE milestone_id = :mid AND slice_id = :sid AND id LIKE :gap_pattern ESCAPE '\\'`,
+  ).get({
+    ":mid": milestoneId,
+    ":sid": sliceId,
+    // Escape LIKE metacharacters (% and _) that may legitimately appear in
+    // milestone/slice ids so they match literally, not as wildcards.
+    ":gap_pattern": `RB-${escapeLikePattern(milestoneId)}-${escapeLikePattern(sliceId)}-%-gap-%`,
+  }) as Record<string, unknown> | undefined;
   return row ? Number(row["n"] ?? 0) : 0;
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
 export function applyReworkResolutions(resolutions: Array<{
