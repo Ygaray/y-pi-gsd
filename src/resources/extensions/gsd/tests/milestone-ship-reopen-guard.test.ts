@@ -27,6 +27,7 @@ import {
   openDatabase,
   readDomainOperationFence,
   reopenMilestoneCascade,
+  updateMilestoneStatus,
 } from "../gsd-db.ts";
 import { reopenMilestone } from "../milestone-lifecycle-domain-operation.ts";
 import {
@@ -485,4 +486,24 @@ test("the shipped/archived guard in reopenMilestoneHierarchy sits textually betw
     shippedGuardIndex < requireTerminalStateIndex,
     "the shipped/archived guard must run BEFORE requireTerminalState, which can no longer tell shipped apart from completed once the canonical bucket collapses them",
   );
+});
+
+test("SEC-01: the generic status writer refuses a closed->different-closed write on a shipped milestone (e.g. shipped -> complete), leaving the shipped status untouched", () => {
+  makeBase();
+  shipTheMilestone();
+  assert.equal(getMilestone("M001")!.status, "shipped");
+
+  assert.throws(
+    () => updateMilestoneStatus("M001", "complete"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /M001/);
+      assert.match(error.message, /shipped/i);
+      return true;
+    },
+  );
+
+  // Status must be byte-identical to before the refused write — no silent
+  // shipped -> complete erosion via the generic closed->closed path.
+  assert.equal(getMilestone("M001")!.status, "shipped");
 });

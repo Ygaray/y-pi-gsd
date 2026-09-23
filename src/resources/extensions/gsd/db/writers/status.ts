@@ -18,7 +18,7 @@ import { getDbOrNull, immediateTransaction } from "../engine.js";
 import { compareLifecycleShadow } from "../lifecycle-shadow-comparison.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 import { GSDError, GSD_STALE_STATE } from "../../errors.js";
-import { isClosedStatus } from "../../status-guards.js";
+import { isClosedStatus, isShippedStatus } from "../../status-guards.js";
 
 /**
  * A single row-level status write, discriminated by entity (the faces' arity).
@@ -233,6 +233,11 @@ function applyStatusTransitionLocked(t: StatusTransition): void {
 
     case "milestone": {
       const currentStatus = row.status;
+      if (currentStatus && isShippedStatus(currentStatus)) {
+        throw new Error(
+          `Cannot update shipped/archived milestone ${t.milestoneId} (status ${currentStatus}) via a generic status write; shipped milestones are terminal.`,
+        );
+      }
       const closesMilestone = isClosedStatus(t.status);
       if (currentStatus && isClosedStatus(currentStatus) && !closesMilestone) {
         throw new Error(
