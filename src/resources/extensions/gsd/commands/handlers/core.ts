@@ -141,6 +141,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd add-tests      Generate tests for completed slices",
     "  /gsd eval-review <sliceId>  Audit a slice's AI evaluation strategy  [--force|--show]",
     "  /gsd verify-agentic <target>  Dispatch agentic-tester for behavioral SELF-UAT  [--criteria \"...\"] [--surface cli|browser|android]",
+    "  /gsd human-uat      List outstanding Gate-2 human-UAT entries and sign one off  [list|sign-off --gap --note]",
     "  /gsd scan           Rapid codebase assessment  [--focus tech|arch|quality|concerns|tech+arch]",
     "",
     "SETUP & CONFIGURATION",
