@@ -1321,8 +1321,9 @@ function escapeLikePattern(value: string): string {
  * rather than throwing when no database is open, matching its neighbour.
  */
 export function countUnresolvedBlockingGapFindingsForSlice(milestoneId: string, sliceId: string): number {
-  if (!getDbOrNull()!) return 0;
-  const row = getDbOrNull()!.prepare(
+  const db = getDbOrNull();
+  if (!db) return 0;
+  const row = db.prepare(
     `SELECT COUNT(*) AS n
      FROM rework_brief_findings f
      JOIN rework_briefs b ON b.id = f.brief_id
