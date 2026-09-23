@@ -870,14 +870,19 @@ export function reopenMilestoneHierarchy(
     ...reopenedSliceIds.map((sliceId) =>
       readLifecycleShadowComparison(context, { itemKind: "slice", milestoneId, sliceId })
     ),
-    ...tasks.map((task) =>
-      readLifecycleShadowComparison(context, {
-        itemKind: "task",
-        milestoneId,
-        sliceId: task.sliceId!,
-        taskId: task.taskId!,
-      })
-    ),
+    // Gated by `reopenedTaskIds` (empty when keepCompleted is true, exactly
+    // like `reopenedSliceIds` above), not the raw `tasks` array — only
+    // verify what was actually touched, matching the slice loop's intent.
+    ...tasks
+      .filter((task) => reopenedTaskIds.includes(`${task.sliceId}/${task.taskId}`))
+      .map((task) =>
+        readLifecycleShadowComparison(context, {
+          itemKind: "task",
+          milestoneId,
+          sliceId: task.sliceId!,
+          taskId: task.taskId!,
+        })
+      ),
   ];
   if (shadows.some((shadow) =>
     shadow.kind !== "match" && shadow.kind !== "semantic_match_exact_delta")) {
