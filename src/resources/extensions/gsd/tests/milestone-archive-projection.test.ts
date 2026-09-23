@@ -494,6 +494,31 @@ test("a slice title containing a pipe and a newline survives ship, render, and r
   assert.ok(sliceLine.endsWith("|"));
 });
 
+test("a milestone title containing a double quote produces parseable YAML frontmatter", async () => {
+  const basePath = makeBase({ milestoneTitle: 'Ship the "v2" API' });
+  recordPassingCertify("M001");
+  recordPassingAudit("M001");
+  shipMilestone(shipInput("M001", "archive/ship/hostile-milestone-title"));
+
+  const rendered = await renderMilestoneArchive(basePath, "M001");
+  assert.equal(rendered, true);
+  const archivePath = targetMilestoneFile(basePath, "M001", "ARCHIVE", "Ship archive stage");
+  const content = readFileSync(archivePath, "utf-8");
+
+  const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n/);
+  assert.ok(frontmatterMatch, "frontmatter delimiters must be present");
+  const frontmatter = frontmatterMatch![1]!;
+  const titleLine = frontmatter.split("\n").find((line) => line.startsWith("title:"));
+  assert.ok(titleLine, "title line must be present in frontmatter");
+  assert.equal(titleLine, 'title: "Ship the \\"v2\\" API"');
+
+  // The frontmatter block itself must contain exactly one un-escaped
+  // (unpreceded by a backslash) double quote pair around the title value —
+  // proof the embedded quotes did not terminate the YAML scalar early.
+  const unescapedQuoteCount = (frontmatter.match(/(?<!\\)"/g) ?? []).length;
+  assert.equal(unescapedQuoteCount, 2, "title value's embedded quotes must be escaped, not terminate the scalar");
+});
+
 test("shipping and rendering the archive adds exactly one file to the milestone directory, changing no pre-existing file's bytes", async () => {
   const basePath = makeBase();
   recordPassingCertify("M001");

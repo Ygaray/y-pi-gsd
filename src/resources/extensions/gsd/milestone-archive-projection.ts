@@ -149,6 +149,17 @@ function escapeCell(value: string): string {
   return value.replace(/\r\n|\r|\n/g, " ").replace(/\|/g, "\\|");
 }
 
+/**
+ * Escape backslashes and embedded double quotes so a value can be safely
+ * interpolated into a double-quoted YAML scalar. Without this, a title
+ * containing `"` (e.g. `Ship the "v2" API`) terminates the YAML string
+ * early and produces malformed frontmatter that downstream `---` parsers
+ * either choke on or silently misinterpret.
+ */
+function escapeYamlDoubleQuoted(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 const ROADMAP_EMPTY_ROW = "| _(none)_ | _(none)_ | _(none)_ | _(none)_ |";
 const REQUIREMENTS_EMPTY_ROW = "| _(none)_ | _(none)_ | _(none)_ | _(none)_ |";
 
@@ -194,7 +205,7 @@ export function renderMilestoneArchiveMarkdown(
 
   return `---
 id: ${milestoneId}
-title: "${title}"
+title: "${escapeYamlDoubleQuoted(title)}"
 status: ${status}
 shipped_at: ${projection.shippedAt}
 completed_at: ${completedAt}
