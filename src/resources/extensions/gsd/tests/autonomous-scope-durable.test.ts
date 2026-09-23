@@ -24,7 +24,8 @@ import {
   parseAutonomousScopeFlags,
   resolveEffectiveAutonomousScope,
 } from "../autonomous-scope.ts";
-import { handleAutonomous, isConclusiveNotActiveReason } from "../commands-gsd-core.ts";
+import { handleAutonomous } from "../commands-gsd-core.ts";
+import { isConclusiveNotActiveReason } from "../session-lock.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
 

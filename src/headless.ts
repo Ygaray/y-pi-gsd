@@ -73,7 +73,7 @@ import {
   captureMilestoneExecutionSnapshot,
   isMilestoneExecutableInDb,
 } from './headless-milestone-readiness.js'
-import { recordHeadlessRunLifecycle, recordHeadlessRunPause, recordHeadlessRunResume } from './headless-run-log.js'
+import { recordHeadlessRunComplete, recordHeadlessRunLifecycle, recordHeadlessRunPause, recordHeadlessRunResume } from './headless-run-log.js'
 import { classifyHeadlessPause, decideHeadlessResume, MAX_CONSECUTIVE_RESUMES } from './headless-pause-resume.js'
 
 // ---------------------------------------------------------------------------
@@ -452,6 +452,19 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     })
   }
 
+  // CR-01 (review of 16-driver-ergonomics): a handful of early/abrupt exits
+  // below (`process.exit()` calls for an unrecoverable startup error, and
+  // the SIGINT/SIGTERM handler) bypass this function's normal return and
+  // its end-of-function terminal transition entirely. Each of those calls
+  // this helper first so the row this run just inserted above never gets
+  // left `running` forever. Always 'failed' -- none of these are a clean
+  // success.
+  const finalizeHeadlessRunLogOnAbruptExit = (): void => {
+    if (isAutoMode && headlessRunId) {
+      recordHeadlessRunComplete(process.cwd(), headlessRunId, 'failed')
+    }
+  }
+
   // Query: read-only state snapshot, no RPC child needed
   if (options.command === 'query') {
     const { handleQuery } = await import('./headless-query.js')
@@ -512,6 +525,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   const cliPath = process.env.GSD_BIN_PATH || process.argv[1]
   if (!cliPath) {
     process.stderr.write('[headless] Error: Cannot determine CLI path. Set GSD_BIN_PATH or run via gsd.\n')
+    finalizeHeadlessRunLogOnAbruptExit()
     process.exit(1)
   }
 
@@ -1016,6 +1030,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     })
     if (timeoutTimer) clearTimeout(timeoutTimer)
     if (idleTimer) clearTimeout(idleTimer)
+    finalizeHeadlessRunLogOnAbruptExit()
     // Preserve a terminal machine-readable result for both JSON output modes.
     emitStructuredResultSync()
     process.exit(exitCode)
@@ -1041,6 +1056,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   } catch (err) {
     process.stderr.write(`[headless] Error: Failed to start RPC session: ${err instanceof Error ? err.message : String(err)}\n`)
     if (timeoutTimer) clearTimeout(timeoutTimer)
+    finalizeHeadlessRunLogOnAbruptExit()
     process.exit(1)
   }
 
@@ -1064,6 +1080,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       process.stderr.write(`[headless] Error: ${result.error}\n`)
       await client.stop()
       if (timeoutTimer) clearTimeout(timeoutTimer)
+      finalizeHeadlessRunLogOnAbruptExit()
       process.exit(1)
     }
     const matched = result.session!
@@ -1072,6 +1089,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       process.stderr.write(`[headless] Error: Session switch to '${matched.id}' was cancelled by an extension\n`)
       await client.stop()
       if (timeoutTimer) clearTimeout(timeoutTimer)
+      finalizeHeadlessRunLogOnAbruptExit()
       process.exit(1)
     }
     process.stderr.write(`[headless] Resuming session ${matched.id}\n`)
@@ -1283,6 +1301,22 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
         process.stderr.write(`[headless] Error: ${quickResult.error}\n`)
       }
     }
+  }
+
+  // CR-01 (review of 16-driver-ergonomics): persist the TERMINAL transition
+  // for this run's row now that `exitCode` is final -- every path that
+  // reaches this point for an auto-mode run (clean success, a blocked exit
+  // whose resume decision refused to continue, a timeout, or the
+  // child-crash handler resolving the completion promise with an error
+  // exitCode) previously left the row non-terminal (`running` or `paused`)
+  // forever, silently blocking every later `gsd headless auto` invocation
+  // for the same milestone and every subsequent pause/resume from being
+  // recorded (see `recordHeadlessRunComplete`'s own docstring,
+  // `headless-run-log.ts`, for why a `paused` row still resolves to
+  // `'failed'` here rather than `'completed'`). Never throws; a no-op when
+  // there is no matching `running`/`paused` row.
+  if (isAutoMode && headlessRunId) {
+    recordHeadlessRunComplete(process.cwd(), headlessRunId, exitCode === EXIT_SUCCESS ? 'completed' : 'failed')
   }
 
   // Summary

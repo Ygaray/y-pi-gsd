@@ -20,7 +20,7 @@ import {
   SCHEMA_VERSION,
 } from "../gsd-db.ts";
 import { RUN_LOG_PROJECTION_FILENAME } from "../run-log-projection.ts";
-import { recordHeadlessRunLifecycle } from "../../../../headless-run-log.ts";
+import { recordHeadlessRunComplete, recordHeadlessRunLifecycle, recordHeadlessRunPause } from "../../../../headless-run-log.ts";
 
 const tempDirs = new Set<string>();
 
@@ -147,4 +147,108 @@ test("after the host wrapper returns, the workflow database is closed (no leaked
   const result = recordHeadlessRunLifecycle(basePath, { runId: "R005", attempt: 1, status: "running" });
   assert.equal(result.recorded, true);
   assert.equal(getDbOrNull(), null);
+});
+
+// ─── CR-01 (review of 16-driver-ergonomics): the terminal transition ──────
+// recordHeadlessRunLifecycle never had, and its own stale-row cleanup.
+
+test("CR-01: recordHeadlessRunComplete transitions a running row to completed, and a subsequent recordHeadlessRunLifecycle call for the SAME milestone succeeds -- the exact 'run 1 completes, run 2 starts' scenario the bug broke", () => {
+  const basePath = makeBase();
+  const run1 = recordHeadlessRunLifecycle(basePath, { runId: "R-run1", attempt: 1, status: "running" });
+  assert.equal(run1.recorded, true);
+
+  const completeResult = recordHeadlessRunComplete(basePath, "R-run1", "completed");
+  assert.equal(completeResult.recorded, true);
+  assert.equal(completeResult.status, "completed");
+  assert.equal(completeResult.entryId, run1.entryId);
+
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  const run1Row = db().prepare(`SELECT status FROM milestone_run_log WHERE entry_id = :id`)
+    .get({ ":id": run1.entryId });
+  assert.equal(run1Row?.["status"], "completed");
+  closeDatabase();
+
+  // Before this fix, this second call would silently collide with
+  // idx_milestone_run_log_one_active (run 1's row still 'running') and
+  // return the swallowed no-op result -- exactly CR-01's headline bug.
+  const run2 = recordHeadlessRunLifecycle(basePath, { runId: "R-run2", attempt: 1, status: "running" });
+  assert.equal(run2.recorded, true, "the second run for the same milestone must succeed");
+  assert.notEqual(run2.entryId, run1.entryId, "the second run gets its own row, not an upsert onto run 1's");
+
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  assert.equal(
+    Number(db().prepare(`SELECT COUNT(*) AS count FROM milestone_run_log WHERE status = 'running'`).get()?.["count"] ?? -1),
+    1,
+    "exactly one running row exists -- run 1's row is terminal, run 2's is the sole active row",
+  );
+});
+
+test("CR-01: recordHeadlessRunComplete on a paused row always writes 'failed', never 'completed' -- the schema's whitelist only permits paused -> failed", () => {
+  const basePath = makeBase();
+  const run1 = recordHeadlessRunLifecycle(basePath, { runId: "R-paused", attempt: 1, status: "running" });
+  assert.equal(run1.recorded, true);
+
+  const pauseResult = recordHeadlessRunPause(basePath, "R-paused", {
+    kind: "human-decision",
+    reason: "waiting on a human decision",
+    milestoneId: "M001",
+    sliceId: null,
+  });
+  assert.equal(pauseResult.recorded, true);
+
+  // Ask for 'completed' -- the ONLY legal transition out of 'paused' is to
+  // 'failed', so the function must not attempt (and fail) 'completed'.
+  const completeResult = recordHeadlessRunComplete(basePath, "R-paused", "completed");
+  assert.equal(completeResult.recorded, true);
+  assert.equal(completeResult.status, "failed", "a paused row resolves to failed, never completed");
+
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  const row = db().prepare(`SELECT status FROM milestone_run_log WHERE entry_id = :id`)
+    .get({ ":id": pauseResult.entryId });
+  assert.equal(row?.["status"], "failed");
+});
+
+test("CR-01: recordHeadlessRunComplete never throws and no-ops on no DB, no active milestone, or no matching running/paused row", () => {
+  const noDbBase = makeNoGsdDir();
+  assert.doesNotThrow(() => {
+    const result = recordHeadlessRunComplete(noDbBase, "R-nodb", "completed");
+    assert.equal(result.recorded, false);
+    assert.equal(result.entryId, null);
+    assert.equal(result.status, null);
+  });
+
+  const basePath = makeBase();
+  // No run was ever recorded for "R-nonexistent" -- nothing to transition.
+  const result = recordHeadlessRunComplete(basePath, "R-nonexistent", "completed");
+  assert.equal(result.recorded, false);
+  assert.equal(result.entryId, null);
+  assert.equal(result.status, null);
+});
+
+test("CR-01: recordHeadlessRunComplete closes the workflow database, leaking no handle", () => {
+  const basePath = makeBase();
+  const run1 = recordHeadlessRunLifecycle(basePath, { runId: "R-close", attempt: 1, status: "running" });
+  assert.equal(run1.recorded, true);
+  recordHeadlessRunComplete(basePath, "R-close", "completed");
+  assert.equal(getDbOrNull(), null);
+});
+
+test("CR-01: recordHeadlessRunLifecycle's stale-row cleanup only fires for a CONCLUSIVE not-active reason -- a leftover running row with no session lock (no-session-lock, conclusive) is failed out and the fresh insert succeeds", () => {
+  const basePath = makeBase();
+  const run1 = recordHeadlessRunLifecycle(basePath, { runId: "R-stale", attempt: 1, status: "running" });
+  assert.equal(run1.recorded, true);
+  // No session lock file is ever written in this test -- detectActiveMilestoneRun
+  // reports { active: false, reason: "no-session-lock" }, a CONCLUSIVE reason,
+  // so the stale-row cleanup fires and the second insert below succeeds.
+
+  const run2 = recordHeadlessRunLifecycle(basePath, { runId: "R-fresh", attempt: 1, status: "running" });
+  assert.equal(run2.recorded, true);
+
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  const run1Row = db().prepare(`SELECT status FROM milestone_run_log WHERE entry_id = :id`)
+    .get({ ":id": run1.entryId });
+  assert.equal(run1Row?.["status"], "failed", "the stale leftover row was force-failed by the cleanup");
+  const run2Row = db().prepare(`SELECT status FROM milestone_run_log WHERE entry_id = :id`)
+    .get({ ":id": run2.entryId });
+  assert.equal(run2Row?.["status"], "running");
 });

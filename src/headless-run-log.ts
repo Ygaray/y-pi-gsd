@@ -16,6 +16,16 @@
 // `commands-gsd-core.ts`'s `failStaleMilestoneRunLogRow` inline shape --
 // there is no shared transition helper in `milestone-run-log-domain-operation.ts`
 // to call instead (it exposes only the INSERT-shaped `recordMilestoneRunLifecycle`).
+//
+// `recordHeadlessRunComplete` (CR-01, review of 16-driver-ergonomics) closes
+// the gap that same review found: nothing previously transitioned a row to
+// a TERMINAL state (`completed`/`failed`) on a normal or crashed finish, so
+// `runHeadlessOnce` must call it from every exit path for an auto-mode run.
+// `recordHeadlessRunLifecycle`'s own initial INSERT also gained a stale-row
+// cleanup (reusing `session-lock.ts`'s `failStaleMilestoneRunLogRow`/
+// `isConclusiveNotActiveReason`, the same guard the interactive
+// `/gsd autonomous` path uses) so a leftover row from a run that predates
+// this fix cannot permanently block every subsequent invocation.
 
 import {
   closeWorkflowDatabase,
@@ -37,6 +47,11 @@ import {
 import type { MilestoneRunLogStatus } from './resources/extensions/gsd/db/writers/milestone-run-log.js'
 import { readMilestoneRunLog, renderMilestoneRunLog } from './resources/extensions/gsd/run-log-projection.js'
 import type { PauseKind } from './resources/extensions/gsd/types.js'
+import {
+  detectActiveMilestoneRun,
+  failStaleMilestoneRunLogRow,
+  isConclusiveNotActiveReason,
+} from './resources/extensions/gsd/session-lock.js'
 
 export interface RecordHeadlessRunLifecycleInput {
   runId: string
@@ -77,6 +92,27 @@ export function recordHeadlessRunLifecycle(
   try {
     const active = findDerivedActiveMilestone(basePath)
     if (active == null) return NOOP_RESULT
+
+    // CR-01 (review of 16-driver-ergonomics): a headless run that never
+    // reached a terminal state (the exact gap `recordHeadlessRunComplete`
+    // below closes) leaves a leftover `running` row behind for this
+    // milestone. Reuse the SAME conclusive-reason-gated cleanup the
+    // interactive `/gsd autonomous` path already performs
+    // (`session-lock.ts`'s `failStaleMilestoneRunLogRow`/
+    // `isConclusiveNotActiveReason`, the one owner of this logic) before
+    // this fresh INSERT, so a second `gsd headless auto` invocation for the
+    // same milestone -- a normal re-run, or an automatic crash-restart via
+    // `runHeadless`'s own `maxRestarts` loop -- does not silently collide
+    // with `idx_milestone_run_log_one_active` and get swallowed by this
+    // function's own never-throws contract. Only applies to the initial
+    // `running` insert; an ambiguous detection reason refuses to force-fail,
+    // matching the interactive path's own posture.
+    if (input.status === 'running') {
+      const detection = detectActiveMilestoneRun(basePath, active.id)
+      if (!detection.active && isConclusiveNotActiveReason(detection.reason)) {
+        failStaleMilestoneRunLogRow(active.id, detection.pid)
+      }
+    }
 
     const receipt = recordMilestoneRunLifecycle({
       invocation: internalExecutionInvocation(
@@ -274,6 +310,107 @@ export function recordHeadlessRunResume(
     return { recorded: true, milestoneId: active.id, entryId: receipt.entryId }
   } catch {
     return RESUME_NOOP_RESULT
+  } finally {
+    closeWorkflowDatabase()
+  }
+}
+
+export interface RecordHeadlessRunCompleteResult {
+  recorded: boolean
+  entryId: string | null
+  status: MilestoneRunLogStatus | null
+}
+
+const COMPLETE_NOOP_RESULT: RecordHeadlessRunCompleteResult = {
+  recorded: false,
+  entryId: null,
+  status: null,
+}
+
+/**
+ * Persist the TERMINAL transition for the active milestone's current
+ * run-log attempt for `runId` (CR-01, review of 16-driver-ergonomics).
+ * Without this, EVERY exit of `runHeadlessOnce` for an auto-mode run left
+ * its row non-terminal (`running` or `paused`) forever, so the NEXT
+ * `gsd headless auto` invocation for the same milestone (a normal re-run,
+ * or an automatic crash-restart via `runHeadless`'s own `maxRestarts`
+ * loop) would collide with `idx_milestone_run_log_one_active` and be
+ * silently swallowed by `recordHeadlessRunLifecycle`'s never-throws
+ * contract -- every subsequent pause/resume for that milestone then went
+ * unrecorded too, directly violating ROADMAP SC3.
+ *
+ * `outcome` is the DESIRED terminal status, but the row's CURRENT status
+ * constrains what is actually legal: the schema's whitelist-transition
+ * trigger permits `running -> completed | failed` but only
+ * `paused -> failed` (never `paused -> completed`). When the row is
+ * `paused` (the run ended on a blocked exit whose resume decision refused
+ * to continue) and `outcome` is `'completed'`, this function writes
+ * `'failed'` instead of throwing or silently no-op'ing: from the
+ * run-log's perspective THIS process instance did not itself complete the
+ * milestone -- a fresh invocation will -- so `'failed'` is the accurate
+ * terminal state for this attempt.
+ *
+ * Never throws; every failure path (no DB, no `.gsd` directory, no active
+ * milestone, no `running`/`paused` row for this run) returns the no-op
+ * result. Opens the workflow database fresh and always closes it.
+ */
+export function recordHeadlessRunComplete(
+  basePath: string,
+  runId: string,
+  outcome: 'completed' | 'failed',
+): RecordHeadlessRunCompleteResult {
+  const opened = openExistingWorkflowDatabase(basePath)
+  if (!opened.ok) return COMPLETE_NOOP_RESULT
+  try {
+    const active = findDerivedActiveMilestone(basePath)
+    if (active == null) return COMPLETE_NOOP_RESULT
+
+    const row = readMilestoneRunLog().find(
+      (r) => r.milestoneId === active.id && r.runId === runId
+        && (r.status === 'running' || r.status === 'paused'),
+    )
+    if (!row) return COMPLETE_NOOP_RESULT
+
+    const targetStatus: MilestoneRunLogStatus = row.status === 'paused' ? 'failed' : outcome
+
+    const idempotencyKey = `headless-run-log/${runId}/a${row.attempt}/${targetStatus}`
+    const fence = readDomainOperationFence(idempotencyKey)
+    executeDomainOperation({
+      operationType: MILESTONE_RUN_LOG_OPERATION_TYPE,
+      idempotencyKey,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: 'agent',
+      actorId: 'headless-auto',
+      sourceTransport: 'internal',
+      payload: { entryId: row.entryId, status: targetStatus },
+    }, (context) => {
+      transitionMilestoneRunLogRow(context, {
+        entryId: row.entryId,
+        status: targetStatus,
+        resumeFrom: row.resumeFrom,
+        pauseKind: row.pauseKind,
+        reason: row.reason,
+      })
+      return {
+        events: [{
+          eventType: MILESTONE_RUN_LOG_EVENT_TYPE,
+          entityType: 'milestone',
+          entityId: active.id,
+          payload: { entryId: row.entryId, status: targetStatus },
+          destinations: ['projection'],
+        }],
+        projections: [{
+          projectionKey: `run-log/${active.id}`.toLowerCase(),
+          projectionKind: 'milestone-run-log',
+          rendererVersion: '1',
+        }],
+      }
+    })
+    renderMilestoneRunLog(basePath)
+    return { recorded: true, entryId: row.entryId, status: targetStatus }
+  } catch {
+    return COMPLETE_NOOP_RESULT
   } finally {
     closeWorkflowDatabase()
   }

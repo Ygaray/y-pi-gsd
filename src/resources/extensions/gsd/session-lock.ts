@@ -24,6 +24,12 @@ import { atomicWriteSync } from "./atomic-write.js";
 import { markWorkerStoppingByPid } from "./db/auto-workers.js";
 import { logWarning } from "./workflow-logger.js";
 import { getActiveMilestoneRun } from "./run-log-projection.js";
+import {
+  executeDomainOperation,
+  MILESTONE_RUN_LOG_OPERATION_TYPE,
+  readDomainOperationFence,
+  transitionMilestoneRunLogRow,
+} from "./gsd-db.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -897,6 +903,96 @@ export function detectActiveMilestoneRun(basePath: string, milestoneId: string):
   } catch (error) {
     return { active: false, reason: "detection-failed", detail: describeCaughtError(error) };
   }
+}
+
+/**
+ * `detectActiveMilestoneRun`'s `active: false` reasons split into two
+ * shapes (CR-01/CR-02, review of 16-driver-ergonomics): a CONCLUSIVE proof
+ * that nothing is running (no row at all, a row with no lock holder, or a
+ * row whose lock owner is confirmed dead), versus an AMBIGUOUS "I could not
+ * tell" outcome from a transient read/query failure partway through
+ * detection. Only the conclusive reasons are safe to treat as "clear to
+ * force-fail a leftover row and start a fresh one" -- an ambiguous reason
+ * means the actual other process may still be alive and still holds the
+ * lock; treating "unknown" as "safe" would let two live processes act
+ * against the same milestone concurrently.
+ *
+ * This is the ONE owner of the classification -- both the interactive
+ * `/gsd autonomous` path (`commands-gsd-core.ts`) and the headless
+ * `gsd headless auto` path (`src/headless-run-log.ts`) import it from here
+ * rather than each maintaining their own copy, so the two force-fail
+ * gates cannot silently drift apart (mirroring `stop-notice.ts`'s own
+ * "ONE owner of this vocabulary" design principle).
+ */
+const CONCLUSIVE_NOT_ACTIVE_REASONS: ReadonlySet<ActiveMilestoneRunReason> = new Set([
+  "no-running-run-log-row",
+  "no-session-lock",
+  "stale-lock-dead-owner",
+]);
+
+/**
+ * True when a non-active `detectActiveMilestoneRun` reason is CONCLUSIVE
+ * proof that nothing is running (safe to force-fail a leftover row and
+ * start fresh), false when it is one of the AMBIGUOUS "I could not tell"
+ * reasons a transient read/query failure produces.
+ */
+export function isConclusiveNotActiveReason(reason: ActiveMilestoneRunReason | undefined): boolean {
+  return reason != null && CONCLUSIVE_NOT_ACTIVE_REASONS.has(reason);
+}
+
+/**
+ * Transition a stale (dead-owner or lock-abandoned) `running` run-log row to
+ * `failed` before a fresh run is recorded for the same milestone --
+ * otherwise the fresh `running` INSERT would violate
+ * `idx_milestone_run_log_one_active`. Callers must only reach this function
+ * after confirming `detection.reason` is one of
+ * `CONCLUSIVE_NOT_ACTIVE_REASONS` (via `isConclusiveNotActiveReason`) -- an
+ * ambiguous detection reason must refuse before ever calling this. No-ops
+ * when there is no leftover row to clean up.
+ *
+ * The ONE owner of this cleanup (CR-01, review of 16-driver-ergonomics):
+ * both the interactive `/gsd autonomous` path (`commands-gsd-core.ts`) and
+ * the headless `gsd headless auto` path (`src/headless-run-log.ts`) call
+ * this same function rather than each maintaining their own copy of the
+ * transition, so the two never-blocks-dispatch cleanup paths cannot
+ * silently drift apart.
+ */
+export function failStaleMilestoneRunLogRow(milestoneId: string, ownerPid: number | undefined): void {
+  const stale = getActiveMilestoneRun(milestoneId);
+  if (!stale) return;
+  const idempotencyKey = `stale-run-log-cleanup:${stale.entryId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: MILESTONE_RUN_LOG_OPERATION_TYPE,
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: { entryId: stale.entryId, status: "failed" },
+  }, (context) => {
+    transitionMilestoneRunLogRow(context, {
+      entryId: stale.entryId,
+      status: "failed",
+      resumeFrom: null,
+      pauseKind: null,
+      reason: `stale lock: recorded owner PID ${ownerPid ?? "unknown"} is not alive`,
+    });
+    return {
+      events: [{
+        eventType: "milestone.run-log.recorded",
+        entityType: "milestone",
+        entityId: milestoneId,
+        payload: { entryId: stale.entryId, status: "failed" },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `run-log/${milestoneId}`.toLowerCase(),
+        projectionKind: "milestone-run-log",
+        rendererVersion: "1",
+      }],
+    };
+  });
 }
 
 /**

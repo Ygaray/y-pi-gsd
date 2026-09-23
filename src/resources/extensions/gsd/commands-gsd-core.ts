@@ -19,18 +19,13 @@ import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
 import { getActiveMilestoneId } from "./state.js";
 import {
   type ActiveMilestoneRunDetection,
-  type ActiveMilestoneRunReason,
   detectActiveMilestoneRun,
+  failStaleMilestoneRunLogRow,
+  isConclusiveNotActiveReason,
 } from "./session-lock.js";
 import { recordMilestoneRunLifecycle } from "./milestone-run-log-domain-operation.js";
 import { getActiveMilestoneRun, renderMilestoneRunLog } from "./run-log-projection.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
-import {
-  executeDomainOperation,
-  MILESTONE_RUN_LOG_OPERATION_TYPE,
-  readDomainOperationFence,
-  transitionMilestoneRunLogRow,
-} from "./gsd-db.js";
 import {
   type AutonomousScope,
   deriveMilestoneOrdinal,
@@ -849,84 +844,6 @@ export async function handleUltraplanPhase(args: string, ctx: ExtensionCommandCo
  */
 export function parseAutonomousScope(args: string): string {
   return describeAutonomousScope(parseAutonomousScopeFlags(args));
-}
-
-/**
- * `detectActiveMilestoneRun`'s `active: false` reasons split into two
- * shapes (CR-02, review of 16-driver-ergonomics): a CONCLUSIVE proof that
- * nothing is running (no row at all, a row with no lock holder, or a row
- * whose lock owner is confirmed dead), versus an AMBIGUOUS "I could not
- * tell" outcome from a transient read/query failure partway through
- * detection. Only the conclusive reasons are safe to treat as "clear to
- * force-fail a leftover row and start a fresh one" -- an ambiguous reason
- * means the actual other process may still be alive and still holds the
- * lock; treating "unknown" as "safe" would let two live processes dispatch
- * against the same milestone concurrently (T-16-14 widened).
- */
-const CONCLUSIVE_NOT_ACTIVE_REASONS: ReadonlySet<ActiveMilestoneRunReason> = new Set([
-  "no-running-run-log-row",
-  "no-session-lock",
-  "stale-lock-dead-owner",
-]);
-
-/**
- * True when a non-active `detectActiveMilestoneRun` reason is CONCLUSIVE
- * proof that nothing is running (safe to force-fail a leftover row and
- * start fresh), false when it is one of the AMBIGUOUS "I could not tell"
- * reasons a transient read/query failure produces. Exported so the full
- * seven-reason vocabulary can be unit tested directly, independent of
- * whether the ambiguous reasons are reachable through the current
- * (defensive, never-throws) `session-lock.ts` helpers.
- */
-export function isConclusiveNotActiveReason(reason: ActiveMilestoneRunReason | undefined): boolean {
-  return reason != null && CONCLUSIVE_NOT_ACTIVE_REASONS.has(reason);
-}
-
-/**
- * Transition a stale (dead-owner or lock-abandoned) `running` run-log row to
- * `failed` before a fresh run is recorded for the same milestone --
- * otherwise the fresh `running` INSERT would violate
- * `idx_milestone_run_log_one_active` (T-16-14). Callers must only reach
- * this function after confirming `detection.reason` is one of
- * `CONCLUSIVE_NOT_ACTIVE_REASONS` -- an ambiguous detection reason must
- * refuse before ever calling this (see `handleAutonomous`).
- */
-function failStaleMilestoneRunLogRow(milestoneId: string, ownerPid: number | undefined): void {
-  const stale = getActiveMilestoneRun(milestoneId);
-  if (!stale) return;
-  const idempotencyKey = `autonomous-stale-cleanup:${stale.entryId}`;
-  const fence = readDomainOperationFence(idempotencyKey);
-  executeDomainOperation({
-    operationType: MILESTONE_RUN_LOG_OPERATION_TYPE,
-    idempotencyKey,
-    expectedRevision: fence.revision,
-    expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "agent",
-    sourceTransport: "internal",
-    payload: { entryId: stale.entryId, status: "failed" },
-  }, (context) => {
-    transitionMilestoneRunLogRow(context, {
-      entryId: stale.entryId,
-      status: "failed",
-      resumeFrom: null,
-      pauseKind: null,
-      reason: `stale lock: recorded owner PID ${ownerPid ?? "unknown"} is not alive`,
-    });
-    return {
-      events: [{
-        eventType: "milestone.run-log.recorded",
-        entityType: "milestone",
-        entityId: milestoneId,
-        payload: { entryId: stale.entryId, status: "failed" },
-        destinations: ["projection"],
-      }],
-      projections: [{
-        projectionKey: `run-log/${milestoneId}`.toLowerCase(),
-        projectionKind: "milestone-run-log",
-        rendererVersion: "1",
-      }],
-    };
-  });
 }
 
 /**
