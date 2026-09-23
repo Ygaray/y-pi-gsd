@@ -16,9 +16,11 @@
 // cycles. `resume_from` carries the durable `--from N` pointer (16-03).
 //
 // Trigger guards (identity-immutable, whitelist-transition, delete-blocking)
-// and the two invariant indexes (single-active-run, attempt-uniqueness) are
-// added in Task 3 -- this file's initial shape creates the table and its
-// status index only.
+// enforce the DRIVER-01 lifecycle contract mechanically rather than by
+// convention. The two invariant indexes make a silently double-started run
+// a DB-level constraint violation (`idx_milestone_run_log_one_active`) and
+// make the attempt-numbered identity enforceable at the DB, not only in the
+// id string (`idx_milestone_run_log_attempt`, RESEARCH Pitfall 2).
 
 import type { DbAdapter } from "./db-adapter.js";
 
@@ -65,5 +67,64 @@ export function createRunLogSchemaV54(db: DbAdapter): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_milestone_run_log_status
     ON milestone_run_log(project_id, milestone_id, status)
+  `);
+
+  // Single-active-run: a DB-level constraint violation, not a convention
+  // (ROADMAP SC2's "already-active run is detected rather than silently
+  // double-started").
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_milestone_run_log_one_active
+    ON milestone_run_log(project_id, milestone_id)
+    WHERE status = 'running'
+  `);
+
+  // Attempt-numbered identity, enforced at the DB (RESEARCH Pitfall 2): a
+  // pause/resume of the same run cannot collapse two attempts onto one row.
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_milestone_run_log_attempt
+    ON milestone_run_log(project_id, milestone_id, run_id, attempt)
+  `);
+
+  db.exec("DROP TRIGGER IF EXISTS trg_milestone_run_log_identity_immutable");
+  db.exec(`
+    CREATE TRIGGER trg_milestone_run_log_identity_immutable
+    BEFORE UPDATE ON milestone_run_log
+    WHEN NEW.entry_id != OLD.entry_id
+      OR NEW.project_id != OLD.project_id
+      OR NEW.milestone_id != OLD.milestone_id
+      OR NEW.run_id != OLD.run_id
+      OR NEW.attempt != OLD.attempt
+      OR NEW.host_pid != OLD.host_pid
+      OR NEW.started_at != OLD.started_at
+      OR NEW.created_operation_id != OLD.created_operation_id
+    BEGIN
+      SELECT RAISE(ABORT, 'milestone run-log identity is immutable');
+    END
+  `);
+
+  // Whitelist transition (Task 1's locked vocabulary): running -> paused |
+  // completed | failed; paused -> resumed | failed. resumed, completed, and
+  // failed are terminal -- zero outgoing transitions. Every other UPDATE of
+  // status (including a same-status no-op UPDATE) aborts.
+  db.exec("DROP TRIGGER IF EXISTS trg_milestone_run_log_transition");
+  db.exec(`
+    CREATE TRIGGER trg_milestone_run_log_transition
+    BEFORE UPDATE ON milestone_run_log
+    WHEN NOT (
+      (OLD.status = 'running' AND NEW.status IN ('paused', 'completed', 'failed'))
+      OR (OLD.status = 'paused' AND NEW.status IN ('resumed', 'failed'))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid milestone run-log status transition');
+    END
+  `);
+
+  db.exec("DROP TRIGGER IF EXISTS trg_milestone_run_log_delete");
+  db.exec(`
+    CREATE TRIGGER trg_milestone_run_log_delete
+    BEFORE DELETE ON milestone_run_log
+    BEGIN
+      SELECT RAISE(ABORT, 'milestone run-log records are durable history');
+    END
   `);
 }

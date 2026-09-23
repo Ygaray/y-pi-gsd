@@ -38,6 +38,39 @@ export interface RegisterMilestoneRunLogRowResult {
   entryId: string;
 }
 
+export interface TransitionMilestoneRunLogRowInput {
+  entryId: string;
+  status: MilestoneRunLogStatus;
+  resumeFrom: number | null;
+  pauseKind: string | null;
+  reason: string | null;
+}
+
+export interface TransitionMilestoneRunLogRowResult {
+  milestoneId: string;
+  runId: string;
+  attempt: number;
+}
+
+interface ExistingRunLogRow {
+  status: string;
+  milestone_id: string;
+  run_id: string;
+  attempt: number;
+}
+
+/**
+ * Terminal statuses have zero outgoing transitions (Task 1's locked
+ * whitelist): `resumed`, `completed`, `failed`. A transition attempted from
+ * a terminal row must be refused BEFORE the UPDATE reaches the schema
+ * trigger, with a distinct, named error.
+ */
+const TERMINAL_RUN_LOG_STATUSES: ReadonlySet<MilestoneRunLogStatus> = new Set([
+  "resumed",
+  "completed",
+  "failed",
+]);
+
 function requireNonBlank(value: string, field: string): string {
   const normalized = value.trim();
   if (normalized.length === 0) throw new Error(`${field} must not be blank`);
@@ -123,4 +156,68 @@ export function registerMilestoneRunLogRow(
     ":authority_epoch": context.resultingAuthorityEpoch,
   });
   return { entryId };
+}
+
+/**
+ * Context-bound status transition of a milestone run-log row. Must run
+ * inside its own `executeDomainOperation` `mutate()` callback, mirroring
+ * `registerMilestoneRunLogRow`'s guard.
+ *
+ * Identity columns are deliberately absent from the SET list --
+ * `trg_milestone_run_log_identity_immutable` aborts on them -- and the
+ * pre-read throws distinct named errors for "no such entry" and "already
+ * terminal" BEFORE any UPDATE runs, so neither case reaches the
+ * trigger-guarded UPDATE at all.
+ */
+export function transitionMilestoneRunLogRow(
+  context: Readonly<DomainOperationContext>,
+  input: TransitionMilestoneRunLogRowInput,
+): TransitionMilestoneRunLogRowResult {
+  if (requireActiveDomainOperationContext(context) !== MILESTONE_RUN_LOG_OPERATION_TYPE) {
+    throw new Error("Milestone run-log transition requires its Domain Operation");
+  }
+  const entryId = requireNonBlank(input.entryId, "entryId");
+  const resumeFrom = requirePositiveIntegerIfPresent(input.resumeFrom, "resumeFrom");
+  const pauseKind = requireNonBlankIfPresent(input.pauseKind, "pauseKind");
+  const reason = requireNonBlankIfPresent(input.reason, "reason");
+
+  const existing = getDb().prepare(`
+    SELECT status, milestone_id, run_id, attempt FROM milestone_run_log WHERE entry_id = :entry_id
+  `).get({ ":entry_id": entryId }) as unknown as ExistingRunLogRow | undefined;
+  if (!existing) {
+    throw new Error(`Milestone run-log entry not found: ${entryId}`);
+  }
+  if (TERMINAL_RUN_LOG_STATUSES.has(existing.status as MilestoneRunLogStatus)) {
+    throw new Error(`Milestone run-log entry is already terminal (status: ${existing.status}): ${entryId}`);
+  }
+
+  const now = new Date().toISOString();
+  const updated = getDb().prepare(`
+    UPDATE milestone_run_log
+    SET status = :status,
+        updated_at = :updated_at,
+        resume_from = :resume_from,
+        pause_kind = :pause_kind,
+        reason = :reason,
+        last_operation_id = :operation_id,
+        last_project_revision = :project_revision,
+        last_authority_epoch = :authority_epoch
+    WHERE entry_id = :entry_id AND status = :expected_status
+  `).run({
+    ":status": input.status,
+    ":updated_at": now,
+    ":resume_from": resumeFrom,
+    ":pause_kind": pauseKind,
+    ":reason": reason,
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+    ":entry_id": entryId,
+    ":expected_status": existing.status,
+  });
+  if (Number((updated as { changes?: number }).changes ?? 0) !== 1) {
+    throw new Error(`Milestone run-log transition must update exactly one row: ${entryId}`);
+  }
+
+  return { milestoneId: existing.milestone_id, runId: existing.run_id, attempt: existing.attempt };
 }
