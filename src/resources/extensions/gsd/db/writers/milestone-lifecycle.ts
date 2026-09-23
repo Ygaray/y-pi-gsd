@@ -789,62 +789,62 @@ export function reopenMilestoneHierarchy(
   const reopenedTaskIds: string[] = [];
   const reopenedSliceIds: string[] = [];
   if (!keepCompleted) {
-  for (const task of tasks) {
-    const taskId = task.taskId!;
-    adoptOrTransitionLifecycle(context, {
-      itemKind: "task",
-      milestoneId,
-      sliceId: task.sliceId!,
-      taskId,
-      lifecycleStatus: "ready",
-      occurredAt: reopenedAt,
-    });
-    const updated = getDb().prepare(`
-      UPDATE tasks
-      SET status = 'pending', completed_at = NULL
-      WHERE milestone_id = :milestone_id
-        AND slice_id = :slice_id
-        AND id = :task_id
-        AND status = :expected_status
-    `).run({
-      ":milestone_id": milestoneId,
-      ":slice_id": task.sliceId,
-      ":task_id": taskId,
-      ":expected_status": task.legacyStatus,
-    });
-    if (changedRows(updated) !== 1) {
-      throw new Error(`Milestone reopen must update Task ${task.sliceId}/${taskId}`);
+    for (const task of tasks) {
+      const taskId = task.taskId!;
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "task",
+        milestoneId,
+        sliceId: task.sliceId!,
+        taskId,
+        lifecycleStatus: "ready",
+        occurredAt: reopenedAt,
+      });
+      const updated = getDb().prepare(`
+        UPDATE tasks
+        SET status = 'pending', completed_at = NULL
+        WHERE milestone_id = :milestone_id
+          AND slice_id = :slice_id
+          AND id = :task_id
+          AND status = :expected_status
+      `).run({
+        ":milestone_id": milestoneId,
+        ":slice_id": task.sliceId,
+        ":task_id": taskId,
+        ":expected_status": task.legacyStatus,
+      });
+      if (changedRows(updated) !== 1) {
+        throw new Error(`Milestone reopen must update Task ${task.sliceId}/${taskId}`);
+      }
+      reopenedTaskIds.push(`${task.sliceId}/${taskId}`);
     }
-    reopenedTaskIds.push(`${task.sliceId}/${taskId}`);
-  }
 
-  for (const slice of slices) {
-    const sliceId = slice.sliceId!;
-    adoptOrTransitionLifecycle(context, {
-      itemKind: "slice",
-      milestoneId,
-      sliceId,
-      lifecycleStatus: "ready",
-      occurredAt: reopenedAt,
-    });
-    const updated = getDb().prepare(`
-      UPDATE slices
-      SET status = 'in_progress', completed_at = NULL,
-          full_summary_md = '', full_uat_md = ''
-      WHERE milestone_id = :milestone_id
-        AND id = :slice_id
-        AND status = :expected_status
-    `).run({
-      ":milestone_id": milestoneId,
-      ":slice_id": sliceId,
-      ":expected_status": slice.legacyStatus,
-    });
-    if (changedRows(updated) !== 1) {
-      throw new Error(`Milestone reopen must update Slice ${sliceId}`);
+    for (const slice of slices) {
+      const sliceId = slice.sliceId!;
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "slice",
+        milestoneId,
+        sliceId,
+        lifecycleStatus: "ready",
+        occurredAt: reopenedAt,
+      });
+      const updated = getDb().prepare(`
+        UPDATE slices
+        SET status = 'in_progress', completed_at = NULL,
+            full_summary_md = '', full_uat_md = ''
+        WHERE milestone_id = :milestone_id
+          AND id = :slice_id
+          AND status = :expected_status
+      `).run({
+        ":milestone_id": milestoneId,
+        ":slice_id": sliceId,
+        ":expected_status": slice.legacyStatus,
+      });
+      if (changedRows(updated) !== 1) {
+        throw new Error(`Milestone reopen must update Slice ${sliceId}`);
+      }
+      ensurePendingSliceQ8(context, { milestoneId, sliceId });
+      reopenedSliceIds.push(sliceId);
     }
-    ensurePendingSliceQ8(context, { milestoneId, sliceId });
-    reopenedSliceIds.push(sliceId);
-  }
   }
 
   const milestoneLifecycle = adoptOrTransitionLifecycle(context, {
