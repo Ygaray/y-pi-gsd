@@ -5,10 +5,11 @@
 // cancelled milestone still reopens exactly as before (15-03 Task 1).
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import type { DomainOperationContext } from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
@@ -441,5 +442,47 @@ test("the refusal aborts the whole Domain Operation — no operation row, no eve
     operationTablesSnapshot(),
     before,
     "a refused ship-reopen must add zero operations, events, outbox rows, or projection work",
+  );
+});
+
+test("the shipped/archived guard in reopenMilestoneHierarchy sits textually between loadMilestone and requireTerminalState, not merely behaviorally ahead of it", () => {
+  // D-02 / RESEARCH Pitfall 2: requireTerminalState normalizes through the
+  // canonical bucket, which after 15-01 can no longer distinguish "shipped"
+  // from "completed". The guard is only load-bearing if it is positioned
+  // textually before requireTerminalState runs on the milestone row (both
+  // for the vanilla path AND the keepCompleted branch) — a guard that is
+  // merely "usually" reached first (e.g. inside a conditional that can be
+  // skipped) would silently stop mattering. This asserts the real source
+  // text ordering rather than trusting the 15-01/15-03 SUMMARY prose.
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "db", "writers", "milestone-lifecycle.ts"),
+    "utf8",
+  );
+
+  const reopenHierarchyStart = source.indexOf("function reopenMilestoneHierarchy");
+  assert.notEqual(reopenHierarchyStart, -1, "reopenMilestoneHierarchy must exist in milestone-lifecycle.ts");
+
+  // Scope the search window to the reopenMilestoneHierarchy function body
+  // (up to the next top-level function declaration) so a shipped-status
+  // guard elsewhere in the file (e.g. in shipMilestoneHierarchy) cannot be
+  // mistaken for this one.
+  const nextFunctionStart = source.indexOf("\nfunction ", reopenHierarchyStart + 1);
+  const body = source.slice(reopenHierarchyStart, nextFunctionStart === -1 ? source.length : nextFunctionStart);
+
+  const loadMilestoneIndex = body.indexOf("loadMilestone(context, milestoneId)");
+  const shippedGuardIndex = body.indexOf("isShippedStatus(milestone.legacyStatus)");
+  const requireTerminalStateIndex = body.indexOf("requireTerminalState(milestone,");
+
+  assert.notEqual(loadMilestoneIndex, -1, "reopenMilestoneHierarchy must load the milestone row");
+  assert.notEqual(shippedGuardIndex, -1, "reopenMilestoneHierarchy must guard on isShippedStatus");
+  assert.notEqual(requireTerminalStateIndex, -1, "reopenMilestoneHierarchy must still call requireTerminalState");
+
+  assert.ok(
+    loadMilestoneIndex < shippedGuardIndex,
+    "the shipped/archived guard must read the milestone before checking its raw legacy status",
+  );
+  assert.ok(
+    shippedGuardIndex < requireTerminalStateIndex,
+    "the shipped/archived guard must run BEFORE requireTerminalState, which can no longer tell shipped apart from completed once the canonical bucket collapses them",
   );
 });
