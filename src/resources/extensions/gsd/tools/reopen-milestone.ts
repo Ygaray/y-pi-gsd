@@ -120,6 +120,8 @@ export async function handleReopenMilestone(
           return { error: `milestone not found: ${params.milestoneId}` };
         case "canonical-authority-present":
           return { error: `refusing legacy reopen for partially adopted Milestone ${params.milestoneId}` };
+        case "milestone-shipped":
+          return { error: `milestone ${params.milestoneId} is shipped/archived (status: ${outcome.status}) and cannot be reopened` };
         case "milestone-not-closed":
           return { error: `milestone ${params.milestoneId} is not closed (status: ${outcome.status}) — nothing to reopen` };
       }

@@ -7,7 +7,7 @@
 // validation, and messaging stay in callers / db-writer.ts.
 import { getDbOrNull, transaction } from "../engine.js";
 import { GSDError, GSD_STALE_STATE } from "../../errors.js";
-import { isClosedStatus } from "../../status-guards.js";
+import { isClosedStatus, isShippedStatus } from "../../status-guards.js";
 import { getMilestone, getSlice, getSliceTasks, getMilestoneSlices } from "../queries.js";
 
 function requireDb(): void {
@@ -82,6 +82,7 @@ export type ReopenMilestoneOutcome =
   | { ok: true; slicesReset: number; tasksReset: number }
   | { ok: false; reason: "milestone-not-found" }
   | { ok: false; reason: "canonical-authority-present" }
+  | { ok: false; reason: "milestone-shipped"; status: string }
   | { ok: false; reason: "milestone-not-closed"; status: string };
 
 /**
@@ -109,6 +110,14 @@ export function reopenMilestoneCascade(
       outcome = { ok: false, reason: "canonical-authority-present" };
       return;
     }
+    // D-02: closes the second door the RAW_CLOSED_STATUSES widening opened.
+    // This legacy path runs only for milestones with no canonical lifecycle
+    // authority, so it never touches a milestone this codebase itself
+    // shipped — but an imported or hand-authored unadopted row carrying
+    // either new literal now satisfies isClosedStatus below, and without
+    // this guard the cascade would reset it to active and blank its
+    // completion timestamp. Must run BEFORE the isClosedStatus check.
+    if (isShippedStatus(milestone.status)) { outcome = { ok: false, reason: "milestone-shipped", status: milestone.status }; return; }
     if (!isClosedStatus(milestone.status)) { outcome = { ok: false, reason: "milestone-not-closed", status: milestone.status }; return; }
 
     getDbOrNull()!.prepare(

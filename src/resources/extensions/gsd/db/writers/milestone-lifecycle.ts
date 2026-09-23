@@ -759,6 +759,17 @@ export function reopenMilestoneHierarchy(
   const reason = requireText(input.reason, "reason");
   const reopenedAt = monotonicOperationTimestamp(context, milestoneId);
   const milestone = loadMilestone(context, milestoneId);
+  // D-02 guard: check the RAW legacy status BEFORE requireTerminalState runs.
+  // By the time requireTerminalState normalizes through
+  // normalizeLegacyLifecycleStatus, shipped/archived have already collapsed
+  // into the same canonical "completed" bucket as an ordinary completion —
+  // the distinction this guard needs would already be erased. Must also
+  // precede the keepCompleted branch below so both variants are covered.
+  if (isShippedStatus(milestone.legacyStatus)) {
+    throw new MilestoneLifecycleValidationError(
+      `Milestone ${milestoneId} is shipped/archived (status: ${milestone.legacyStatus}) and cannot be reopened`,
+    );
+  }
   requireTerminalState(milestone, `Milestone ${milestoneId}`);
   const slices = loadSlices(context, milestoneId);
   const tasks = loadTasks(context, milestoneId);
