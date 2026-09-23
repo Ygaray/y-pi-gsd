@@ -1415,6 +1415,21 @@ function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
       }
     }
 
+    if (isShippedStatus(milestone.status)) {
+      try {
+        const archive = readMilestoneArchiveProjection(milestone.id);
+        if (archive) {
+          record(
+            targetMilestoneFile(basePath, milestone.id, "ARCHIVE", milestone.title),
+            renderMilestoneArchiveMarkdown(milestone.id, archive),
+            `archive for ${milestone.id} differs from DB render intent`,
+          );
+        }
+      } catch (error) {
+        logWarning("renderer", `milestone archive drift check failed: ${(error as Error).message}`);
+      }
+    }
+
     for (const slice of slices) {
       const sliceComplete = toStatus(slice.status) === "complete";
       for (const artifact of getSliceScopedArtifacts(milestone.id, slice.id)) {
@@ -1560,6 +1575,27 @@ function detectStaleRendersImpl(basePath: string): StaleEntry[] {
 
     // Plan and roadmap checkbox drift is handled by detectProjectionDrift
     // (DB-vs-render-intent). This pass only checks for missing on-disk files.
+
+    // A shipped milestone's ARCHIVE.md is the immutable ship record — a
+    // hand-edit, corrupt write, or stray delete must be caught the same way a
+    // missing slice/task SUMMARY.md is caught below (detectProjectionDrift's
+    // content-drift compare only runs when the file already exists on disk,
+    // so a MISSING file needs its own check here).
+    if (isShippedStatus(milestone.status)) {
+      try {
+        if (readMilestoneArchiveProjection(milestone.id)) {
+          const archiveAbsPath = targetMilestoneFile(basePath, milestone.id, "ARCHIVE", milestone.title);
+          if (!existsSync(archiveAbsPath)) {
+            stale.push({
+              path: archiveAbsPath,
+              reason: `${milestone.id} is shipped with an archive event in DB but ARCHIVE.md missing on disk`,
+            });
+          }
+        }
+      } catch (error) {
+        logWarning("renderer", `milestone archive missing-file check failed: ${(error as Error).message}`);
+      }
+    }
 
     for (const slice of slices) {
       const tasks = getActivePlanTasks(milestone.id, slice.id);

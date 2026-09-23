@@ -6,7 +6,7 @@
 // live in the render sweep alongside its new ARCHIVE artifact (15-03 Task 2).
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -35,6 +35,7 @@ import {
 } from "../gsd-db.ts";
 import {
   detectProjectionDrift,
+  detectStaleRenders,
   renderAllFromDb,
   stripProjectionStamp,
 } from "../markdown-renderer.ts";
@@ -335,4 +336,34 @@ test("the same sweep also writes the ARCHIVE artifact, coexisting with SUMMARY i
   const archivePath = targetMilestoneFile(basePath, "M001", "ARCHIVE", "Ship vocabulary");
   assert.ok(readFileSync(summaryPath, "utf-8").length > 0);
   assert.ok(readFileSync(archivePath, "utf-8").length > 0);
+});
+
+test("the render sweep's drift-detection pass also reports a hand-edited ARCHIVE.md, mirroring the SUMMARY-drift test (CR-03)", async () => {
+  const basePath = makeBase();
+  shipTheMilestone();
+  await renderAllFromDb(basePath);
+
+  const archivePath = targetMilestoneFile(basePath, "M001", "ARCHIVE", "Ship vocabulary");
+  const original = readFileSync(archivePath, "utf-8");
+  writeFileSync(archivePath, `${original}\nout-of-band hand-edit\n`);
+
+  const stale = detectProjectionDrift(basePath);
+  const archiveDrift = stale.find((entry) => entry.path === archivePath);
+  assert.ok(archiveDrift, "a shipped milestone's ARCHIVE must be drift-checked, not invisible to reconciliation");
+  assert.match(archiveDrift!.reason, /differs from DB render intent/);
+});
+
+test("a deleted ARCHIVE.md for an already-shipped milestone is reported as a missing render (CR-03)", async () => {
+  const basePath = makeBase();
+  shipTheMilestone();
+  await renderAllFromDb(basePath);
+
+  const archivePath = targetMilestoneFile(basePath, "M001", "ARCHIVE", "Ship vocabulary");
+  assert.ok(readFileSync(archivePath, "utf-8").length > 0);
+  unlinkSync(archivePath);
+
+  const stale = detectStaleRenders(basePath);
+  const archiveMissing = stale.find((entry) => entry.path === archivePath);
+  assert.ok(archiveMissing, "a deleted ARCHIVE.md for a shipped milestone must be detected as a missing render");
+  assert.match(archiveMissing!.reason, /ARCHIVE\.md missing on disk/);
 });
