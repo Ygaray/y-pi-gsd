@@ -24,6 +24,7 @@ import {
   terminateRecoveryWaiver,
 } from "./task-recovery.js";
 import { ensurePendingSliceQ8 } from "./slice-companion-state.js";
+import { isShippedStatus } from "../../status-guards.js";
 
 export interface MilestoneCompletionHierarchyInput {
   milestoneId: string;
@@ -52,6 +53,18 @@ export interface MilestoneCompletionHierarchyResult {
   cancellationAuthorizations: MilestoneCompletionCancellationAuthorization[];
   waiverIds: string[];
   dispositionIds: string[];
+  shadow: LifecycleShadowRecord;
+}
+
+export interface MilestoneShipHierarchyInput {
+  milestoneId: string;
+}
+
+export interface MilestoneShipHierarchyResult {
+  milestoneLifecycleId: string;
+  shippedAt: string;
+  previousLegacyStatus: string;
+  legacyStatus: string;
   shadow: LifecycleShadowRecord;
 }
 
@@ -663,6 +676,74 @@ export function completeMilestoneHierarchy(
     cancellationAuthorizations,
     waiverIds,
     dispositionIds,
+    shadow,
+  };
+}
+
+/**
+ * Ship the final (D-03/D-04) leg of the milestone lifecycle, past `completed`:
+ * a compare-and-swap write of the shipped legacy literal, mirroring
+ * completeMilestoneHierarchy's CAS shape exactly. Deliberately does NOT call
+ * adoptOrTransitionLifecycle or write workflow_item_lifecycles at all — the
+ * canonical vocabulary has no "shipped" member and
+ * trg_workflow_lifecycle_transition would abort any such write. The three-way
+ * gate itself (certify/audit/Gate-2) is read by the caller, inside the same
+ * executeDomainOperation callback that invokes this writer — never here.
+ */
+export function shipMilestoneHierarchy(
+  context: Readonly<DomainOperationContext>,
+  input: MilestoneShipHierarchyInput,
+): MilestoneShipHierarchyResult {
+  if (requireActiveDomainOperationContext(context) !== "milestone.ship") {
+    throw new Error("Milestone ship requires a milestone.ship Domain Operation");
+  }
+  const milestoneId = requireText(input.milestoneId, "milestoneId");
+  const shippedAt = monotonicOperationTimestamp(context, milestoneId);
+  const milestone = loadMilestone(context, milestoneId);
+  requireMatchingShadow(milestone, `Milestone ${milestoneId}`);
+  if (isShippedStatus(milestone.legacyStatus)) {
+    throw new MilestoneLifecycleValidationError(
+      `Milestone ${milestoneId} is already shipped/archived`,
+    );
+  }
+  if (normalizeLegacyLifecycleStatus(milestone.legacyStatus) !== "completed") {
+    throw new MilestoneLifecycleValidationError(
+      `Milestone ${milestoneId} is not completed and cannot be shipped`,
+    );
+  }
+  if (milestone.lifecycleStatus !== "completed") {
+    throw new MilestoneLifecycleValidationError(
+      `Milestone ${milestoneId} canonical lifecycle is not completed`,
+    );
+  }
+
+  // completed_at is deliberately left untouched — the archive references the
+  // original completion timestamp, and overwriting it would destroy it.
+  const updated = getDb().prepare(`
+    UPDATE milestones
+    SET status = 'shipped'
+    WHERE id = :milestone_id AND status = :expected_status
+  `).run({
+    ":milestone_id": milestoneId,
+    ":expected_status": milestone.legacyStatus,
+  });
+  if (changedRows(updated) !== 1) {
+    throw new Error("Milestone ship must update exactly one compatibility Milestone");
+  }
+
+  const shadow = readLifecycleShadowComparison(context, {
+    itemKind: "milestone",
+    milestoneId,
+  });
+  if (shadow.kind !== "match" && shadow.kind !== "semantic_match_exact_delta") {
+    throw new Error("Milestone ship did not preserve canonical and legacy lifecycle state");
+  }
+
+  return {
+    milestoneLifecycleId: milestone.lifecycleId!,
+    shippedAt,
+    previousLegacyStatus: milestone.legacyStatus,
+    legacyStatus: "shipped",
     shadow,
   };
 }

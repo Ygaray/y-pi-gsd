@@ -12,7 +12,7 @@
 import { readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
+import { isClosedStatus, isHiddenFromRoadmap, isShippedStatus, toStatus } from "./status-guards.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
 import { dirname, join } from "node:path";
 import {
@@ -68,6 +68,10 @@ import {
   readMilestoneCompletionProjection,
   renderMilestoneSummaryMarkdown,
 } from "./milestone-summary-projection.js";
+import {
+  readMilestoneArchiveProjection,
+  renderMilestoneArchiveMarkdown,
+} from "./milestone-archive-projection.js";
 
 // ─── Compat marker invalidation ───────────────────────────────────────────
 // Every successful projection write pushes its (basePath, projectionPath,
@@ -908,6 +912,27 @@ export async function renderMilestoneSummary(
   return true;
 }
 
+/** Render the canonical Milestone archive from its immutable ship event. */
+export async function renderMilestoneArchive(
+  basePath: string,
+  milestoneId: string,
+): Promise<boolean> {
+  const milestone = getMilestone(milestoneId);
+  if (!milestone || !isShippedStatus(milestone.status)) return false;
+
+  const projection = readMilestoneArchiveProjection(milestoneId);
+  if (!projection) return false;
+
+  const absPath = targetMilestoneFile(basePath, milestoneId, "ARCHIVE", milestone.title);
+  const artifactPath = toArtifactPath(absPath, basePath);
+  const content = renderMilestoneArchiveMarkdown(milestoneId, projection);
+  await writeAndStore(absPath, artifactPath, content, {
+    artifact_type: "ARCHIVE",
+    milestone_id: milestoneId,
+  }, basePath);
+  return true;
+}
+
 /**
  * Slice-scoped artifacts (CONTEXT, RESEARCH, CONTINUE, etc.) must survive
  * layout migration. PLAN is normally regenerated from task rows, but a real
@@ -1155,6 +1180,14 @@ export async function renderAllFromDb(basePath: string): Promise<RenderAllResult
       else result.skipped++;
     } catch (err) {
       result.errors.push(`milestone summary ${milestone.id}: ${(err as Error).message}`);
+    }
+
+    try {
+      const ok = await renderMilestoneArchive(basePath, milestone.id);
+      if (ok) result.rendered++;
+      else result.skipped++;
+    } catch (err) {
+      result.errors.push(`milestone archive ${milestone.id}: ${(err as Error).message}`);
     }
 
     // Iterate slices (pre-fetched above)

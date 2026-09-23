@@ -42,6 +42,11 @@ const LEGACY_STATUS_MAP: Readonly<Record<string, CanonicalLifecycleStatus>> = {
   // #2202: operator closeout disposition — the Task closed by accepting a
   // discovered blocker; terminal in both vocabularies.
   "blocker-accepted": "blocker-accepted",
+  // Phase 15 (D-01): shipped/archived are new legacy-status literals, both
+  // synonyms of completed — additive, no CHECK/trigger rebuild. Distinctness
+  // from "completed" is preserved at the status-guards.ts Status seam, not here.
+  shipped: "completed",
+  archived: "completed",
 };
 
 const CANONICAL_STATUSES: ReadonlySet<string> = new Set([

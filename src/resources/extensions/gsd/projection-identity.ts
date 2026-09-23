@@ -12,11 +12,21 @@ export const MILESTONE_LIFECYCLE_PROJECTION_KIND = "milestone-lifecycle";
 export const SLICE_LIFECYCLE_PROJECTION_KIND = "slice-lifecycle";
 export const TASK_LIFECYCLE_PROJECTION_KIND = "task-lifecycle";
 export const MARKDOWN_PROJECTION_KIND = "markdown";
+// Phase 15 (D-04): the ship/archive projection's own brand-new key family and
+// kind — never appended onto the lifecycle/<id> key or its kind, so this key
+// chain's canonical kind can never be misclassified as markdown-kind by a
+// later writer (the exact #1661 wedge this module exists to prevent).
+export const MILESTONE_ARCHIVE_PROJECTION_KIND = "milestone-archive";
 
 export const LIFECYCLE_PROJECTION_KEY_PREFIX = "lifecycle/";
+export const ARCHIVE_PROJECTION_KEY_PREFIX = "archive/";
 
 export function isLifecycleProjectionKey(projectionKey: string): boolean {
   return projectionKey.startsWith(LIFECYCLE_PROJECTION_KEY_PREFIX);
+}
+
+export function isArchiveProjectionKey(projectionKey: string): boolean {
+  return projectionKey.startsWith(ARCHIVE_PROJECTION_KEY_PREFIX);
 }
 
 /**
@@ -38,6 +48,7 @@ export function lifecycleProjectionKind(projectionKey: string): string {
  * key universe (planning/*, legacy-import/*) is genuinely markdown-kind.
  */
 export function canonicalProjectionKind(projectionKey: string): string {
+  if (isArchiveProjectionKey(projectionKey)) return MILESTONE_ARCHIVE_PROJECTION_KIND;
   if (!isLifecycleProjectionKey(projectionKey)) return MARKDOWN_PROJECTION_KIND;
   return lifecycleProjectionKind(projectionKey);
 }

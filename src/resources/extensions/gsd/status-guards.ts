@@ -36,8 +36,27 @@ const CANONICAL_STATUS_SET: ReadonlySet<string> = new Set(CANONICAL_STATUSES);
  */
 export const RAW_CLOSED_STATUSES = [
   "complete", "done", "skipped", "closed", "cancelled", "blocker-accepted",
+  // Phase 15 (D-01/SC4): terminal ship/archive literals, appended (never
+  // inserted) since db/sql-constants.ts derives TERMINAL_STATUS_SQL from this
+  // array verbatim and in order.
+  "shipped", "archived",
 ] as const;
 const RAW_CLOSED_SET: ReadonlySet<string> = new Set(RAW_CLOSED_STATUSES);
+
+/**
+ * Legacy-status literals meaning a milestone has shipped/archived — a
+ * terminal state more-terminal than ordinary "completed" (ROADMAP SC4,
+ * Phase 15 D-01). Deliberately NOT added to `ALIAS_TO_CANONICAL`: aliasing
+ * would collapse them into the canonical `Status` value "complete" and erase
+ * the "distinct from completed" requirement.
+ */
+export const SHIPPED_STATUSES = ["shipped", "archived"] as const;
+const SHIPPED_SET: ReadonlySet<string> = new Set(SHIPPED_STATUSES);
+
+/** Returns true when a milestone's raw legacy status is shipped or archived. */
+export function isShippedStatus(status: string): boolean {
+  return SHIPPED_SET.has(status);
+}
 
 /** Free-form aliases mapped to their canonical Status on read. */
 const ALIAS_TO_CANONICAL: Readonly<Record<string, Status>> = {
