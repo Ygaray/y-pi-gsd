@@ -73,7 +73,8 @@ import {
   captureMilestoneExecutionSnapshot,
   isMilestoneExecutableInDb,
 } from './headless-milestone-readiness.js'
-import { recordHeadlessRunLifecycle } from './headless-run-log.js'
+import { recordHeadlessRunLifecycle, recordHeadlessRunPause, recordHeadlessRunResume } from './headless-run-log.js'
+import { classifyHeadlessPause, decideHeadlessResume, MAX_CONSECUTIVE_RESUMES } from './headless-pause-resume.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -547,6 +548,11 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   let completed = false
   let exitCode = 0
   let milestoneReady = false  // tracks "Milestone X ready." for auto-chaining
+  // DRIVER-02: the most recent blocked notice's raw message text, captured on
+  // whichever event road fires (the non-extension_ui_request branch or the
+  // extension_ui_request branch) so the pause-resume loop below can classify
+  // it after completion, regardless of which road the notification arrived on.
+  let lastBlockedNoticeMessage: string | null = null
   const recentEvents: TrackedEvent[] = []
   const interactiveToolCallIds = new Set<string>()
 
@@ -904,6 +910,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     if (eventObj.type !== 'extension_ui_request') {
       if (isBlockedNotification(eventObj)) {
         blocked = true
+        if (typeof eventObj.message === 'string') lastBlockedNoticeMessage = eventObj.message
       }
       if (isTerminalNotification(eventObj)) {
         completed = true
@@ -920,6 +927,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       // the LLM session begins and must still trip the blocked/terminal gates.
       if (isBlockedNotification(eventObj)) {
         blocked = true
+        if (typeof eventObj.message === 'string') lastBlockedNoticeMessage = eventObj.message
       }
 
       // Detect "Milestone X ready." for auto-mode chaining
@@ -1177,6 +1185,77 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
 
     if (exitCode === EXIT_SUCCESS || exitCode === EXIT_BLOCKED) {
       await autoCompletionPromise
+    }
+  }
+
+  // DRIVER-02: intercept the terminal blocked exit for `gsd headless auto`
+  // (and only that command -- quick tasks, new-milestone runs, and
+  // supervised sessions must keep today's behaviour exactly, which is why
+  // this whole branch is gated on `isAutoMode && headlessRunId`). Every
+  // condition here is a call into `headless-pause-resume.ts`/
+  // `headless-run-log.ts`; this loop holds only the state mutation and the
+  // re-prompt.
+  if (isAutoMode && headlessRunId) {
+    let resumeCount = 0
+    while (completed && blocked && exitCode === EXIT_BLOCKED) {
+      const classified = classifyHeadlessPause(lastBlockedNoticeMessage)
+      // Persist the resumable state BEFORE any decision -- ROADMAP SC3: a
+      // pause is durably accounted for whether or not it turns out to be
+      // resumable.
+      const pauseResult = recordHeadlessRunPause(process.cwd(), headlessRunId, {
+        kind: classified.kind,
+        reason: classified.reason,
+        milestoneId: classified.milestoneId,
+        sliceId: classified.sliceId,
+      })
+      const decision = decideHeadlessResume({
+        blocked,
+        exitCode,
+        pause: classified,
+        unresolvedAtPause: pauseResult.unresolvedAtPause,
+        resumeCount,
+        max: MAX_CONSECUTIVE_RESUMES,
+        basePath: process.cwd(),
+      })
+      if (!options.json) {
+        process.stderr.write(`[headless] Paused (${classified.kind}): ${decision.reason}\n`)
+      }
+      if (!decision.resume) {
+        // exitCode stays EXIT_BLOCKED -- the outer runHeadless while loop
+        // (unchanged) exits 10 exactly as it does today.
+        break
+      }
+
+      recordHeadlessRunResume(process.cwd(), headlessRunId)
+      resumeCount += 1
+      if (!options.json) {
+        process.stderr.write('[headless] Resuming — re-entering /gsd auto on the same session...\n')
+      }
+
+      // Reset completion state and re-enter, mirroring the auto-chaining
+      // block's exact reset shape above.
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      completed = false
+      blocked = false
+      lastBlockedNoticeMessage = null
+      isMultiTurnCommand = true
+      effectiveIdleTimeout = 0
+      resetIdleTimer()
+      const resumeCompletionPromise = new Promise<void>((resolve) => {
+        resolveCompletion = resolve
+      })
+
+      try {
+        await client.prompt('/gsd auto')
+      } catch (err) {
+        process.stderr.write(`[headless] Error: Failed to resume auto-mode: ${err instanceof Error ? err.message : String(err)}\n`)
+        exitCode = EXIT_ERROR
+        break
+      }
+
+      if (exitCode === EXIT_SUCCESS || exitCode === EXIT_BLOCKED) {
+        await resumeCompletionPromise
+      }
     }
   }
 
