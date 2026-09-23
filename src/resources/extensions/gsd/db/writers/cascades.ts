@@ -196,7 +196,7 @@ export function skipSliceCascade(milestoneId: string, sliceId: string): SkipSlic
  * an interruption can no longer leave some tasks reset and others not.
  */
 export function resetSliceCascade(milestoneId: string, sliceId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
+  requireDb();
   transaction(() => {
     getDbOrNull()!.prepare(
       `UPDATE tasks SET status = 'pending', completed_at = NULL
