@@ -97,6 +97,16 @@ export function classifyHeadlessPause(noticeMessage: string | null | undefined):
  * clause refuses a resume that changes nothing on ONE cycle, this count
  * refuses a sequence where something changes on EVERY cycle but never
  * enough to finish.
+ *
+ * WR-03 (review of 16-driver-ergonomics): the counter this bound is
+ * compared against (`resumeCount`, `src/headless.ts`) lives ONLY in that
+ * process's memory for the lifetime of the current `headlessRunId` -- it is
+ * not persisted, and is NOT reconstructable across a restart because
+ * `headlessRunId` itself is minted fresh (`randomUUID()`) on every
+ * `runHeadlessOnce` invocation, including an operator's manual
+ * kill-and-restart. This is a deliberate, documented per-process safety
+ * net, not a durable cross-invocation quota: a manual restart mid-pause-
+ * cycle resets the budget to the full `MAX_CONSECUTIVE_RESUMES`.
  */
 export const MAX_CONSECUTIVE_RESUMES = 5
 

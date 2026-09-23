@@ -1214,6 +1214,21 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   // `headless-run-log.ts`; this loop holds only the state mutation and the
   // re-prompt.
   if (isAutoMode && headlessRunId) {
+    // WR-03 (review of 16-driver-ergonomics): `resumeCount` is a per-PROCESS
+    // safety net only -- it is reconstructable from the run-log's
+    // `resumed` transitions for THIS `headlessRunId`, but `headlessRunId`
+    // itself is a fresh `randomUUID()` on every `runHeadlessOnce`
+    // invocation (a normal re-run, `runHeadless`'s own `maxRestarts`
+    // crash-restart loop, or an operator's manual kill-and-restart all
+    // mint a new one) -- so deriving this count from the DB "for the
+    // current runId" would always read back exactly what this in-memory
+    // counter already holds; it cannot see resumes recorded under a prior
+    // runId to restore a partially-spent budget across a restart boundary.
+    // If an operator kills and manually restarts `gsd headless auto`
+    // mid-pause-cycle, the new process's budget starts fresh at
+    // `MAX_CONSECUTIVE_RESUMES`, independent of how many consecutive
+    // resumes the prior process already spent -- a deliberate, documented
+    // limitation of this bound, not an oversight.
     let resumeCount = 0
     while (completed && blocked && exitCode === EXIT_BLOCKED) {
       const classified = classifyHeadlessPause(lastBlockedNoticeMessage)
