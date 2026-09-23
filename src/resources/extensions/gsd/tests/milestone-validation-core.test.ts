@@ -463,6 +463,13 @@ test("one validation command atomically supersedes criteria removed from the pla
   );
 
   assert.equal(second.status, "committed");
+  // WR-02 (40d8b6cf, .planning/phases/14-self-fixing-certify-independent-audit/
+  // 14-REVIEW-FIX.md): "browser-uat" is a bare/legacy-style criterion key with
+  // no explicit namespace prefix, so belongsToOwnVerdictNamespace treats it as
+  // NOT explicitly owned by this caller's own namespace. It is therefore no
+  // longer silently demoted to required:false when it's carried
+  // forward/superseded across removal from the plan — it stays required:1,
+  // matching validate-milestone's own bare-keyed criteria semantics.
   assert.deepEqual(db().prepare(`
     SELECT criterion_key, required
     FROM workflow_acceptance_criteria criterion
@@ -472,14 +479,20 @@ test("one validation command atomically supersedes criteria removed from the pla
     )
     ORDER BY criterion_key
   `).all(), [
-    { criterion_key: "browser-uat", required: 0 },
+    { criterion_key: "browser-uat", required: 1 },
     { criterion_key: "focused-tests", required: 1 },
   ]);
+  // WR-02 cascading consequence: "browser-uat" is no longer demoted (no new
+  // required:false row is written for it — see above), and "focused-tests"
+  // is byte-identical between criteria-1 and criteria-2 (ensureTechnicalCriterion
+  // treats it as unchanged and returns the existing row without inserting).
+  // So this second validateMilestone call writes zero new acceptance-criteria
+  // rows under its own operation_id.
   assert.equal(db().prepare(`
     SELECT COUNT(*) AS count
     FROM workflow_acceptance_criteria
     WHERE operation_id = :operation_id
-  `).get({ ":operation_id": second.operationId })?.["count"], 1);
+  `).get({ ":operation_id": second.operationId })?.["count"], 0);
 });
 
 test("one validation command rolls back all rows when evidence persistence fails", () => {

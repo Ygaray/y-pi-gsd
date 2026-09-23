@@ -22,6 +22,7 @@ import type { GateId } from "../types.ts";
 const ALL_GATE_IDS: readonly GateId[] = [
   "Q3", "Q4", "Q5", "Q6", "Q7", "Q8",
   "MV01", "MV02", "MV03", "MV04",
+  "CERT01", "CERT02", "AUD01", "AUD02",
 ];
 
 const ALL_OWNER_TURNS: readonly OwnerTurn[] = [
@@ -29,6 +30,8 @@ const ALL_OWNER_TURNS: readonly OwnerTurn[] = [
   "execute-task",
   "complete-slice",
   "validate-milestone",
+  "certify-milestone",
+  "audit-milestone",
 ];
 
 describe("gate-registry", () => {
