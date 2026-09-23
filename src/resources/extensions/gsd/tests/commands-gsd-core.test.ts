@@ -644,9 +644,15 @@ describe("Batch 4 handlers dispatch", () => {
     assert.equal(pi.sent[0].customType, "gsd-ultraplan-phase");
   });
   test("handleAutonomous converge flag", async () => {
-    const pi = createMockPi(); const ctx = createMockCtx();
-    await handleAutonomous("--converge", ctx as any, pi as any);
-    assert.match(pi.sent[0].content, /`--converge` — ON/);
+    // Sandboxed cwd (#16-03): handleAutonomous now resolves the active
+    // milestone and may touch the run-log DB before dispatching -- running
+    // this against the real process.cwd() would reach into whatever real
+    // project happens to be checked out there.
+    await withTempCommandCwd(async (ctx, _base) => {
+      const pi = createMockPi();
+      await handleAutonomous("--converge", ctx as any, pi as any);
+      assert.match(pi.sent[0].content, /`--converge` — ON/);
+    });
   });
   test("handlePauseWork report flag", async () => {
     const pi = createMockPi(); const ctx = createMockCtx();

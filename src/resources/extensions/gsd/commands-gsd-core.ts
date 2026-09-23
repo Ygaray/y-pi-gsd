@@ -10,11 +10,31 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { loadPrompt } from "./prompt-loader.js";
 import { currentDirectoryRoot, GSDNoProjectError, projectRoot, withCommandCwd } from "./commands/context.js";
 import { getUnmergedMilestoneBlockMessageForBase } from "./unmerged-milestone-guard.js";
 import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
+import { getActiveMilestoneId } from "./state.js";
+import {
+  type ActiveMilestoneRunDetection,
+  detectActiveMilestoneRun,
+} from "./session-lock.js";
+import { recordMilestoneRunLifecycle } from "./milestone-run-log-domain-operation.js";
+import { getActiveMilestoneRun, renderMilestoneRunLog } from "./run-log-projection.js";
+import { internalExecutionInvocation } from "./execution-invocation.js";
+import {
+  executeDomainOperation,
+  MILESTONE_RUN_LOG_OPERATION_TYPE,
+  readDomainOperationFence,
+  transitionMilestoneRunLogRow,
+} from "./gsd-db.js";
+import {
+  type AutonomousScope,
+  describeAutonomousScope,
+  parseAutonomousScopeFlags,
+} from "./autonomous-scope.js";
 
 /**
  * Catalog entries for commands IMPLEMENTED natively in this module.
@@ -814,28 +834,130 @@ export async function handleUltraplanPhase(args: string, ctx: ExtensionCommandCo
 }
 
 /**
- * Parse autonomous scope flags (--from/--to/--only). Exported for unit testing.
+ * Parse autonomous scope flags (--from/--to/--only) into today's exact prose.
+ * Exported for unit testing. Now a projection of the structured
+ * `AutonomousScope` value (`autonomous-scope.js`) rather than the source of
+ * truth -- `describeAutonomousScope(parseAutonomousScopeFlags(args))` keeps
+ * this function's exported name/signature and output string unchanged for
+ * existing callers (the `gsd-autonomous` prompt template's `scope` variable,
+ * this file's own unit tests) while the structured value now backs
+ * mechanical enforcement (D-02, ROADMAP SC2).
  */
 export function parseAutonomousScope(args: string): string {
-  const from = args.match(/--from\s+(\d+)/);
-  const to = args.match(/--to\s+(\d+)/);
-  const only = args.match(/--only\s+(\d+)/);
-  if (only) return `Only slice/milestone ${only[1]}`;
-  const parts: string[] = [];
-  if (from) parts.push(`from ${from[1]}`);
-  if (to) parts.push(`to ${to[1]}`);
-  return parts.length ? `All remaining work ${parts.join(" ")}` : "All remaining work on the active milestone";
+  return describeAutonomousScope(parseAutonomousScopeFlags(args));
+}
+
+/**
+ * Transition a stale (dead-owner) `running` run-log row to `failed` before a
+ * fresh run is recorded for the same milestone -- otherwise the fresh
+ * `running` INSERT would violate `idx_milestone_run_log_one_active`
+ * (T-16-14). A crash is the ONLY reason this path fires: `detection.reason`
+ * is `stale-lock-dead-owner` precisely when a `running` row's lock owner is
+ * no longer alive (16-03 Task 1's two-signal detector).
+ */
+function failStaleMilestoneRunLogRow(milestoneId: string, ownerPid: number | undefined): void {
+  const stale = getActiveMilestoneRun(milestoneId);
+  if (!stale) return;
+  const idempotencyKey = `autonomous-stale-cleanup:${stale.entryId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: MILESTONE_RUN_LOG_OPERATION_TYPE,
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: { entryId: stale.entryId, status: "failed" },
+  }, (context) => {
+    transitionMilestoneRunLogRow(context, {
+      entryId: stale.entryId,
+      status: "failed",
+      resumeFrom: null,
+      pauseKind: null,
+      reason: `stale lock: recorded owner PID ${ownerPid ?? "unknown"} is not alive`,
+    });
+    return {
+      events: [{
+        eventType: "milestone.run-log.recorded",
+        entityType: "milestone",
+        entityId: milestoneId,
+        payload: { entryId: stale.entryId, status: "failed" },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `run-log/${milestoneId}`.toLowerCase(),
+        projectionKind: "milestone-run-log",
+        rendererVersion: "1",
+      }],
+    };
+  });
+}
+
+/**
+ * Record the durable `--from N` pointer (D-02) as a `running` row before
+ * dispatching the prompt. Never throws or blocks dispatch -- a run-log
+ * write failure is a diagnostics gap, not a reason to refuse to run,
+ * mirroring `src/headless-run-log.ts`'s never-throws host wrapper
+ * philosophy.
+ */
+function startMilestoneRunLogEntry(
+  basePath: string,
+  milestoneId: string,
+  scope: AutonomousScope,
+  detection: ActiveMilestoneRunDetection,
+): void {
+  try {
+    if (detection.reason === "stale-lock-dead-owner") {
+      failStaleMilestoneRunLogRow(milestoneId, detection.pid);
+    }
+    const runId = randomUUID();
+    recordMilestoneRunLifecycle({
+      invocation: internalExecutionInvocation(`autonomous-start:${milestoneId}:${runId}`),
+      milestoneId,
+      runId,
+      attempt: 1,
+      status: "running",
+      resumeFrom: scope.from,
+    });
+    renderMilestoneRunLog(basePath);
+  } catch {
+    // Non-fatal: see docstring above.
+  }
 }
 
 /** /gsd autonomous [--from N] [--to N] [--only N] [--interactive] [--converge] */
 export async function handleAutonomous(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  let scope: AutonomousScope;
+  try {
+    scope = parseAutonomousScopeFlags(args);
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    return;
+  }
+
+  const basePath = currentDirectoryRoot();
+  const milestoneId = await getActiveMilestoneId(basePath);
+
+  if (milestoneId) {
+    const detection = detectActiveMilestoneRun(basePath, milestoneId);
+    if (detection.active) {
+      ctx.ui.notify(
+        `Milestone ${milestoneId} already has a live autonomous run (PID ${detection.pid}). `
+          + "Run `/gsd stop` first, or wait for it to finish before starting another.",
+        "warning",
+      );
+      return;
+    }
+    startMilestoneRunLogEntry(basePath, milestoneId, scope, detection);
+  }
+
   dispatchPrompt(
     {
       prompt: "autonomous",
       customType: "gsd-autonomous",
       verb: "Autonomous",
       vars: {
-        scope: parseAutonomousScope(args),
+        scope: describeAutonomousScope(scope),
         interactiveFlag: flagPhrase(/(?:^|\s)--interactive(?=\s|$)/.test(args)),
         convergeFlag: flagPhrase(/(?:^|\s)--converge(?=\s|$)/.test(args)),
       },
