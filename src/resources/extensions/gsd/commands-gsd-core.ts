@@ -34,6 +34,7 @@ import {
   parseAutonomousScopeFlags,
   resolveEffectiveAutonomousScope,
 } from "./autonomous-scope.js";
+import { autoSession } from "./auto-runtime-state.js";
 
 /**
  * Catalog entries for commands IMPLEMENTED natively in this module.
@@ -948,6 +949,15 @@ export async function handleAutonomous(args: string, ctx: ExtensionCommandContex
 
     startMilestoneRunLogEntry(basePath, milestoneId, scope, detection);
   }
+
+  // Mechanical slice-scope enforcement (ROADMAP SC2 fix spec): stash the
+  // effective scope on the shared AutoSession singleton so the per-slice
+  // dispatch gate in decideOrchestratorDispatch (auto/orchestrator.ts) can
+  // consult it once the model invokes `/gsd auto` -- that command parses no
+  // scope flags of its own, so this in-process handoff (plus the durable
+  // resume_from fallback for a restarted process) is the only channel
+  // `--from`/`--to`/`--only` have to reach the mechanical loop.
+  autoSession.autonomousScope = scope;
 
   dispatchPrompt(
     {

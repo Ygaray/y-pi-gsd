@@ -61,6 +61,13 @@ import { deriveState } from "../state.js";
 import { isSkippedForDispatch } from "../status-guards.js";
 import { getErrorMessage } from "../error-utils.js";
 import { parseUnitId } from "../unit-id.js";
+import { getSlice } from "../gsd-db.js";
+import { getActiveMilestoneRun } from "../run-log-projection.js";
+import {
+  describeAutonomousScope,
+  isUnitInAutonomousScope,
+  resolveEffectiveAutonomousScope,
+} from "../autonomous-scope.js";
 import { logWarning } from "../workflow-logger.js";
 import { normalizeRealPath } from "../paths.js";
 import { preserveProjectionChanges } from "../projection-worker.js";
@@ -392,6 +399,40 @@ export async function decideOrchestratorDispatch(
     }
     return { kind: "skipped", reason: alreadyClosedReason, code: "already-closed" };
   }
+
+  // D-02 mechanical slice-scope enforcement (ROADMAP SC2 fix spec): this is
+  // the per-slice dispatch point of the `/gsd auto` loop -- the earliest
+  // place a slice-scoped unit is confirmed about to be dispatched. A
+  // --from/--to/--only boundary must block dispatch IN CODE here, not merely
+  // be described in the prompt the model receives (`--only` already gates
+  // the milestone's own ordinal in handleAutonomous; this is the matching
+  // gate one level down, at the slice). `parseUnitId` yields no `slice`
+  // component for a project/milestone-level unitId (a bare "mid"), so those
+  // dispatches are unaffected -- mirroring how `--from`/`--to` are NOT
+  // checked against the milestone's own ordinal in handleAutonomous.
+  const targetSliceId = parseUnitId(action.unitId).slice;
+  if (targetSliceId) {
+    // Prefer the scope handleAutonomous stashed on this session for the run
+    // in flight (covers --from/--to/--only within the same process); fall
+    // back to the durable resume_from pointer for a process that restarted
+    // without going through handleAutonomous again (only `from` survives a
+    // restart today -- `to`/`only` are session-scoped, matching D-02).
+    const effectiveScope = activeSession?.autonomousScope
+      ?? resolveEffectiveAutonomousScope("", getActiveMilestoneRun(dispatchMid));
+    const targetSliceOrdinal = getSlice(dispatchMid, targetSliceId)?.sequence ?? null;
+    if (targetSliceOrdinal !== null && !isUnitInAutonomousScope(targetSliceOrdinal, effectiveScope)) {
+      if (session) session.pendingOrchestrationDispatch = null;
+      return {
+        kind: "blocked",
+        reason:
+          `Slice ${targetSliceId} (unit ${targetSliceOrdinal}) of ${dispatchMid} is outside the requested ` +
+          `autonomous scope (${describeAutonomousScope(effectiveScope)}) -- stopping dispatch.`,
+        action: "stop",
+        guardId: "autonomous-scope-slice",
+      };
+    }
+  }
+
   if (session) {
     const pending: PendingOrchestrationDispatch = {
       unitType: action.unitType,

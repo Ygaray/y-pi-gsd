@@ -31,6 +31,7 @@ import type { MilestoneScope } from "../workspace.js";
 import type { RootDirtySnapshot } from "../root-write-leak-guard.js";
 import type { MilestoneSettlementOutcome } from "../milestone-settlement.js";
 import type { ToolSurfaceSnapshot } from "../tool-surface-snapshot.js";
+import type { AutonomousScope } from "../autonomous-scope.js";
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
 
@@ -162,6 +163,18 @@ export class AutoSession {
   currentTurnId: string | null = null;
   currentUnitRouting: UnitRouting | null = null;
   currentMilestoneId: string | null = null;
+  /**
+   * The effective `AutonomousScope` (--from/--to/--only) computed by
+   * `handleAutonomous` for the run currently in flight, set on this
+   * singleton so the mechanical per-slice dispatch gate in
+   * `decideOrchestratorDispatch` (auto/orchestrator.ts) can consult it
+   * without re-parsing CLI args it never receives (ROADMAP SC2 fix spec).
+   * Null within the same process means "no explicit scope was set this
+   * session" -- the dispatch gate falls back to the durable
+   * `milestone_run_log.resume_from` pointer in that case, which is what
+   * survives an actual process restart (only `from` is persisted today).
+   */
+  autonomousScope: AutonomousScope | null = null;
   readonly sourceObservations = new SourceObservationStore();
 
   /** Live tool-surface snapshot for dashboard / runtime telemetry while auto is active. */
@@ -400,6 +413,7 @@ export class AutoSession {
     this.currentTurnId = null;
     this.currentUnitRouting = null;
     this.currentMilestoneId = null;
+    this.autonomousScope = null;
 
     // Model
     this.autoModeStartModel = null;
@@ -482,6 +496,7 @@ export class AutoSession {
       activeEngineId: this.activeEngineId,
       activeRunDir: this.activeRunDir,
       currentMilestoneId: this.currentMilestoneId,
+      autonomousScope: this.autonomousScope,
       currentUnit: this.currentUnit,
       orchestrationPhase: orchestrationStatus?.phase,
       orchestrationTransitionCount: orchestrationStatus?.transitionCount,
