@@ -174,10 +174,9 @@ test("Test 7: a milestone id with a path separator, a leading dot, or a null byt
   const gsdDir = "/tmp/gsd-fixture-not-used";
   const badIds = ["../escape", "a/b", "a\\b", ".hidden", "\0null"];
   for (const badId of badIds) {
-    assert.throws(() => effectiveLockFile(badId), undefined, `effectiveLockFile should reject ${JSON.stringify(badId)}`);
+    assert.throws(() => effectiveLockFile(badId), `effectiveLockFile should reject ${JSON.stringify(badId)}`);
     assert.throws(
       () => effectiveLockTarget(gsdDir, badId),
-      undefined,
       `effectiveLockTarget should reject ${JSON.stringify(badId)}`,
     );
   }

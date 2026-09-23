@@ -23,6 +23,7 @@ import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { markWorkerStoppingByPid } from "./db/auto-workers.js";
 import { logWarning } from "./workflow-logger.js";
+import { getActiveMilestoneRun } from "./run-log-projection.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -103,13 +104,60 @@ let _lockAcquiredAt: number = 0;
 const LOCK_FILE = "auto.lock";
 
 /**
+ * Named error for a milestone id that cannot safely become a filename
+ * (T-16-13): a path separator, a leading dot, or a null byte would let a
+ * caller-supplied id escape its intended `.gsd/parallel/<id>/` directory.
+ * Only applies to the EXPLICIT milestone-id parameter below -- the
+ * environment-sourced value (`GSD_MILESTONE_LOCK`) is unchanged and remains
+ * reachable only from the internal parallel-worker launcher.
+ */
+export class InvalidMilestoneLockIdError extends Error {
+  constructor(milestoneId: string) {
+    super(`Invalid milestone id for session lock: ${JSON.stringify(milestoneId)}`);
+    this.name = "InvalidMilestoneLockIdError";
+  }
+}
+
+const SAFE_MILESTONE_LOCK_ID = /^[A-Za-z0-9_-]+$/;
+
+function validateMilestoneLockId(milestoneId: string): string {
+  if (
+    milestoneId.length === 0
+    || milestoneId.includes("/")
+    || milestoneId.includes("\\")
+    || milestoneId.startsWith(".")
+    || milestoneId.includes("\0")
+    || !SAFE_MILESTONE_LOCK_ID.test(milestoneId)
+  ) {
+    throw new InvalidMilestoneLockIdError(milestoneId);
+  }
+  return milestoneId;
+}
+
+/**
+ * Today's sole source of a milestone-scoped lock id: the parallel-worker
+ * launcher sets both env vars together. Extracted unchanged from
+ * `effectiveLockFile`/`effectiveLockTarget` so the no-argument call keeps
+ * producing byte-identical results (Task 1, Test 5).
+ */
+function resolveEnvMilestoneLockId(): string | null {
+  return process.env.GSD_PARALLEL_WORKER ? (process.env.GSD_MILESTONE_LOCK ?? null) : null;
+}
+
+/**
  * Derive the effective lock file name for the current process.
  * In parallel worker mode (GSD_PARALLEL_WORKER + GSD_MILESTONE_LOCK),
  * each worker uses a per-milestone lock file (`auto-<milestoneId>.lock`)
  * to avoid contending on the shared `.gsd/auto.lock` (#2184).
+ *
+ * An explicit `milestoneId` (validated, T-16-13) takes precedence over the
+ * environment when supplied -- this is the generalisation a plain `--from
+ * N` invocation uses to acquire a milestone-scoped lock without setting
+ * `GSD_PARALLEL_WORKER` (D-02). Omitting the argument reproduces today's
+ * environment-only behavior exactly.
  */
-export function effectiveLockFile(): string {
-  const mid = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_MILESTONE_LOCK : null;
+export function effectiveLockFile(milestoneId?: string): string {
+  const mid = milestoneId !== undefined ? validateMilestoneLockId(milestoneId) : resolveEnvMilestoneLockId();
   return mid ? `auto-${mid}.lock` : LOCK_FILE;
 }
 
@@ -117,13 +165,21 @@ export function effectiveLockFile(): string {
  * Derive the OS-level lock target directory for the current process.
  * In parallel worker mode, uses `.gsd/parallel/<milestoneId>/` instead of
  * `.gsd/` so workers don't contend on the same proper-lockfile directory (#2184).
+ *
+ * Same explicit-id generalisation as `effectiveLockFile` above.
  */
-export function effectiveLockTarget(gsdDir: string): string {
-  const mid = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_MILESTONE_LOCK : null;
+export function effectiveLockTarget(gsdDir: string, milestoneId?: string): string {
+  const mid = milestoneId !== undefined ? validateMilestoneLockId(milestoneId) : resolveEnvMilestoneLockId();
   return mid ? join(gsdDir, "parallel", mid) : gsdDir;
 }
 
-function lockPath(basePath: string): string {
+function lockPath(basePath: string, explicitMilestoneId?: string): string {
+  // An explicit milestone id always resolves fresh -- it is asking about a
+  // SPECIFIC milestone's lock file, which may not be the one this process
+  // itself is holding (the snapshot below is only valid for our own lock).
+  if (explicitMilestoneId !== undefined) {
+    return join(gsdRoot(basePath), effectiveLockFile(explicitMilestoneId));
+  }
   // If we have a snapshotted path from acquisition, use it for consistency
   if (_snapshotLockPath) return _snapshotLockPath;
   return join(gsdRoot(basePath), effectiveLockFile());
@@ -753,9 +809,14 @@ export function releaseSessionLock(basePath: string): void {
 /**
  * Check if a session lock exists and return its data (for crash recovery).
  * Does NOT acquire the lock.
+ *
+ * An explicit `milestoneId` reads that milestone's own scoped lock file
+ * (`auto-<milestoneId>.lock`) rather than whichever lock this process
+ * itself may already hold -- the shape `detectActiveMilestoneRun` needs to
+ * check A SPECIFIC milestone's lock, not "am I still holding my own lock."
  */
-export function readSessionLockData(basePath: string): SessionLockData | null {
-  return readExistingLockData(lockPath(basePath));
+export function readSessionLockData(basePath: string, milestoneId?: string): SessionLockData | null {
+  return readExistingLockData(lockPath(basePath, milestoneId));
 }
 
 /**
@@ -763,6 +824,79 @@ export function readSessionLockData(basePath: string): SessionLockData | null {
  */
 export function isSessionLockProcessAlive(data: SessionLockData): boolean {
   return isPidAlive(data.pid);
+}
+
+// ─── Milestone-Scoped Active-Run Detection (DRIVER-01, ROADMAP SC2) ────────
+
+export type ActiveMilestoneRunReason =
+  | "no-running-run-log-row"
+  | "no-session-lock"
+  | "stale-lock-dead-owner"
+  | "run-log-query-failed"
+  | "session-lock-read-failed"
+  | "liveness-check-failed"
+  | "detection-failed";
+
+export interface ActiveMilestoneRunDetection {
+  active: boolean;
+  pid?: number;
+  reason?: ActiveMilestoneRunReason;
+  detail?: string;
+}
+
+function describeCaughtError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Two-signal active-run detector (T-16-02, ROADMAP SC2): a milestone run is
+ * reported active ONLY when BOTH a `running` `milestone_run_log` row exists
+ * AND the milestone's own session lock names a PID that is still alive.
+ * Either signal alone is insufficient -- a `running` row with a dead lock
+ * owner is a crash, not an active run (a lock file's mere existence is
+ * never sufficient proof, RESEARCH Anti-Pattern 2 / ASVS V3); a live lock
+ * with no `running` row is a lock held for some other purpose.
+ *
+ * Reuses the EXISTING `getActiveMilestoneRun` / `readSessionLockData` /
+ * `isSessionLockProcessAlive` helpers -- no second liveness check, no
+ * direct lock-file read. Never throws: every failure path (missing `.gsd`
+ * directory, unreadable lock file, malformed lock JSON, a run-log query
+ * failure) returns a not-active result with a named reason, mirroring
+ * `isMilestoneExecutableInDb`'s documented never-throws contract
+ * (`headless-milestone-readiness.ts:194-204`) -- a detector that throws
+ * turns "I could not tell" into a crash at exactly the moment an
+ * unattended run is starting.
+ */
+export function detectActiveMilestoneRun(basePath: string, milestoneId: string): ActiveMilestoneRunDetection {
+  try {
+    let runRow: ReturnType<typeof getActiveMilestoneRun>;
+    try {
+      runRow = getActiveMilestoneRun(milestoneId);
+    } catch (error) {
+      return { active: false, reason: "run-log-query-failed", detail: describeCaughtError(error) };
+    }
+    if (!runRow) return { active: false, reason: "no-running-run-log-row" };
+
+    let lockData: SessionLockData | null;
+    try {
+      lockData = readSessionLockData(basePath, milestoneId);
+    } catch (error) {
+      return { active: false, reason: "session-lock-read-failed", detail: describeCaughtError(error) };
+    }
+    if (!lockData) return { active: false, reason: "no-session-lock" };
+
+    let alive: boolean;
+    try {
+      alive = isSessionLockProcessAlive(lockData);
+    } catch (error) {
+      return { active: false, reason: "liveness-check-failed", detail: describeCaughtError(error) };
+    }
+    if (!alive) return { active: false, reason: "stale-lock-dead-owner", pid: lockData.pid };
+
+    return { active: true, pid: lockData.pid };
+  } catch (error) {
+    return { active: false, reason: "detection-failed", detail: describeCaughtError(error) };
+  }
 }
 
 /**
