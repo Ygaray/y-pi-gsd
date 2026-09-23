@@ -820,9 +820,31 @@ export function releaseSessionLock(basePath: string): void {
  * (`auto-<milestoneId>.lock`) rather than whichever lock this process
  * itself may already hold -- the shape `detectActiveMilestoneRun` needs to
  * check A SPECIFIC milestone's lock, not "am I still holding my own lock."
+ *
+ * Acquire/detect lock-path agreement (16-driver-ergonomics gap-closure,
+ * SELF-UAT SC2b): `acquireSessionLock(basePath)` -- the function EVERY real
+ * production call site uses (`auto-start.ts:1068`, `auto-start.ts:1234`,
+ * `auto.ts:2957`) -- never passes an explicit `milestoneId`, so in the
+ * default non-parallel-worker case it always writes the GENERIC
+ * `.gsd/auto.lock` (env-only resolution, `resolveEnvMilestoneLockId`).
+ * A caller here that DOES pass an explicit `milestoneId` would otherwise
+ * only ever look at `auto-<milestoneId>.lock`, a file real acquisition
+ * never creates outside `GSD_PARALLEL_WORKER` mode -- the mismatch that let
+ * a genuinely-active single-milestone run go undetected. When the
+ * milestone-scoped file doesn't exist, fall back to the generic lock file
+ * so detection agrees with what acquisition actually wrote. This cannot
+ * shadow a genuine `GSD_PARALLEL_WORKER` lock: a parallel worker's own env
+ * always resolves its acquisition to `auto-<milestoneId>.lock` (matched in
+ * step 1, never reaching this fallback), and it never writes the generic
+ * file at all.
  */
 export function readSessionLockData(basePath: string, milestoneId?: string): SessionLockData | null {
-  return readExistingLockData(lockPath(basePath, milestoneId));
+  if (milestoneId === undefined) {
+    return readExistingLockData(lockPath(basePath));
+  }
+  const scoped = readExistingLockData(lockPath(basePath, milestoneId));
+  if (scoped) return scoped;
+  return readExistingLockData(join(gsdRoot(basePath), LOCK_FILE));
 }
 
 /**
