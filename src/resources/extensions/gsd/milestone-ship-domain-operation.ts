@@ -11,8 +11,8 @@ import {
 import { getDb } from "./db/engine.js";
 import { getActiveRequirements, getMilestone, getMilestoneSlices } from "./db/queries.js";
 import {
+  describeMilestoneShipBlockers,
   readMilestoneShipAuthorization,
-  type MilestoneShipBlocker,
 } from "./db/milestone-ship-readiness.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import {
@@ -116,10 +116,6 @@ function operationRequest(
   };
 }
 
-function blockerSummary(blockers: MilestoneShipBlocker[]): string {
-  return blockers.map((blocker) => blocker.kind).join(", ");
-}
-
 function captureMilestoneArchiveSnapshot(
   milestoneId: string,
   capturedAt: string,
@@ -202,7 +198,7 @@ export function shipMilestone(input: ShipMilestoneInput): ShipMilestoneReceipt {
       });
       if (!authorization.authorized) {
         throw new MilestoneLifecycleValidationError(
-          `Milestone ${milestoneId} is not authorized to ship (${blockerSummary(authorization.blockers)})`,
+          `Milestone ${milestoneId} is not authorized to ship (${describeMilestoneShipBlockers(authorization.blockers)})`,
         );
       }
       const result = shipMilestoneHierarchy(context, { milestoneId });
