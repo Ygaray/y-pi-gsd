@@ -15,6 +15,7 @@
 import { existsSync, mkdirSync, writeFileSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { ChildProcess } from 'node:child_process'
 
 import { RpcClient } from '@gsd/agent-modes/modes/rpc/rpc-client.js'
@@ -72,6 +73,7 @@ import {
   captureMilestoneExecutionSnapshot,
   isMilestoneExecutableInDb,
 } from './headless-milestone-readiness.js'
+import { recordHeadlessRunLifecycle } from './headless-run-log.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -433,6 +435,20 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     process.stderr.write('[headless] Error: No .gsd/ directory found in current directory.\n')
     process.stderr.write("[headless] Run 'gsd' interactively first to initialize a project.\n")
     process.exit(1)
+  }
+
+  // DRIVER-01 tracer: record ONE lifecycle transition ("a headless auto run
+  // started") through the DB-authoritative run-log. `runId` is generated
+  // once and held for the life of this run (16-05 uses it for later
+  // transitions). Never throws (recordHeadlessRunLifecycle's contract) --
+  // a run-log write failure must never block the actual auto run.
+  const headlessRunId = isAutoMode ? randomUUID() : undefined
+  if (isAutoMode && headlessRunId) {
+    recordHeadlessRunLifecycle(process.cwd(), {
+      runId: headlessRunId,
+      attempt: 1,
+      status: 'running',
+    })
   }
 
   // Query: read-only state snapshot, no RPC child needed

@@ -56,7 +56,7 @@ function milestoneArtifactExistsInResolvedDir(
  * milestones (queued, no context, zero slices) so a later planned milestone is
  * treated as active instead of an older orphan shell (#1295).
  */
-function findDerivedActiveMilestone(basePath: string): MilestoneRow | null {
+export function findDerivedActiveMilestone(basePath: string): MilestoneRow | null {
   const milestones = getAllMilestones()
   const completeMilestoneIds = new Set<string>()
   const parkedMilestoneIds = new Set<string>()

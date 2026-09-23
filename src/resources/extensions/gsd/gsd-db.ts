@@ -62,6 +62,7 @@ export * from "./db/writers/lifecycle-commands.js";
 export * from "./db/writers/projection-kind-remediation.js";
 export * from "./db/writers/liveness-backstop.js";
 export * from "./db/writers/orphan-milestone-discard.js";
+export * from "./db/writers/milestone-run-log.js";
 export { executeDomainOperation } from "./db/domain-operation.js";
 export type {
   DomainJsonValue,

@@ -218,7 +218,7 @@ test("schema: human_uat_pending table exists at schema v52+ on a fresh install",
     1,
   );
   assert.equal(Number(row("PRAGMA user_version").user_version), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 53);
+  assert.equal(SCHEMA_VERSION, 54);
 });
 
 test("atomic commit: one registration call commits the row, event, and outbox row together", () => {

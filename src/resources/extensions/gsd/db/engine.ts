@@ -96,6 +96,7 @@ import {
   applyMigrationV51SliceSurface,
   applyMigrationV52HumanUatPending,
   applyMigrationV53MilestoneVerdictPolicyScope,
+  applyMigrationV54RunLog,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -166,7 +167,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 53;
+export const SCHEMA_VERSION = 54;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -420,6 +421,7 @@ function initSchema(
         applyMigrationV51SliceSurface(db);
         applyMigrationV52HumanUatPending(db);
         applyMigrationV53MilestoneVerdictPolicyScope(db);
+        applyMigrationV54RunLog(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -865,6 +867,16 @@ function migrateSchema(
       applyMigrationV53MilestoneVerdictPolicyScope(db);
       stampStateCutoverPragmas(db, 53);
       recordSchemaVersion(db, 53);
+    }
+
+    if (currentVersion < 54) {
+      // V54 -- milestone run-log (Phase 16, DRIVER-01): additive
+      // milestone_run_log table recording a milestone run's lifecycle
+      // status history (running/paused/resumed/completed/failed), backing
+      // the `.gsd/RUN-LOG.md` projection and active-run detection.
+      applyMigrationV54RunLog(db);
+      stampStateCutoverPragmas(db, 54);
+      recordSchemaVersion(db, 54);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");
