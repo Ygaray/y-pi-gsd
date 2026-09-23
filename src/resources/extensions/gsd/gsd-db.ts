@@ -1300,6 +1300,44 @@ function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
+/**
+ * Count of UNRESOLVED, blocking `rework_brief_findings` rows across a
+ * slice's gap-closure briefs — the DB-derived readiness signal for
+ * `run-pause-resume.ts`'s `gap-closure-cap` resume condition (Phase 16,
+ * DRIVER-02, D-03). Built from the same two pieces already proven correct
+ * elsewhere in this file: `countReworkBriefsForSlice`'s gap-shaped id
+ * scoping (the `RB-{mid}-{sid}-%-gap-%` LIKE pattern with its
+ * `escapeLikePattern` metacharacter escaping) joined to
+ * `rework_brief_findings` with the same severity/status filter
+ * `getUnresolvedBlockingReworkFindingsForTask` uses.
+ *
+ * Slice-scoped, never task-scoped, for the same reason the cap is: a
+ * slice's gap-closure cycles may target different tasks. The id-shape
+ * scoping is not optional — `rework_briefs` is a SHARED table also written
+ * by the agent-callable `gsd_rework_brief_save` tool for entirely unrelated
+ * purposes (CR-01, 12-REVIEW.md); without this scoping an unrelated brief's
+ * pending finding would pollute the resume-readiness signal exactly the way
+ * it would have polluted the gap-closure cap before that fix. Returns 0
+ * rather than throwing when no database is open, matching its neighbour.
+ */
+export function countUnresolvedBlockingGapFindingsForSlice(milestoneId: string, sliceId: string): number {
+  if (!getDbOrNull()!) return 0;
+  const row = getDbOrNull()!.prepare(
+    `SELECT COUNT(*) AS n
+     FROM rework_brief_findings f
+     JOIN rework_briefs b ON b.id = f.brief_id
+     WHERE b.milestone_id = :mid AND b.slice_id = :sid
+       AND b.id LIKE :gap_pattern ESCAPE '\\'
+       AND f.severity = 'blocking'
+       AND f.status = 'pending'`,
+  ).get({
+    ":mid": milestoneId,
+    ":sid": sliceId,
+    ":gap_pattern": `RB-${escapeLikePattern(milestoneId)}-${escapeLikePattern(sliceId)}-%-gap-%`,
+  }) as Record<string, unknown> | undefined;
+  return row ? Number(row["n"] ?? 0) : 0;
+}
+
 export function applyReworkResolutions(resolutions: Array<{
   milestoneId: string;
   sliceId: string;
