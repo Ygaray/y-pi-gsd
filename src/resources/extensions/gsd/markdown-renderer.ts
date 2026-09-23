@@ -849,6 +849,23 @@ export async function renderRoadmapCheckboxes(
 }
 
 /**
+ * A milestone's closeout artifacts (SUMMARY and its drift check) must stay
+ * live whether the milestone is merely `complete` or has gone on to
+ * `shipped`/`archived` (Phase 15 Task 2). `toStatus()` deliberately does NOT
+ * alias the new shipped/archived literals onto `"complete"` (15-01 step 2,
+ * status-guards.ts), so a bare `toStatus(status) === "complete"` gate would
+ * silently stop re-rendering and drift-checking a shipped milestone's
+ * SUMMARY. This is the single predicate all three milestone-level closeout
+ * gates route through, so the "is this milestone closed out" definition
+ * cannot drift between them. Slice-level and task-level gates are untouched
+ * — neither new literal is ever written to a slice or task row.
+ */
+function isMilestoneCloseoutStatus(status: string | undefined): boolean {
+  const value = status ?? "";
+  return toStatus(value) === "complete" || isShippedStatus(value);
+}
+
+/**
  * Project milestone-level artifacts (CONTEXT, RESEARCH, VALIDATION, etc.) from
  * the artifacts table into the flat-phase phase directory. ROADMAP is skipped
  * because renderRoadmapFromDb regenerates it from hierarchy rows.
@@ -861,7 +878,7 @@ export async function renderMilestoneArtifactsFromDb(
   if (artifacts.length === 0) return false;
 
   const milestone = getMilestone(milestoneId);
-  const milestoneComplete = toStatus(milestone?.status ?? "") === "complete";
+  const milestoneComplete = isMilestoneCloseoutStatus(milestone?.status);
 
   let wrote = false;
   for (const artifact of artifacts) {
@@ -893,7 +910,7 @@ export async function renderMilestoneSummary(
   milestoneId: string,
 ): Promise<boolean> {
   const milestone = getMilestone(milestoneId);
-  if (!milestone || toStatus(milestone.status) !== "complete") return false;
+  if (!milestone || !isMilestoneCloseoutStatus(milestone.status)) return false;
 
   const projection = readMilestoneCompletionProjection(milestoneId);
   if (!projection) return false;
@@ -1370,7 +1387,7 @@ function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
       );
     }
 
-    const milestoneComplete = toStatus(milestone.status) === "complete";
+    const milestoneComplete = isMilestoneCloseoutStatus(milestone.status);
     for (const artifact of getMilestoneScopedArtifacts(milestone.id)) {
       const artifactType = artifact.artifact_type.toUpperCase();
       if (artifact.artifact_type === "ROADMAP") continue;
