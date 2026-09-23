@@ -15,7 +15,9 @@ export interface MilestoneArchiveProjection {
   shippedAt: string;
   previousLegacyStatus: string;
   certifyEventId: string;
+  certifyRevision: number;
   auditEventId: string;
+  auditRevision: number;
   snapshot: MilestoneArchiveSnapshot;
 }
 
@@ -129,27 +131,73 @@ export function readMilestoneArchiveProjection(
     shippedAt: requiredString(payload["shippedAt"], "shippedAt"),
     previousLegacyStatus: requiredString(payload["previousLegacyStatus"], "previousLegacyStatus"),
     certifyEventId: requiredString(payload["certifyEventId"], "certifyEventId"),
+    certifyRevision: requiredNumber(payload["certifyRevision"], "certifyRevision"),
     auditEventId: requiredString(payload["auditEventId"], "auditEventId"),
+    auditRevision: requiredNumber(payload["auditRevision"], "auditRevision"),
     snapshot: snapshotFromPayload(payload["snapshot"]),
   };
 }
 
-/** Pure render, no I/O — the full roadmap/requirements snapshot tables are
- * 15-04's job; this settles the architecture (event payload in, markdown
- * string out, no DB handle) with a short body naming the milestone, the
- * shipped timestamp, and the two authorizing event ids. */
+/**
+ * Collapse newlines and escape `|` so one operator-authored planning string
+ * (a slice title, a requirement description) cannot forge an extra table
+ * row/column in this document — copied verbatim from
+ * `human-uat-pending-projection.ts:118-120` (module-private there, so it
+ * cannot be imported).
+ */
+function escapeCell(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, " ").replace(/\|/g, "\\|");
+}
+
+const ROADMAP_EMPTY_ROW = "| _(none)_ | _(none)_ | _(none)_ | _(none)_ |";
+const REQUIREMENTS_EMPTY_ROW = "| _(none)_ | _(none)_ | _(none)_ | _(none)_ |";
+
+function renderRoadmapSnapshotTable(slices: MilestoneArchiveSnapshot["slices"]): string {
+  const header = "| Slice | Title | Status | Completed |\n| --- | --- | --- | --- |";
+  if (slices.length === 0) return `${header}\n${ROADMAP_EMPTY_ROW}`;
+  const rows = slices.map((slice) => (
+    `| ${escapeCell(slice.id)} | ${escapeCell(slice.title)} | ${escapeCell(slice.status)} | `
+      + `${escapeCell(slice.completedAt ?? "")} |`
+  ));
+  return `${header}\n${rows.join("\n")}`;
+}
+
+function renderRequirementsSnapshotTable(
+  requirements: MilestoneArchiveSnapshot["requirements"],
+): string {
+  const header = "| Requirement | Status | Primary owner | Supporting slices |\n| --- | --- | --- | --- |";
+  if (requirements.length === 0) return `${header}\n${REQUIREMENTS_EMPTY_ROW}`;
+  const rows = requirements.map((requirement) => (
+    `| ${escapeCell(requirement.id)} | ${escapeCell(requirement.status)} | `
+      + `${escapeCell(requirement.primaryOwner)} | ${escapeCell(requirement.supportingSlices)} |`
+  ));
+  return `${header}\n${rows.join("\n")}`;
+}
+
+/**
+ * Pure render, no I/O: the entire ARCHIVE document from the projection alone
+ * (D-04) — front matter, the ship authorization, the full roadmap and
+ * requirements snapshots (every cell escaped), and a scope note recording
+ * that physical phase-directory archival is a separate, out-of-scope
+ * operator workflow. Every interpolated value traces to a projection field;
+ * nothing here reads the clock, a random source, or an unordered iteration,
+ * so re-rendering the same projection twice is byte-identical.
+ */
 export function renderMilestoneArchiveMarkdown(
   milestoneId: string,
   projection: MilestoneArchiveProjection,
 ): string {
-  const title = projection.snapshot.milestone.title || milestoneId;
+  const rawTitle = projection.snapshot.milestone.title || milestoneId;
+  const title = escapeCell(rawTitle);
+  const status = escapeCell(projection.snapshot.milestone.status);
+  const completedAt = projection.snapshot.milestone.completedAt ?? "";
 
   return `---
 id: ${milestoneId}
 title: "${title}"
-status: shipped
+status: ${status}
 shipped_at: ${projection.shippedAt}
-completed_at: ${projection.snapshot.milestone.completedAt ?? ""}
+completed_at: ${completedAt}
 certify_event_id: ${projection.certifyEventId}
 audit_event_id: ${projection.auditEventId}
 ---
@@ -159,5 +207,27 @@ audit_event_id: ${projection.auditEventId}
 Milestone \`${milestoneId}\` shipped at ${projection.shippedAt}, authorized by
 certify event \`${projection.certifyEventId}\` and audit event
 \`${projection.auditEventId}\`.
+
+## Ship Authorization
+
+| Gate | Result |
+| --- | --- |
+| Certify | Passed — event \`${projection.certifyEventId}\` (revision ${projection.certifyRevision}) |
+| Audit | Passed — event \`${projection.auditEventId}\` (revision ${projection.auditRevision}) |
+| Gate-2 Human-UAT | 0 outstanding entries |
+
+## Roadmap Snapshot
+
+${renderRoadmapSnapshotTable(projection.snapshot.slices)}
+
+## Requirements Snapshot
+
+${renderRequirementsSnapshotTable(projection.snapshot.requirements)}
+
+## Scope Note
+
+This artifact is the archive record for milestone \`${milestoneId}\`. Moving,
+renaming, or removing its physical phase directories is not part of shipping
+— that is owned by a separate operator workflow, not this projection.
 `;
 }
