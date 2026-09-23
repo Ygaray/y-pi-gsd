@@ -1286,7 +1286,17 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
         break
       }
 
-      if (exitCode === EXIT_SUCCESS || exitCode === EXIT_BLOCKED) {
+      // The while-loop guard above narrows `exitCode`'s static type to the
+      // EXIT_BLOCKED literal at this point in the control-flow graph, but at
+      // runtime the async event handlers registered on `client` (which the
+      // preceding `await client.prompt(...)` can trigger) legitimately
+      // reassign it to EXIT_SUCCESS when the resumed session completes
+      // cleanly rather than pausing again -- the same real-world case the
+      // pre-loop check above (line ~1204) guards. Widen back to `number` so
+      // the comparison reflects the true runtime domain instead of the
+      // loop-entry snapshot TS retained.
+      const resumedExitCode: number = exitCode
+      if (resumedExitCode === EXIT_SUCCESS || resumedExitCode === EXIT_BLOCKED) {
         await resumeCompletionPromise
       }
     }
