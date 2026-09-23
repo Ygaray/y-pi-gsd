@@ -70,3 +70,58 @@ export function describeAutonomousScope(scope: AutonomousScope): string {
   if (scope.to !== null) parts.push(`to ${scope.to}`);
   return parts.length ? `All remaining work ${parts.join(" ")}` : "All remaining work on the active milestone";
 }
+
+/**
+ * Mechanical in-scope predicate (D-02): given an ordinal below `from`,
+ * above `to`, or different from `only`, returns false. Both `from`/`to`
+ * bounds are INCLUSIVE. An absent bound is unbounded, never coerced to zero
+ * -- that coercion is the classic off-by-one that would silently re-run a
+ * completed unit (Test 12). `--only` takes precedence: when set, it is the
+ * ONLY admitted ordinal, matching `parseAutonomousScopeFlags`'s own
+ * precedence. Pure function of its two arguments -- testable without a
+ * database, and safe for a future per-unit dispatch loop to consult
+ * directly.
+ */
+export function isUnitInAutonomousScope(ordinal: number, scope: AutonomousScope): boolean {
+  if (scope.only !== null) return ordinal === scope.only;
+  if (scope.from !== null && ordinal < scope.from) return false;
+  if (scope.to !== null && ordinal > scope.to) return false;
+  return true;
+}
+
+/** The subset of a `milestone_run_log` row `resolveEffectiveAutonomousScope` needs. */
+export interface AutonomousScopeResumeSource {
+  resumeFrom: number | null;
+}
+
+/**
+ * Resolve the EFFECTIVE scope for a `/gsd autonomous` invocation: parse the
+ * flags, and when NONE of `from`/`to`/`only` were supplied explicitly, fall
+ * back to the active run row's durable `resume_from` pointer instead of
+ * defaulting to "all remaining work" (D-02) -- the resume point survives
+ * the process that set it. An explicit flag on the invocation always wins
+ * over the stored pointer, so an operator can override it without clearing
+ * it first.
+ */
+export function resolveEffectiveAutonomousScope(
+  args: string,
+  activeRun: AutonomousScopeResumeSource | null,
+): AutonomousScope {
+  const parsed = parseAutonomousScopeFlags(args);
+  if (parsed.from !== null || parsed.to !== null || parsed.only !== null) return parsed;
+  if (activeRun && activeRun.resumeFrom !== null) {
+    return { from: activeRun.resumeFrom, to: null, only: null };
+  }
+  return parsed;
+}
+
+/**
+ * Extract the numeric suffix from a milestone id (`M001` -> `1`, `M042` ->
+ * `42`). Returns null for anything that does not match the id shape --
+ * callers must treat a null result as "no ordinal to check," never as 0.
+ */
+export function deriveMilestoneOrdinal(milestoneId: string): number | null {
+  const match = milestoneId.match(/^M0*(\d+)$/i);
+  if (!match) return null;
+  return Number(match[1]);
+}

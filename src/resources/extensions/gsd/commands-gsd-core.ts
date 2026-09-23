@@ -32,8 +32,11 @@ import {
 } from "./gsd-db.js";
 import {
   type AutonomousScope,
+  deriveMilestoneOrdinal,
   describeAutonomousScope,
+  isUnitInAutonomousScope,
   parseAutonomousScopeFlags,
+  resolveEffectiveAutonomousScope,
 } from "./autonomous-scope.js";
 
 /**
@@ -907,9 +910,11 @@ function startMilestoneRunLogEntry(
   detection: ActiveMilestoneRunDetection,
 ): void {
   try {
-    if (detection.reason === "stale-lock-dead-owner") {
-      failStaleMilestoneRunLogRow(milestoneId, detection.pid);
-    }
+    // Any non-active detection may still leave a leftover `running` row
+    // behind (a dead lock owner, or no lock at all) that would collide with
+    // the fresh insert below via idx_milestone_run_log_one_active --
+    // failStaleMilestoneRunLogRow no-ops when there is nothing to clean up.
+    failStaleMilestoneRunLogRow(milestoneId, detection.pid);
     const runId = randomUUID();
     recordMilestoneRunLifecycle({
       invocation: internalExecutionInvocation(`autonomous-start:${milestoneId}:${runId}`),
@@ -927,16 +932,25 @@ function startMilestoneRunLogEntry(
 
 /** /gsd autonomous [--from N] [--to N] [--only N] [--interactive] [--converge] */
 export async function handleAutonomous(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const basePath = currentDirectoryRoot();
+  const milestoneId = await getActiveMilestoneId(basePath);
+
   let scope: AutonomousScope;
   try {
-    scope = parseAutonomousScopeFlags(args);
+    // Durable re-read (D-02): with no explicit flag, the effective scope
+    // resolves from the active milestone's own run-log row rather than
+    // defaulting to "all remaining work" -- the resume point survives the
+    // process that set it. An explicit flag always overrides the stored
+    // pointer.
+    const priorRun = milestoneId ? getActiveMilestoneRun(milestoneId) : null;
+    scope = resolveEffectiveAutonomousScope(
+      args,
+      priorRun ? { resumeFrom: priorRun.resumeFrom } : null,
+    );
   } catch (error) {
     ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
     return;
   }
-
-  const basePath = currentDirectoryRoot();
-  const milestoneId = await getActiveMilestoneId(basePath);
 
   if (milestoneId) {
     const detection = detectActiveMilestoneRun(basePath, milestoneId);
@@ -948,6 +962,26 @@ export async function handleAutonomous(args: string, ctx: ExtensionCommandContex
       );
       return;
     }
+
+    // Mechanical dispatch-path enforcement (D-02, must_haves): `--only N`
+    // names the SOLE unit this run may touch. When the active milestone's
+    // own ordinal does not match, there is nothing valid for this dispatch
+    // to do -- refuse outright rather than handing the model a sentence and
+    // hoping it infers the same thing. `--from`/`--to` scope work WITHIN a
+    // milestone (a phase/slice position this command does not resolve), so
+    // they are not checked against the milestone's own ordinal here.
+    if (scope.only !== null) {
+      const ordinal = deriveMilestoneOrdinal(milestoneId);
+      if (ordinal !== null && !isUnitInAutonomousScope(ordinal, scope)) {
+        ctx.ui.notify(
+          `Milestone ${milestoneId} (unit ${ordinal}) does not match the requested scope `
+            + `(${describeAutonomousScope(scope)}) -- refusing to dispatch.`,
+          "warning",
+        );
+        return;
+      }
+    }
+
     startMilestoneRunLogEntry(basePath, milestoneId, scope, detection);
   }
 
