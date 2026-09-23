@@ -101,9 +101,20 @@ function escapeCell(value: string): string {
 }
 
 /**
+ * Null-safe formatter for a nullable integer column (`resume_from`) -- a
+ * NULL value renders as a dash, never as the literal text of a null value.
+ */
+function formatNullableInteger(value: number | null): string {
+  return value === null ? "-" : String(value);
+}
+
+/**
  * Pure function: the ENTIRE document from `rows`, never a patch. The
  * document declares itself a generated projection so an operator never
- * mistakes it for an editable source of truth.
+ * mistakes it for an editable source of truth. Only input is `rows` -- no
+ * `Date.now()`, no filesystem read, no database read -- so 16-03's `--from
+ * N` path and 16-05's pause path both get an identical document for
+ * identical rows, regardless of which caller re-rendered it.
  */
 export function renderMilestoneRunLogMarkdown(rows: MilestoneRunLogRow[]): string {
   const lines: string[] = [];
@@ -114,16 +125,36 @@ export function renderMilestoneRunLogMarkdown(rows: MilestoneRunLogRow[]): strin
       + "Regenerated in full on every run-log write -- manual edits are discarded.",
   );
   lines.push("");
-  if (rows.length === 0) {
-    lines.push("No run-log entries yet.");
+
+  lines.push("## Active run");
+  lines.push("");
+  const activeRows = rows.filter((row) => row.status === "running");
+  if (activeRows.length === 0) {
+    lines.push("No run is currently active.");
   } else {
-    lines.push("| Entry | Milestone | Run | Attempt | Status | Started | Updated |");
-    lines.push("| --- | --- | --- | --- | --- | --- | --- |");
+    lines.push("| Entry | Milestone | Run | Attempt | Resume from | Started |");
+    lines.push("| --- | --- | --- | --- | --- | --- |");
+    for (const row of activeRows) {
+      lines.push(
+        `| ${escapeCell(row.entryId)} | ${escapeCell(row.milestoneId)} | ${escapeCell(row.runId)} | `
+          + `${row.attempt} | ${formatNullableInteger(row.resumeFrom)} | ${escapeCell(row.startedAt)} |`,
+      );
+    }
+  }
+  lines.push("");
+
+  lines.push("## Run history");
+  lines.push("");
+  if (rows.length === 0) {
+    lines.push("No runs have been recorded.");
+  } else {
+    lines.push("| Entry | Milestone | Run | Attempt | Status | Pause kind | Reason | Started | Updated |");
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const row of rows) {
       lines.push(
         `| ${escapeCell(row.entryId)} | ${escapeCell(row.milestoneId)} | ${escapeCell(row.runId)} | `
-          + `${row.attempt} | ${escapeCell(row.status)} | ${escapeCell(row.startedAt)} | `
-          + `${escapeCell(row.updatedAt)} |`,
+          + `${row.attempt} | ${escapeCell(row.status)} | ${escapeCell(row.pauseKind ?? "-")} | `
+          + `${escapeCell(row.reason ?? "-")} | ${escapeCell(row.startedAt)} | ${escapeCell(row.updatedAt)} |`,
       );
     }
   }
