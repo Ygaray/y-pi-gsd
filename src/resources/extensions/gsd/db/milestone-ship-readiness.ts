@@ -91,6 +91,7 @@ function readLatestMilestoneReopenRevision(input: {
 }
 
 function readLatestVerdictEvent(
+  projectId: string,
   milestoneId: string,
   policy: MilestoneVerdictPolicy,
 ): VerdictEvent | null {
@@ -102,12 +103,14 @@ function readLatestVerdictEvent(
     WHERE event.event_type = :event_type
       AND event.entity_type = 'milestone'
       AND event.entity_id = :milestone_id
+      AND event.project_id = :project_id
       AND operation.operation_type = :operation_type
     ORDER BY event.project_revision DESC, event.event_index DESC, event.event_id DESC
     LIMIT 1
   `).get({
     ":event_type": policy.eventType,
     ":milestone_id": milestoneId,
+    ":project_id": projectId,
     ":operation_type": policy.operationType,
   }) as unknown as VerdictEventRow | undefined;
   if (!row) return null;
@@ -165,7 +168,7 @@ export function readMilestoneShipAuthorization(
   let certify: VerdictEvent | null = null;
   let certifyReadFailed = false;
   try {
-    certify = readLatestVerdictEvent(input.milestoneId, MILESTONE_CERTIFY_POLICY);
+    certify = readLatestVerdictEvent(input.projectId, input.milestoneId, MILESTONE_CERTIFY_POLICY);
   } catch (error) {
     certifyReadFailed = true;
     blockers.push({ kind: "certify-read-failed", message: (error as Error).message });
@@ -183,7 +186,7 @@ export function readMilestoneShipAuthorization(
   let audit: VerdictEvent | null = null;
   let auditReadFailed = false;
   try {
-    audit = readLatestVerdictEvent(input.milestoneId, MILESTONE_AUDIT_POLICY);
+    audit = readLatestVerdictEvent(input.projectId, input.milestoneId, MILESTONE_AUDIT_POLICY);
   } catch (error) {
     auditReadFailed = true;
     blockers.push({ kind: "audit-read-failed", message: (error as Error).message });
