@@ -19,7 +19,9 @@ import type {
   HookStatusEntry,
   PostUnitGateBlock,
   PostUnitHookOutcomeVerdict,
+  PauseKind,
 } from "./types.js";
+import { formatBlockedNoticeWithPauseKind } from "./stop-notice.js";
 import { resolvePostUnitHooks, resolvePreDispatchHooks, AGENTIC_GATE1_HOOK_NAME } from "./preferences.js";
 import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -1136,11 +1138,23 @@ export class RuleRegistry {
     // sole cap authority — never hook state, never a .gsd file.
     const priorCycles = countReworkBriefsForSlice(mid, sid);
     if (priorCycles >= GAP_CLOSURE_MAX_CYCLES) {
+      // Phase 16 DRIVER-02: this is the ONLY branch of gap-closure routing
+      // tagged with an explicit pause kind — every other `_pauseForGate`
+      // call in this method (missing artifact, unreadable artifact, no
+      // parsable criterion, no task, save/reopen failure) carries no kind
+      // marker and therefore parses to `null`/`human-decision`. Tagging is
+      // opt-in per branch, never blanket (see stop-notice-pause-kind.test.ts
+      // Test 7) — a blanket tag would be exactly the over-widened allowlist
+      // this phase's first prohibition forbids.
       return this._pauseForGate(
         config,
         trigger,
         outcome,
-        `gap-closure cap reached: ${priorCycles} rework cycle(s) already recorded for ${mid}/${sid} (max ${GAP_CLOSURE_MAX_CYCLES})`,
+        formatBlockedNoticeWithPauseKind(
+          `gap-closure cap reached: ${priorCycles} rework cycle(s) already recorded for ${mid}/${sid} (max ${GAP_CLOSURE_MAX_CYCLES})`,
+          "gap-closure-cap",
+        ),
+        "gap-closure-cap",
       );
     }
     const cycle = priorCycles + 1;
@@ -1288,12 +1302,14 @@ export class RuleRegistry {
     trigger: HookTriggerRef,
     outcome: GateOutcome,
     reason: string,
+    pauseKind?: PauseKind,
   ): null {
     this._setGateBlock(config, trigger, {
       action: config.on_block?.action ?? "pause",
       reason,
       outcome,
       retryArtifact: config.on_block?.artifact,
+      pauseKind,
     });
     this.activeHook = null;
     this.hookQueue = [];
@@ -1458,6 +1474,7 @@ export class RuleRegistry {
       cycle?: number;
       maxCycles?: number;
       retryArtifact?: string;
+      pauseKind?: PauseKind;
     },
   ): void {
     const cycleKey = hookCycleKey(config, trigger);
@@ -1476,6 +1493,7 @@ export class RuleRegistry {
       cycle,
       maxCycles: opts.maxCycles ?? hookMaxCycles(config),
       retryArtifact: opts.retryArtifact,
+      ...(opts.pauseKind ? { pauseKind: opts.pauseKind } : {}),
     };
     // Capture the hooks still queued behind the blocked gate so resume can
     // re-queue them; otherwise later gates are silently skipped once the

@@ -22,6 +22,7 @@ import {
   registerGate2HumanUatPending,
   type Gate2HumanUatRegistrationReceipt,
 } from "./milestone-gate2-human-uat-domain-operation.js";
+import { formatBlockedNoticeWithPauseKind } from "./stop-notice.js";
 import {
   insertCertifyGates,
   type CertifyAuditGateVerdict,
@@ -106,6 +107,18 @@ export interface EscalateCertifyGapsToGate2Input {
 export interface EscalateCertifyGapsToGate2Result {
   disposition: "escalated" | "already-escalated";
   entryId: string;
+  /**
+   * Operator-facing pause reason, carrying the `certify-escalation`
+   * pause-kind marker plus the Gate-2 entry id (Phase 16, DRIVER-02) so a
+   * later resume-condition has a durable id to `SELECT` on. 16-01's
+   * Assumption A1 established that `certifyMilestone` has no live
+   * `/gsd auto` notify dispatch site today — this result field, not the
+   * DB-stored `human_uat_pending.reason`, is the point where the
+   * "escalated" disposition is actually surfaced to a caller, so it is
+   * tagged here rather than at a live notify call site that does not yet
+   * exist (16-04-PLAN.md Task 2's documented fallback).
+   */
+  reason: string;
   receipt: Gate2HumanUatRegistrationReceipt;
 }
 
@@ -131,7 +144,7 @@ export function escalateCertifyGapsToGate2(
 ): EscalateCertifyGapsToGate2Result {
   const entries = input.gaps.map(normalizeEscalationGap);
   const gapSummary = entries.map((entry) => `${entry.gap.gapClass}:${entry.gap.gapId}`).join(", ");
-  const reason = `certify escalation for ${input.milestoneId}/${input.sliceId}: `
+  const rawReason = `certify escalation for ${input.milestoneId}/${input.sliceId}: `
     + `${entries.length} gap(s) requiring human review (${gapSummary})`;
   const partialCriteria: Gate2HumanUatPartialCriterion[] = entries.map((entry) => ({
     criterion: entry.gap.description,
@@ -143,13 +156,23 @@ export function escalateCertifyGapsToGate2(
     invocation: input.invocation,
     milestoneId: input.milestoneId,
     sliceId: input.sliceId,
-    reason,
+    reason: rawReason,
     partialCriteria,
   });
+
+  // Phase 16 DRIVER-02: tag AFTER registration so the entry id (only known
+  // once the row exists) can ride the same reason a resume-condition will
+  // later read. Built through the shared formatter, never string
+  // concatenation, so emitter and parser cannot drift (stop-notice.ts).
+  const reason = formatBlockedNoticeWithPauseKind(
+    `${rawReason} (gate2-entry: ${receipt.entryId})`,
+    "certify-escalation",
+  );
 
   return {
     disposition: receipt.created ? "escalated" : "already-escalated",
     entryId: receipt.entryId,
+    reason,
     receipt,
   };
 }

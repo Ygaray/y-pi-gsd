@@ -294,6 +294,19 @@ export type PostUnitHookOnBlockAction =
   | "queue-slice"
   | "pause";
 
+/**
+ * Machine-readable pause-kind discriminant carried on the wire by
+ * `stop-notice.ts` (Phase 16, DRIVER-02, D-03 Runtime Decision #2). The
+ * headless resume-condition branches on this explicit value rather than
+ * inferring safety from prose. `"human-decision"` is a named member — not
+ * merely "absent" — so the default-deny branch is a visible case in a
+ * switch, not an implicit fallthrough a future edit can silently delete.
+ * Only `"gap-closure-cap"` and `"certify-escalation"` are ever auto-resumed;
+ * every other pause (including this named `"human-decision"` member, and a
+ * null/unparseable kind) stays paused for the operator.
+ */
+export type PauseKind = "gap-closure-cap" | "certify-escalation" | "human-decision";
+
 export interface PostUnitHookOnBlockConfig {
   /** Routing action for blocking hook findings. */
   action: PostUnitHookOnBlockAction;
@@ -388,6 +401,18 @@ export interface PostUnitGateBlock {
   maxCycles: number;
   /** Optional compatibility retry artifact. */
   retryArtifact?: string;
+  /**
+   * Machine-readable pause kind, set ONLY by the two named producers
+   * (`_routeAgenticGateGapClosure`'s cap branch, `escalateCertifyGapsToGate2`).
+   * Absent means this pause carries no explicit kind and the headless
+   * resume-condition treats it as `"human-decision"` (default-deny). The
+   * same discriminant also rides the `reason` string via
+   * `formatBlockedNoticeWithPauseKind`/`parsePauseKindFromNotice`
+   * (`stop-notice.ts`) so it survives the cross-process notify boundary —
+   * this field is an in-process convenience so a same-process reader does
+   * not have to re-parse the reason it already holds.
+   */
+  pauseKind?: PauseKind;
 }
 
 // ─── Budget & Notification Types ──────────────────────────────────────────
