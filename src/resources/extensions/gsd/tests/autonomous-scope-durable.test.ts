@@ -17,9 +17,12 @@ import { afterEach, test } from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 import {
+  deriveMilestoneOrdinal,
   describeAutonomousScope,
   InvalidAutonomousScopeFlagError,
+  isUnitInAutonomousScope,
   parseAutonomousScopeFlags,
+  resolveEffectiveAutonomousScope,
 } from "../autonomous-scope.ts";
 import { handleAutonomous } from "../commands-gsd-core.ts";
 import { withCommandCwd } from "../commands/context.ts";
@@ -40,8 +43,14 @@ function db() {
   return adapter;
 }
 
-function createMockPi(): ExtensionAPI {
-  return { sendMessage: () => {} } as unknown as ExtensionAPI;
+function createMockPi(): ExtensionAPI & { sent: Array<{ customType?: string; content?: string }> } {
+  const sent: Array<{ customType?: string; content?: string }> = [];
+  return {
+    sent,
+    sendMessage(message: { customType?: string; content?: string }) {
+      sent.push(message);
+    },
+  } as unknown as ExtensionAPI & { sent: Array<{ customType?: string; content?: string }> };
 }
 
 function createMockCtx(): ExtensionCommandContext & { notifications: { message: string; level: string }[] } {
@@ -91,13 +100,13 @@ function runLogRows(milestoneId: string): Array<Record<string, unknown>> {
 async function runAutonomous(
   basePath: string,
   args: string,
-): Promise<{ ctx: ReturnType<typeof createMockCtx> }> {
+): Promise<{ ctx: ReturnType<typeof createMockCtx>; pi: ReturnType<typeof createMockPi> }> {
   const ctx = createMockCtx();
   const pi = createMockPi();
   await withCommandCwd(basePath, async () => {
     await handleAutonomous(args, ctx, pi);
   });
-  return { ctx };
+  return { ctx, pi };
 }
 
 afterEach(() => {
@@ -190,5 +199,107 @@ test("Test 8: the refusal does not fire when the prior row's owner is dead; the 
   assert.ok(
     !ctx.notifications.some((n) => n.level === "warning" && n.message.includes("already has a live")),
     "no refusal is surfaced when the prior owner is dead",
+  );
+});
+
+// ─── Task 3: mechanical enforcement + durable re-read on restart ──────────
+
+test("Test 9: isUnitInAutonomousScope is inclusive at both from/to bounds, exclusive one step either side", () => {
+  const scope = { from: 3, to: 5, only: null };
+  assert.equal(isUnitInAutonomousScope(2, scope), false);
+  assert.equal(isUnitInAutonomousScope(3, scope), true);
+  assert.equal(isUnitInAutonomousScope(4, scope), true);
+  assert.equal(isUnitInAutonomousScope(5, scope), true);
+  assert.equal(isUnitInAutonomousScope(6, scope), false);
+});
+
+test("Test 10: isUnitInAutonomousScope with --only admits exactly that ordinal", () => {
+  const scope = { from: null, to: null, only: 4 };
+  assert.equal(isUnitInAutonomousScope(4, scope), true);
+  assert.equal(isUnitInAutonomousScope(3, scope), false);
+  assert.equal(isUnitInAutonomousScope(5, scope), false);
+});
+
+test("Test 11: an all-null scope admits every ordinal -- no scope means no restriction", () => {
+  const scope = { from: null, to: null, only: null };
+  for (const ordinal of [1, 2, 50, 9999]) {
+    assert.equal(isUnitInAutonomousScope(ordinal, scope), true, `ordinal ${ordinal} should be in scope`);
+  }
+});
+
+test("Test 12: an absent bound is unbounded, never coerced to zero", () => {
+  const scope = { from: 3, to: null, only: null };
+  assert.equal(isUnitInAutonomousScope(2, scope), false);
+  assert.equal(isUnitInAutonomousScope(3, scope), true);
+  assert.equal(isUnitInAutonomousScope(100_000, scope), true);
+});
+
+test("Test 13: re-invoking with NO --from flag while resume_from=3 exists resolves the effective scope from the row", async () => {
+  const basePath = makeBase("M001");
+  await runAutonomous(basePath, "--from 3");
+  // No lock is written -- the first run is not "active" (no live lock), so
+  // the second invocation is free to proceed and re-read the pointer.
+
+  const { pi } = await runAutonomous(basePath, "");
+
+  const rows = runLogRows("M001");
+  const running = rows.find((r) => r["status"] === "running");
+  assert.equal(running?.["resume_from"], 3, "the resume pointer survived the process that set it");
+  assert.match(pi.sent[0]!.content!, /from 3/);
+});
+
+test("Test 14: an explicit --from 5 on re-invocation overrides the stored pointer", async () => {
+  const basePath = makeBase("M001");
+  await runAutonomous(basePath, "--from 3");
+
+  await runAutonomous(basePath, "--from 5");
+
+  const rows = runLogRows("M001");
+  const running = rows.find((r) => r["status"] === "running");
+  assert.equal(running?.["resume_from"], 5);
+});
+
+test("Test 15: the prose handed to the prompt template on restart is derived from the EFFECTIVE scope, not 'all remaining work'", async () => {
+  const basePath = makeBase("M001");
+  await runAutonomous(basePath, "--from 3");
+
+  const { pi } = await runAutonomous(basePath, "");
+
+  assert.match(pi.sent[0]!.content!, /from 3/);
+  assert.doesNotMatch(pi.sent[0]!.content!, /All remaining work on the active milestone/);
+});
+
+test("resolveEffectiveAutonomousScope: explicit flags win, otherwise falls back to the active run's resumeFrom", () => {
+  assert.deepStrictEqual(
+    resolveEffectiveAutonomousScope("", { resumeFrom: 3 }),
+    { from: 3, to: null, only: null },
+  );
+  assert.deepStrictEqual(
+    resolveEffectiveAutonomousScope("--from 5", { resumeFrom: 3 }),
+    { from: 5, to: null, only: null },
+  );
+  assert.deepStrictEqual(
+    resolveEffectiveAutonomousScope("", null),
+    { from: null, to: null, only: null },
+  );
+});
+
+test("deriveMilestoneOrdinal extracts the numeric suffix from a milestone id", () => {
+  assert.equal(deriveMilestoneOrdinal("M001"), 1);
+  assert.equal(deriveMilestoneOrdinal("M042"), 42);
+  assert.equal(deriveMilestoneOrdinal("not-a-milestone-id"), null);
+});
+
+test("Test 16: an out-of-scope --only unit is refused by the dispatch path instead of being dispatched to the model", async () => {
+  const basePath = makeBase("M002");
+
+  const { ctx, pi } = await runAutonomous(basePath, "--only 5");
+
+  const rows = runLogRows("M002");
+  assert.equal(rows.length, 0, "no run-log row is recorded for a refused dispatch");
+  assert.equal(pi.sent.length, 0, "the prompt is never dispatched to the model");
+  assert.ok(
+    ctx.notifications.some((n) => n.level === "warning" && n.message.includes("M002") && /scope/i.test(n.message)),
+    "the refusal names the milestone and cites the scope",
   );
 });
