@@ -77,7 +77,6 @@ export function findDerivedActiveMilestone(basePath: string): MilestoneRow | nul
   const slicesByMilestone = getSlicesByMilestoneIds(activeMilestoneIds)
 
   let firstDeferredQueuedShell: MilestoneRow | null = null
-  let activeMilestoneFound = false
 
   for (const m of milestones) {
     if (parkedMilestoneIds.has(m.id)) continue
@@ -94,18 +93,20 @@ export function findDerivedActiveMilestone(basePath: string): MilestoneRow | nul
       sliceCount: slices.length,
     })
 
-    if (!activeMilestoneFound) {
-      const depsUnmet = m.depends_on.some((dep) => !completeMilestoneIds.has(dep))
-      if (depsUnmet) continue
+    // IN-01 (review of 16-driver-ergonomics): this loop always `return`s on
+    // the first milestone it accepts, so there is never a second iteration
+    // to guard against re-entering this branch -- no "already found the
+    // active milestone" flag is needed here (removed; see git history for
+    // the dead `activeMilestoneFound` flag this replaced).
+    const depsUnmet = m.depends_on.some((dep) => !completeMilestoneIds.has(dep))
+    if (depsUnmet) continue
 
-      if (readiness.kind === 'queued-shell') {
-        if (!firstDeferredQueuedShell) firstDeferredQueuedShell = m
-        continue
-      }
-
-      activeMilestoneFound = true
-      return m
+    if (readiness.kind === 'queued-shell') {
+      if (!firstDeferredQueuedShell) firstDeferredQueuedShell = m
+      continue
     }
+
+    return m
   }
 
   return firstDeferredQueuedShell
