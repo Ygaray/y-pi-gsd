@@ -583,3 +583,46 @@ test("two shipped milestones each produce their own archive artifact, no key or 
   assert.match(content1, /# M001: /);
   assert.match(content2, /# M002: /);
 });
+
+test("shipping one milestone while a second, unrelated milestone's requirement is active excludes it from the snapshot", () => {
+  makeBase();
+  // A second, unstarted/mid-flight milestone with its OWN active requirement,
+  // scoped to a slice id that belongs only to that other milestone — exactly
+  // the CR-02 scenario ("requirements belonging to milestones that are still
+  // unstarted or mid-flight" leaking into M001's immutable archive). Proves
+  // the snapshot filter narrows to M001's own slice roster instead of
+  // embedding every project-wide active requirement (`requirements` has no
+  // milestone column in the schema, so scoping happens via
+  // primary_owner/supporting_slices membership against the shipping
+  // milestone's own slice ids — see the filter's own comment for the
+  // residual limitation when slice ids collide across milestones).
+  insertMilestone({ id: "M002", title: "Second, unrelated milestone", status: "active" });
+  insertSlice({ id: "S99", milestoneId: "M002", title: "Unrelated slice", status: "active" });
+  insertRequirement({
+    id: "REQ-M002",
+    class: "must",
+    status: "active",
+    description: "Belongs to a different, unstarted milestone.",
+    why: "Proves cross-milestone requirements do not leak.",
+    source: "test",
+    primary_owner: "S99",
+    supporting_slices: "S99",
+    validation: "test",
+    notes: "",
+    full_content: "REQ-M002",
+    superseded_by: null,
+  });
+
+  recordPassingCertify("M001");
+  recordPassingAudit("M001");
+  shipMilestone(shipInput("M001", "archive/ship/cross-milestone-requirement"));
+
+  const projection = readMilestoneArchiveProjection("M001");
+  assert.ok(projection, "M001 must have a readable archive projection after shipping");
+  const requirementIds = projection!.snapshot.requirements.map((requirement) => requirement.id);
+  assert.deepEqual(requirementIds, ["REQ-M001"]);
+  assert.ok(
+    !requirementIds.includes("REQ-M002"),
+    "M001's immutable archive snapshot must not embed M002's still-active requirement",
+  );
+});
