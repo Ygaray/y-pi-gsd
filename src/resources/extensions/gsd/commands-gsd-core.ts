@@ -19,6 +19,7 @@ import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
 import { getActiveMilestoneId } from "./state.js";
 import {
   type ActiveMilestoneRunDetection,
+  type ActiveMilestoneRunReason,
   detectActiveMilestoneRun,
 } from "./session-lock.js";
 import { recordMilestoneRunLifecycle } from "./milestone-run-log-domain-operation.js";
@@ -851,12 +852,44 @@ export function parseAutonomousScope(args: string): string {
 }
 
 /**
- * Transition a stale (dead-owner) `running` run-log row to `failed` before a
- * fresh run is recorded for the same milestone -- otherwise the fresh
- * `running` INSERT would violate `idx_milestone_run_log_one_active`
- * (T-16-14). A crash is the ONLY reason this path fires: `detection.reason`
- * is `stale-lock-dead-owner` precisely when a `running` row's lock owner is
- * no longer alive (16-03 Task 1's two-signal detector).
+ * `detectActiveMilestoneRun`'s `active: false` reasons split into two
+ * shapes (CR-02, review of 16-driver-ergonomics): a CONCLUSIVE proof that
+ * nothing is running (no row at all, a row with no lock holder, or a row
+ * whose lock owner is confirmed dead), versus an AMBIGUOUS "I could not
+ * tell" outcome from a transient read/query failure partway through
+ * detection. Only the conclusive reasons are safe to treat as "clear to
+ * force-fail a leftover row and start a fresh one" -- an ambiguous reason
+ * means the actual other process may still be alive and still holds the
+ * lock; treating "unknown" as "safe" would let two live processes dispatch
+ * against the same milestone concurrently (T-16-14 widened).
+ */
+const CONCLUSIVE_NOT_ACTIVE_REASONS: ReadonlySet<ActiveMilestoneRunReason> = new Set([
+  "no-running-run-log-row",
+  "no-session-lock",
+  "stale-lock-dead-owner",
+]);
+
+/**
+ * True when a non-active `detectActiveMilestoneRun` reason is CONCLUSIVE
+ * proof that nothing is running (safe to force-fail a leftover row and
+ * start fresh), false when it is one of the AMBIGUOUS "I could not tell"
+ * reasons a transient read/query failure produces. Exported so the full
+ * seven-reason vocabulary can be unit tested directly, independent of
+ * whether the ambiguous reasons are reachable through the current
+ * (defensive, never-throws) `session-lock.ts` helpers.
+ */
+export function isConclusiveNotActiveReason(reason: ActiveMilestoneRunReason | undefined): boolean {
+  return reason != null && CONCLUSIVE_NOT_ACTIVE_REASONS.has(reason);
+}
+
+/**
+ * Transition a stale (dead-owner or lock-abandoned) `running` run-log row to
+ * `failed` before a fresh run is recorded for the same milestone --
+ * otherwise the fresh `running` INSERT would violate
+ * `idx_milestone_run_log_one_active` (T-16-14). Callers must only reach
+ * this function after confirming `detection.reason` is one of
+ * `CONCLUSIVE_NOT_ACTIVE_REASONS` -- an ambiguous detection reason must
+ * refuse before ever calling this (see `handleAutonomous`).
  */
 function failStaleMilestoneRunLogRow(milestoneId: string, ownerPid: number | undefined): void {
   const stale = getActiveMilestoneRun(milestoneId);
@@ -958,6 +991,20 @@ export async function handleAutonomous(args: string, ctx: ExtensionCommandContex
       ctx.ui.notify(
         `Milestone ${milestoneId} already has a live autonomous run (PID ${detection.pid}). `
           + "Run `/gsd stop` first, or wait for it to finish before starting another.",
+        "warning",
+      );
+      return;
+    }
+
+    // CR-02: a non-active detection is only safe to act on when the reason
+    // is a CONCLUSIVE proof that nothing is running. An ambiguous "I could
+    // not tell" reason (a transient DB/lock read failure) must refuse
+    // rather than silently treating "unknown" as "safe to force-restart" --
+    // the other process may still be alive and still holds the lock.
+    if (!isConclusiveNotActiveReason(detection.reason)) {
+      ctx.ui.notify(
+        `Could not confirm milestone ${milestoneId} has no live autonomous run `
+          + `(${detection.reason ?? "unknown"}). Try again.`,
         "warning",
       );
       return;

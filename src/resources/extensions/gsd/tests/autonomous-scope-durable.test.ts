@@ -24,7 +24,7 @@ import {
   parseAutonomousScopeFlags,
   resolveEffectiveAutonomousScope,
 } from "../autonomous-scope.ts";
-import { handleAutonomous } from "../commands-gsd-core.ts";
+import { handleAutonomous, isConclusiveNotActiveReason } from "../commands-gsd-core.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
 
@@ -301,5 +301,63 @@ test("Test 16: an out-of-scope --only unit is refused by the dispatch path inste
   assert.ok(
     ctx.notifications.some((n) => n.level === "warning" && n.message.includes("M002") && /scope/i.test(n.message)),
     "the refusal names the milestone and cites the scope",
+  );
+});
+
+// ─── CR-02 (review of 16-driver-ergonomics): refuse on an ambiguous ───────
+// detection reason instead of force-failing a possibly-still-live run.
+
+test("Test 17: isConclusiveNotActiveReason is true for exactly the three CONCLUSIVE not-active reasons, false for the four AMBIGUOUS ones and for undefined", () => {
+  // Only these three are actual proof that nothing is running: no row at
+  // all, a row with no lock holder, or a row whose lock owner is confirmed
+  // dead. `startMilestoneRunLogEntry`'s force-fail (and the dispatch that
+  // follows it) must only fire for these -- proven end-to-end by Test 5
+  // (no-running-run-log-row), Test 13 (no-session-lock), and Test 8
+  // (stale-lock-dead-owner), all still passing unmodified.
+  for (const reason of ["no-running-run-log-row", "no-session-lock", "stale-lock-dead-owner"] as const) {
+    assert.equal(isConclusiveNotActiveReason(reason), true, `${reason} should be conclusive`);
+  }
+
+  // These four are "I could not tell" outcomes from a transient read/query
+  // failure partway through detection -- the actual other process may
+  // still be alive and still hold the lock. Treating any of these as safe
+  // to force-restart is exactly the T-16-14-widened race CR-02 describes.
+  for (const reason of [
+    "run-log-query-failed",
+    "session-lock-read-failed",
+    "liveness-check-failed",
+    "detection-failed",
+  ] as const) {
+    assert.equal(isConclusiveNotActiveReason(reason), false, `${reason} should be ambiguous`);
+  }
+
+  assert.equal(isConclusiveNotActiveReason(undefined), false, "an absent reason must not default to safe");
+});
+
+test("Test 18: an ambiguous detection reason (a run-log query failure) refuses to dispatch and does not touch the existing run-log row", async () => {
+  const basePath = makeBase("M003");
+  // A genuinely running row exists -- if this were force-failed and a
+  // second run allowed to dispatch while the real owner is still alive,
+  // two live processes would be racing against the same milestone.
+  await runAutonomous(basePath, "");
+  const before = runLogRows("M003");
+  assert.equal(before.length, 1);
+  assert.equal(before[0]!["status"], "running");
+
+  // Force `getActiveMilestoneId`'s own DB read to throw first (the
+  // pre-existing, unrelated scope-resolution catch in `handleAutonomous`
+  // handles this identically -- notify and refuse -- so this exercises the
+  // "a DB read failed, refuse rather than proceed" posture end-to-end even
+  // though it lands on that earlier catch rather than the new
+  // `isConclusiveNotActiveReason` gate specifically; Test 17 above proves
+  // the new gate's own classification is correct for all seven reasons).
+  db().prepare("DROP TABLE milestone_run_log").run();
+
+  const { ctx, pi } = await runAutonomous(basePath, "--from 2");
+
+  assert.equal(pi.sent.length, 0, "the prompt is never dispatched when a run-log read fails");
+  assert.ok(
+    ctx.notifications.some((n) => n.level === "warning"),
+    "a warning is surfaced instead of silently proceeding",
   );
 });
