@@ -42,7 +42,7 @@ import {
 } from "./db-decision-requirement-rows.js";
 import { rowToGate } from "./db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "./db-milestone-artifact-rows.js";
-import { isClosedStatus, toStatus } from "./status-guards.js";
+import { isClosedStatus, isShippedStatus, toStatus } from "./status-guards.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "./db-task-slice-rows.js";
 
 // Connection ownership, lifecycle, schema/migrations and transaction
@@ -1004,6 +1004,9 @@ export function reopenMilestoneStatus(milestoneId: string): void {
     }
     if (!isClosedStatus(currentStatus)) {
       throw new Error(`Cannot reopen milestone ${milestoneId} from status ${currentStatus}; milestone is not closed.`);
+    }
+    if (isShippedStatus(currentStatus)) {
+      throw new Error(`Cannot reopen shipped/archived milestone ${milestoneId} (status ${currentStatus}); shipped milestones are terminal.`);
     }
     writeMilestoneStatus(milestoneId, "active", null);
   });

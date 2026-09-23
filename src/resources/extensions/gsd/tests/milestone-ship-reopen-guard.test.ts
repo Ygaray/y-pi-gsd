@@ -27,6 +27,7 @@ import {
   openDatabase,
   readDomainOperationFence,
   reopenMilestoneCascade,
+  reopenMilestoneStatus,
   updateMilestoneStatus,
 } from "../gsd-db.ts";
 import { reopenMilestone } from "../milestone-lifecycle-domain-operation.ts";
@@ -505,5 +506,23 @@ test("SEC-01: the generic status writer refuses a closed->different-closed write
 
   // Status must be byte-identical to before the refused write — no silent
   // shipped -> complete erosion via the generic closed->closed path.
+  assert.equal(getMilestone("M001")!.status, "shipped");
+});
+
+test("SEC-02: reopenMilestoneStatus refuses a shipped/archived milestone, matching reopenMilestoneHierarchy's guard", () => {
+  makeBase();
+  shipTheMilestone();
+  assert.equal(getMilestone("M001")!.status, "shipped");
+
+  assert.throws(
+    () => reopenMilestoneStatus("M001"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /M001/);
+      assert.match(error.message, /shipped/i);
+      return true;
+    },
+  );
+
   assert.equal(getMilestone("M001")!.status, "shipped");
 });
