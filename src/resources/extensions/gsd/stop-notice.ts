@@ -95,6 +95,19 @@ export function parsePauseKindFromNotice(message: string | null | undefined): Pa
   return (PAUSE_KIND_VALUES as readonly string[]).includes(candidate) ? (candidate as PauseKind) : null;
 }
 
+/**
+ * Strip a trailing `[pause-kind: <value>]` marker for display (WR-01,
+ * review of 16-driver-ergonomics) -- built on the SAME `PAUSE_KIND_MARKER_RE`
+ * `parsePauseKindFromNotice` matches against, so a future change to the
+ * marker's wire format (renaming the bracket key, changing the delimiter)
+ * cannot silently desync a separately-maintained display-stripping copy
+ * elsewhere. A no-op (returns the input unchanged) when no marker is
+ * present.
+ */
+export function stripPauseKindMarker(text: string): string {
+  return text.replace(PAUSE_KIND_MARKER_RE, "");
+}
+
 // ─── Classification (headless host side) ────────────────────────────────
 // The canonical lowercase prefixes the headless event loop recognizes in
 // notify messages. Emitters above and ad-hoc emitters elsewhere must start

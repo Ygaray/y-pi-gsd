@@ -35,6 +35,7 @@ import {
 import {
   parsePauseKindFromNotice,
   stopNoticeDisplayReason,
+  stripPauseKindMarker,
 } from './resources/extensions/gsd/stop-notice.js'
 import type { PauseKind } from './resources/extensions/gsd/types.js'
 
@@ -60,24 +61,22 @@ const UNIT_REF_RE = /for\s+([^\s/]+)\/([^\s:()]+)/i
 // appends after registering the Gate-2 row (16-04).
 const GATE2_ENTRY_RE = /\(gate2-entry:\s*([^)]+)\)/i
 
-// Strips a trailing `[pause-kind: <value>]` marker for display purposes --
-// a SEPARATE concern from `parsePauseKindFromNotice`'s extraction of the
-// kind value itself. This module never re-derives the kind from this
-// pattern; it only removes it from the text stored as the operator-facing
-// reason, since the kind already has its own column in the run-log row.
-const PAUSE_KIND_MARKER_DISPLAY_RE = /\s*\[pause-kind:\s*[^\]]*\]\s*$/i
-
 /**
  * Classify a headless notice's message text into a pause kind (defaulting
  * unparseable/absent to `"human-decision"`, per 16-04's default-deny
  * contract) plus a cleaned display reason and the unit/Gate-2 identifiers
  * the resume condition needs. Does not touch the database and cannot throw.
+ *
+ * The `[pause-kind: ...]` marker is stripped from the display reason via
+ * `stop-notice.ts`'s `stripPauseKindMarker` (WR-01, review of
+ * 16-driver-ergonomics) -- NOT a locally re-declared copy of the pattern --
+ * so a future change to the marker's wire format in `stop-notice.ts` (the
+ * ONE owner of this vocabulary) propagates here automatically instead of
+ * silently drifting out of sync.
  */
 export function classifyHeadlessPause(noticeMessage: string | null | undefined): ClassifiedPause {
   const kind = parsePauseKindFromNotice(noticeMessage) ?? 'human-decision'
-  const reason = stopNoticeDisplayReason(noticeMessage)
-    .replace(PAUSE_KIND_MARKER_DISPLAY_RE, '')
-    .trim()
+  const reason = stripPauseKindMarker(stopNoticeDisplayReason(noticeMessage)).trim()
   const unitMatch = UNIT_REF_RE.exec(reason)
   const gate2Match = GATE2_ENTRY_RE.exec(reason)
   return {
