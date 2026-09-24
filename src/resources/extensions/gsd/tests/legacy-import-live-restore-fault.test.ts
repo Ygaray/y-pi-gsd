@@ -66,6 +66,11 @@ const CHILD_DEADLINE_MS = 30_000;
 // — that combination is the actual deadlock signature; CPU-idle-with-no-child is the only thing
 // that should motivate killing the run.
 const BOUNDARY_TEST_TIMEOUT_MS = 300_000;
+// Concurrency cap for the two boundary matrices that are safe to overlap (see
+// prepareBoundaryCases/runBounded below): at most this many lanes run in flight, so at most this
+// many child processes are spawned simultaneously. Lower this (never raise CHILD_DEADLINE_MS) if
+// contention ever causes a child to hit its deadline under load.
+const BOUNDARY_CONCURRENCY = 4;
 const tempDirectories = new Set<string>();
 const managedChildren = new Set<ManagedChild>();
 let sequence = 0;
@@ -414,6 +419,52 @@ async function leaveTamperedPublication(prepared: PreparedRestoreCase): Promise<
     : null, "LEGACY_IMPORT_LIVE_RESTORE_REOPEN_FAILED");
   assert.equal(existsSync(getDatabaseReplacementPaths(prepared.databasePath).activeIntentPath), true);
   assertRawDatabaseIsValid(prepared.databasePath);
+}
+
+interface PreparedBoundaryCase<Boundary extends string> {
+  boundary: Boundary;
+  prepared: PreparedRestoreCase;
+}
+
+// Phase A of the two-phase boundary-matrix shape: strictly sequential and synchronous (no
+// `async`, no `await` anywhere in this function or the functions it calls). prepareRestoreCase()
+// opens the process-global SQLite adapter via openDatabase(); running it across concurrent async
+// lanes would let one boundary's openDatabase() clobber another's in-flight handle. Synchronicity
+// is what makes a plain `for` loop here safe on a single-threaded runtime — an `async` keyword
+// would silently reintroduce that race. Releases the global handle after each boundary so Phase B
+// never touches it.
+function prepareBoundaryCases<Boundary extends string>(
+  boundaries: readonly Boundary[],
+): Array<PreparedBoundaryCase<Boundary>> {
+  const cases: Array<PreparedBoundaryCase<Boundary>> = [];
+  for (const boundary of boundaries) {
+    const prepared = prepareRestoreCase();
+    closeDatabase();
+    cases.push({ boundary, prepared });
+  }
+  return cases;
+}
+
+// Phase B of the two-phase boundary-matrix shape: runs `thunks` with at most
+// BOUNDARY_CONCURRENCY in flight at once. Each thunk touches only its own prepared case's temp
+// workspace, its own child processes, and read-only SQLite handles — never the process-global
+// adapter — so overlapping lanes cannot interleave on shared state. Rejects on the first thunk
+// failure (via lane() propagating the throw into the array Promise.all awaits), so a boundary
+// failure still surfaces as a test failure instead of an unhandled rejection.
+async function runBounded(thunks: Array<() => Promise<void>>): Promise<void> {
+  let nextIndex = 0;
+  async function lane(): Promise<void> {
+    while (nextIndex < thunks.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await thunks[index]!();
+    }
+  }
+  const lanes = Array.from(
+    { length: Math.min(BOUNDARY_CONCURRENCY, thunks.length) },
+    () => lane(),
+  );
+  await Promise.all(lanes);
 }
 
 afterEach(async () => {
@@ -800,10 +851,9 @@ test("restart and maintenance remain non-writing while replacement intent is act
 });
 
 test("every durable live restore boundary converges after real SIGKILL", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, async () => {
-  for (const boundary of CRASH_BOUNDARIES) {
-    const prepared = prepareRestoreCase();
+  const cases = prepareBoundaryCases(CRASH_BOUNDARIES);
+  await runBounded(cases.map(({ boundary, prepared }) => async () => {
     const backupHash = sha256(prepared.input.backup.backup_ref);
-    closeDatabase();
 
     const crashed = spawnChild(prepared, {
       action: "restore",
@@ -848,7 +898,7 @@ test("every durable live restore boundary converges after real SIGKILL", { timeo
     }
     assert.equal(existsSync(getDatabaseReplacementPaths(prepared.databasePath).recoveryDirectory), false, boundary);
     assert.equal(sha256(prepared.input.backup.backup_ref), backupHash, boundary);
-  }
+  }));
 });
 
 test("reopen rejects a handle bound to a swapped database inode before recording a receipt", () => {
@@ -958,8 +1008,8 @@ test("every live restore boundary converges after a synchronous exception", { ti
 });
 
 test("every recovery publication boundary converges after real SIGKILL", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, async () => {
-  for (const boundary of RECOVERY_BOUNDARIES) {
-    const prepared = prepareRestoreCase();
+  const cases = prepareBoundaryCases(RECOVERY_BOUNDARIES);
+  await runBounded(cases.map(({ boundary, prepared }) => async () => {
     const backupHash = sha256(prepared.input.backup.backup_ref);
     await leaveTamperedPublication(prepared);
 
@@ -1002,7 +1052,7 @@ test("every recovery publication boundary converges after real SIGKILL", { timeo
     }
     assert.equal(existsSync(getDatabaseReplacementPaths(prepared.databasePath).recoveryDirectory), false, boundary);
     assert.equal(sha256(prepared.input.backup.backup_ref), backupHash, boundary);
-  }
+  }));
 });
 
 test("every recovery publication boundary preserves a usable handle after an exception", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, async () => {
