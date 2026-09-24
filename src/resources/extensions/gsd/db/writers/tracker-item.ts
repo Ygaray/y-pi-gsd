@@ -102,6 +102,7 @@ function validateCreateTrackerItemInput(input: CreateTrackerItemInput): {
     throw new Error(`severity must be one of ${TRACKER_ITEM_SEVERITIES.join(", ")}`);
   }
   const refs = input.refs ?? [];
+  const seenRefs = new Set<string>();
   for (const ref of refs) {
     if (!TRACKER_ITEM_REF_KINDS.includes(ref.refKind)) {
       throw new Error(`ref kind must be one of ${TRACKER_ITEM_REF_KINDS.join(", ")}`);
@@ -109,6 +110,14 @@ function validateCreateTrackerItemInput(input: CreateTrackerItemInput): {
     if (!isNonEmptyString(ref.refValue)) {
       throw new Error("ref value is required");
     }
+    // WR-03: without this check, a duplicate (refKind, refValue) pair in the
+    // same payload throws mid-transaction with the raw
+    // `idx_track_item_refs_unique` driver message instead of a friendly one.
+    const refKey = `${ref.refKind}:${ref.refValue}`;
+    if (seenRefs.has(refKey)) {
+      throw new Error(`duplicate ref ${refKey}`);
+    }
+    seenRefs.add(refKey);
   }
   return { title: input.title.trim(), severity, refs };
 }
@@ -222,6 +231,7 @@ export function updateTrackerItem(input: UpdateTrackerItemInput, basePath: strin
   }
   const refs = input.refs;
   if (refs !== undefined) {
+    const seenRefs = new Set<string>();
     for (const ref of refs) {
       if (!TRACKER_ITEM_REF_KINDS.includes(ref.refKind)) {
         throw new Error(`ref kind must be one of ${TRACKER_ITEM_REF_KINDS.join(", ")}`);
@@ -229,6 +239,14 @@ export function updateTrackerItem(input: UpdateTrackerItemInput, basePath: strin
       if (!isNonEmptyString(ref.refValue)) {
         throw new Error("ref value is required");
       }
+      // WR-03: reject duplicate (refKind, refValue) pairs before the
+      // transaction opens with a friendly message rather than letting the
+      // unique index throw a raw driver error mid-transaction.
+      const refKey = `${ref.refKind}:${ref.refValue}`;
+      if (seenRefs.has(refKey)) {
+        throw new Error(`duplicate ref ${refKey}`);
+      }
+      seenRefs.add(refKey);
     }
   }
   const hasMutation = input.title !== undefined

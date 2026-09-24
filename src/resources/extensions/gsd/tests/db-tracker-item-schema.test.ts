@@ -14,7 +14,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent
 import { SCHEMA_VERSION, _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { handleTrack } from "../commands-tracker.ts";
-import { createTrackerItem } from "../db/writers/tracker-item.ts";
+import { createTrackerItem, updateTrackerItem } from "../db/writers/tracker-item.ts";
 import {
   TRACKER_BACKLOG_PROJECTION_FILENAME,
   TRACKER_INCIDENTS_PROJECTION_FILENAME,
@@ -202,6 +202,73 @@ test("schema: duplicate (track_id, ref_kind, ref_value) is rejected by the uniqu
     ).run(),
     /UNIQUE/,
   );
+});
+
+// ─── Test 6b: duplicate refs in one payload (WR-03) ──────────────────────
+
+test("createTrackerItem: a duplicate (refKind, refValue) pair in one payload is refused readably, writes nothing", () => {
+  const basePath = makeBase();
+  const db = _getAdapter();
+  assert.ok(db);
+
+  assert.throws(
+    () => createTrackerItem(
+      {
+        type: "backlog",
+        title: "Duplicate refs",
+        refs: [
+          { refKind: "phase", refValue: "17" },
+          { refKind: "phase", refValue: "17" },
+        ],
+      },
+      basePath,
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /duplicate ref phase:17/);
+      assert.doesNotMatch(err.message.toLowerCase(), /raise\(abort/);
+      assert.doesNotMatch(err.message.toLowerCase(), /sqlite/);
+      assert.doesNotMatch(err.message.toLowerCase(), /unique constraint/);
+      return true;
+    },
+  );
+  assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM tracker_items").get()?.["n"] ?? 0), 0);
+});
+
+test("updateTrackerItem: a duplicate (refKind, refValue) pair in one payload is refused readably, refs unchanged", () => {
+  const basePath = makeBase();
+  const { trackId } = createTrackerItem(
+    { type: "backlog", title: "Update duplicate refs", refs: [{ refKind: "phase", refValue: "17" }] },
+    basePath,
+  );
+  const db = _getAdapter();
+  assert.ok(db);
+
+  assert.throws(
+    () => updateTrackerItem(
+      {
+        trackId,
+        refs: [
+          { refKind: "requirement", refValue: "TRACK-02" },
+          { refKind: "requirement", refValue: "TRACK-02" },
+        ],
+      },
+      basePath,
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /duplicate ref requirement:TRACK-02/);
+      assert.doesNotMatch(err.message.toLowerCase(), /raise\(abort/);
+      assert.doesNotMatch(err.message.toLowerCase(), /sqlite/);
+      assert.doesNotMatch(err.message.toLowerCase(), /unique constraint/);
+      return true;
+    },
+  );
+
+  const refCount = Number(
+    db.prepare("SELECT COUNT(*) AS n FROM track_item_refs WHERE track_id = :id").get({ ":id": trackId })?.["n"] ?? 0,
+  );
+  assert.equal(refCount, 1);
 });
 
 // ─── Test 7: transition whitelist + idempotency ──────────────────────────
