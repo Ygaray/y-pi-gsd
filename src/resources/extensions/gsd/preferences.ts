@@ -39,7 +39,11 @@ import {
   type SkillDiscoveryMode,
   formatSkillRef,
 } from "./preferences-types.js";
-import { crossAxisPreferenceWarnings, validatePreferences } from "./preferences-validation.js";
+import {
+  crossAxisPreferenceWarnings,
+  validatePreferences,
+  PLAN_REVIEW_MAX_CYCLES_BOUNDS,
+} from "./preferences-validation.js";
 import { gsdHome } from "./gsd-home.js";
 
 // ─── Re-exports: types ──────────────────────────────────────────────────────
@@ -1255,6 +1259,29 @@ export function resolvePreDispatchHooks(basePath?: string): PreDispatchHookConfi
   const prefs = loadEffectiveGSDPreferences(basePath);
   return (prefs?.preferences.pre_dispatch_hooks ?? [])
     .filter(h => h.enabled !== false);
+}
+
+/**
+ * Resolve the effective plan-review convergence cycle cap (CONV-02).
+ *
+ * Returns `PLAN_REVIEW_MAX_CYCLES_BOUNDS.default` (3) when unset. The clamp
+ * arithmetic here is deliberate defence-in-depth, not duplication of
+ * `preferences-validation.ts`'s write-site clamp: a preferences file can be
+ * hand-edited, merged, or loaded from a path that never went through
+ * `validatePreferences`, and the value this function returns feeds directly
+ * into a comparison that decides whether to spend more paid model turns — so
+ * a future reader must not "simplify" this guard away.
+ */
+export function resolvePlanReviewMaxCycles(basePath?: string): number {
+  const prefs = loadEffectiveGSDPreferences(basePath);
+  const raw = prefs?.preferences.plan_review?.max_cycles;
+  if (raw === undefined) return PLAN_REVIEW_MAX_CYCLES_BOUNDS.default;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return PLAN_REVIEW_MAX_CYCLES_BOUNDS.default;
+  return Math.max(
+    PLAN_REVIEW_MAX_CYCLES_BOUNDS.min,
+    Math.min(PLAN_REVIEW_MAX_CYCLES_BOUNDS.max, Math.round(n)),
+  );
 }
 
 // ─── Isolation & Parallel ─────────────────────────────────────────────────────

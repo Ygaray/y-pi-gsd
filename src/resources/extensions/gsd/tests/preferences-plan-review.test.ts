@@ -12,8 +12,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { validatePreferences } from "../preferences.js";
+import { validatePreferences, resolvePlanReviewMaxCycles } from "../preferences.js";
+import { PLAN_REVIEW_MAX_CYCLES_BOUNDS } from "../preferences-validation.js";
 
 describe("plan_review validation", () => {
   it("round-trips a configured max_cycles with no errors", () => {
@@ -162,5 +166,109 @@ describe("plan_review validation", () => {
     assert.deepEqual(errors, []);
     assert.equal(validated.plan_review?.max_cycles, 5);
     assert.equal(validated.language, "Spanish");
+  });
+});
+
+describe("resolvePlanReviewMaxCycles", () => {
+  function withSandbox(run: (basePath: string) => void): void {
+    const originalCwd = process.cwd();
+    const originalGsdHome = process.env.GSD_HOME;
+    const tempProject = mkdtempSync(join(tmpdir(), "gsd-plan-review-cap-project-"));
+    const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-plan-review-cap-home-"));
+    try {
+      mkdirSync(join(tempProject, ".gsd"), { recursive: true });
+      process.env.GSD_HOME = tempGsdHome;
+      process.chdir(tempProject);
+      run(tempProject);
+    } finally {
+      process.chdir(originalCwd);
+      if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+      else process.env.GSD_HOME = originalGsdHome;
+      rmSync(tempProject, { recursive: true, force: true });
+      rmSync(tempGsdHome, { recursive: true, force: true });
+    }
+  }
+
+  it("returns the configured value when plan_review.max_cycles is set", () => {
+    withSandbox((basePath) => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nplan_review:\n  max_cycles: 7\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), 7);
+    });
+  });
+
+  it("returns the default (3) when plan_review is present but max_cycles is absent", () => {
+    withSandbox((basePath) => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nplan_review: {}\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), PLAN_REVIEW_MAX_CYCLES_BOUNDS.default);
+    });
+  });
+
+  it("returns the default (3) when the plan_review block is absent entirely", () => {
+    withSandbox((basePath) => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nversion: 1\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), PLAN_REVIEW_MAX_CYCLES_BOUNDS.default);
+    });
+  });
+
+  it("returns the default (3) and does not throw when no preferences file exists at all", () => {
+    withSandbox((basePath) => {
+      assert.doesNotThrow(() => resolvePlanReviewMaxCycles(basePath));
+      assert.equal(resolvePlanReviewMaxCycles(basePath), PLAN_REVIEW_MAX_CYCLES_BOUNDS.default);
+    });
+  });
+
+  it("clamps a hand-edited 0 up to 1 at the read site (defence-in-depth)", () => {
+    withSandbox((basePath) => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nplan_review:\n  max_cycles: 0\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), 1);
+    });
+  });
+
+  it("clamps a hand-edited 40 down to 10 at the read site (defence-in-depth)", () => {
+    withSandbox((basePath) => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nplan_review:\n  max_cycles: 40\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), 10);
+    });
+  });
+
+  it("always returns a finite integer of at least 1 across every exercised input", () => {
+    const cases: Array<{ content: string | null; expectMin: number }> = [
+      { content: "---\nplan_review:\n  max_cycles: 7\n---\n", expectMin: 1 },
+      { content: "---\nplan_review: {}\n---\n", expectMin: 1 },
+      { content: "---\nversion: 1\n---\n", expectMin: 1 },
+      { content: null, expectMin: 1 },
+      { content: "---\nplan_review:\n  max_cycles: 0\n---\n", expectMin: 1 },
+      { content: "---\nplan_review:\n  max_cycles: 40\n---\n", expectMin: 1 },
+    ];
+    for (const { content, expectMin } of cases) {
+      withSandbox((basePath) => {
+        if (content !== null) {
+          writeFileSync(join(basePath, ".gsd", "PREFERENCES.md"), content, "utf-8");
+        }
+        const result = resolvePlanReviewMaxCycles(basePath);
+        assert.ok(Number.isInteger(result), `expected an integer, got ${result}`);
+        assert.ok(result >= expectMin, `expected >= ${expectMin}, got ${result}`);
+      });
+    }
   });
 });
