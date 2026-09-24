@@ -65,14 +65,6 @@ import {
 import { loadPrompt } from "./prompt-loader.js";
 
 /**
- * The single literal `3` this feature owns (RESEARCH.md Pitfall 4). Plan
- * 20-03/20-04 thread a `plan_review.max_cycles` config value and a
- * `--max-cycles N` flag in FRONT of this default — nowhere else in the
- * feature re-hardcodes `3`.
- */
-export const PLAN_REVIEW_DEFAULT_MAX_CYCLES = 3;
-
-/**
  * Decide-and-redispatch branch for the plan-review-convergence loop. Returns
  * `true` when this turn's end was handled (an open cycle row existed for the
  * resolved target and a decision was recorded), signalling

@@ -1,9 +1,9 @@
 // gsd-pi — Unit tests for additional commands (explore, spike, sketch, …)
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
-import { describe, test } from "node:test";
+import { afterEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -33,6 +33,7 @@ import {
   handleValidatePhase,
   handleVerifyWork,
   handlePlanReviewConvergence,
+  resolveEffectivePlanReviewMaxCycles,
   parseListFlag,
   nextReviewId,
   handleDiscussPhase,
@@ -64,6 +65,8 @@ import {
 import { handleGSDCommand } from "../commands/dispatcher.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { loadPrompt } from "../prompt-loader.ts";
+import { closeDatabase, getOpenPlanReviewCycle, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { resolvePlanReviewMaxCycles } from "../preferences.ts";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -114,6 +117,51 @@ async function withTempCommandCwd(
   const base = createTempGsdProject("gsd-core-handler-");
   const ctx = createMockCtxWithCwd(base);
   await withCommandCwd(base, async () => fn(ctx, base));
+}
+
+// ─── Plan-review convergence cap precedence (CONV-02) fixtures ─────────────
+
+/**
+ * A temp project with a real, open `.gsd/gsd.db` carrying one active
+ * milestone + slice — `handlePlanReviewConvergence` requires an active
+ * milestone (Plan 20-01's rewrite), so unlike `withTempCommandCwd` this
+ * fixture stands up the DB, mirroring `tests/plan-review-convergence.test.ts`'s
+ * `makeBase()` helper.
+ */
+function makePlanReviewProject(milestoneId = "M001", sliceId = "S01"): string {
+  const base = createTempGsdProject("gsd-core-plan-review-");
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: milestoneId, title: "Plan-review cap precedence test", status: "active" });
+  insertSlice({ id: sliceId, milestoneId, title: "Slice", status: "active" });
+  return base;
+}
+
+/** Write a `plan_review.max_cycles` config value to the project's PREFERENCES.md. */
+function writePlanReviewPreferences(base: string, maxCycles: number): void {
+  writeFileSync(
+    join(base, ".gsd", "PREFERENCES.md"),
+    `---\nplan_review:\n  max_cycles: ${maxCycles}\n---\n`,
+    "utf-8",
+  );
+}
+
+/**
+ * Sandbox `GSD_HOME` to an empty temp dir for the duration of `fn` — hermetic
+ * to whatever global `~/.gsd/PREFERENCES.md` may exist on the host running
+ * these tests, mirroring `tests/preferences-plan-review.test.ts`'s
+ * `withSandbox` pattern.
+ */
+async function withSandboxedGsdHome(fn: () => void | Promise<void>): Promise<void> {
+  const originalGsdHome = process.env.GSD_HOME;
+  const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-core-plan-review-home-"));
+  process.env.GSD_HOME = tempGsdHome;
+  try {
+    await fn();
+  } finally {
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    rmSync(tempGsdHome, { recursive: true, force: true });
+  }
 }
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
@@ -586,10 +634,124 @@ describe("Batch 3 handlers dispatch", () => {
     assert.equal(pi.sent[0].customType, "gsd-verify-work");
   });
   test("handlePlanReviewConvergence max-cycles", async () => {
+    // Plan 20-01 rewrote the handler to require an active milestone (it
+    // calls getActiveMilestoneFromDb()/savePlanReviewCycle(), which throws
+    // GSD_STALE_STATE with no open DB) — this test previously used a bare
+    // mock ctx with no DB, which broke when that rewrite landed
+    // (.planning/phases/20-convergence-loop-port-configurable-cap/deferred-items.md).
+    // Fixed here with a real open DB + active milestone, mirroring
+    // tests/plan-review-convergence.test.ts's makeBase() helper.
+    const base = makePlanReviewProject();
     const pi = createMockPi(); const ctx = createMockCtx();
-    await handlePlanReviewConvergence("--max-cycles 5 --all", ctx as any, pi as any);
+    await withCommandCwd(base, async () => {
+      await handlePlanReviewConvergence("--max-cycles 5 --all", ctx as any, pi as any);
+    });
     assert.match(pi.sent[0].content, /5/);
     assert.match(pi.sent[0].content, /all/);
+  });
+});
+
+describe("resolveEffectivePlanReviewMaxCycles / handlePlanReviewConvergence cap precedence (CONV-02)", () => {
+  afterEach(() => {
+    closeDatabase();
+  });
+
+  test("no flag, no preferences file: resolves to the default (3)", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      assert.equal(resolveEffectivePlanReviewMaxCycles("", base), 3);
+    });
+  });
+
+  test("no flag, preferences configuring 6: resolves to the configured value", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      writePlanReviewPreferences(base, 6);
+      assert.equal(resolveEffectivePlanReviewMaxCycles("", base), 6);
+    });
+  });
+
+  test("--max-cycles 2 overrides a configured 6 for this invocation only, leaving the config untouched", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      writePlanReviewPreferences(base, 6);
+      assert.equal(resolveEffectivePlanReviewMaxCycles("--max-cycles 2", base), 2);
+      // Re-reading preferences afterwards still yields the configured value —
+      // a flag override is per-invocation, never a write-back.
+      assert.equal(resolvePlanReviewMaxCycles(base), 6);
+    });
+  });
+
+  test("--max-cycles 2 with no preferences file resolves to 2", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      assert.equal(resolveEffectivePlanReviewMaxCycles("--max-cycles 2", base), 2);
+    });
+  });
+
+  test("--max-cycles 0 clamps up to 1 (FA-02 boundary)", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      assert.equal(resolveEffectivePlanReviewMaxCycles("--max-cycles 0", base), 1);
+    });
+  });
+
+  test("--max-cycles 40 clamps down to 10 (FA-02 boundary)", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      assert.equal(resolveEffectivePlanReviewMaxCycles("--max-cycles 40", base), 10);
+    });
+  });
+
+  test("an unparseable --max-cycles value falls through to config, then to the default (FA-03 precision)", async () => {
+    await withSandboxedGsdHome(() => {
+      const base = makePlanReviewProject();
+      assert.equal(resolveEffectivePlanReviewMaxCycles("--max-cycles abc", base), 3);
+      writePlanReviewPreferences(base, 6);
+      assert.equal(resolveEffectivePlanReviewMaxCycles("--max-cycles abc", base), 6);
+    });
+  });
+
+  test("the cycle-1 row persists the resolved (flag-overridden) cap, and the handler dispatches exactly one review-turn message", async () => {
+    await withSandboxedGsdHome(async () => {
+      const base = makePlanReviewProject();
+      writePlanReviewPreferences(base, 6);
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      await withCommandCwd(base, async () => {
+        await handlePlanReviewConvergence("--max-cycles 2", ctx as any, pi as any);
+      });
+      assert.equal(pi.sent.length, 1, "the handler must dispatch exactly one message");
+      assert.equal(pi.sent[0].customType, "gsd-plan-review-convergence-review");
+      const row = getOpenPlanReviewCycle("M001", "S01");
+      assert.ok(row, "a cycle-1 row must be persisted");
+      assert.equal(row?.maxCycles, 2, "the row's max_cycles column must equal the resolved cap, not the configured 6");
+    });
+  });
+
+  test("reviewer-flag parsing is unchanged: --codex --gemini reports both reviewers", async () => {
+    await withSandboxedGsdHome(async () => {
+      const base = makePlanReviewProject();
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      await withCommandCwd(base, async () => {
+        await handlePlanReviewConvergence("--codex --gemini", ctx as any, pi as any);
+      });
+      assert.match(pi.sent[0].content, /gemini, codex/);
+    });
+  });
+
+  test("--milestone parsing is unchanged: --milestone M012 produces the milestone-scoped target string", async () => {
+    await withSandboxedGsdHome(async () => {
+      const base = makePlanReviewProject();
+      insertMilestone({ id: "M012", title: "Explicit target milestone", status: "active" });
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      await withCommandCwd(base, async () => {
+        await handlePlanReviewConvergence("--milestone M012", ctx as any, pi as any);
+      });
+      assert.match(pi.sent[0].content, /Milestone M012/);
+    });
   });
 });
 

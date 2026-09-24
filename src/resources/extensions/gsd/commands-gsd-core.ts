@@ -37,7 +37,8 @@ import {
 import { autoSession } from "./auto-runtime-state.js";
 import { getActiveMilestoneFromDb, getActiveSliceFromDb, savePlanReviewCycle } from "./gsd-db.js";
 import { planReviewCycleSummaryFileName } from "./plan-review-cycle-summary.js";
-import { PLAN_REVIEW_DEFAULT_MAX_CYCLES } from "./plan-review-convergence.js";
+import { resolvePlanReviewMaxCycles } from "./preferences.js";
+import { PLAN_REVIEW_MAX_CYCLES_BOUNDS } from "./preferences-validation.js";
 
 /**
  * Catalog entries for commands IMPLEMENTED natively in this module.
@@ -684,6 +685,38 @@ export async function handleVerifyWork(args: string, ctx: ExtensionCommandContex
 }
 
 /**
+ * Resolve the effective plan-review-convergence cycle cap for one invocation:
+ * `--max-cycles N` flag > `plan_review.max_cycles` config > default (CONV-02).
+ * This is the ONLY expression of that precedence chain — nowhere else in the
+ * feature re-resolves or re-hardcodes the cap (RESEARCH.md Pitfall 4).
+ *
+ * A matched flag is parsed digits-only (mirroring `handleAuditFix`'s
+ * `--max`/`--severity` regex style), rounded, then clamped against the
+ * shared `PLAN_REVIEW_MAX_CYCLES_BOUNDS` record imported from
+ * `preferences-validation.ts` — the same bounds the config resolver itself
+ * clamps against, so this feature has exactly one range and one default. An
+ * unmatched flag, or a match that somehow yields a non-finite number, falls
+ * through to `resolvePlanReviewMaxCycles(basePath)`, which already clamps
+ * and already defaults — this function never restates that default itself.
+ *
+ * Exported so `commands-gsd-core.test.ts` can exercise the precedence chain
+ * directly, in addition to through `handlePlanReviewConvergence`.
+ */
+export function resolveEffectivePlanReviewMaxCycles(args: string, basePath?: string): number {
+  const maxMatch = args.match(/--max-cycles\s+(\d+)/);
+  if (maxMatch) {
+    const parsed = Math.round(Number(maxMatch[1]));
+    if (Number.isFinite(parsed)) {
+      return Math.max(
+        PLAN_REVIEW_MAX_CYCLES_BOUNDS.min,
+        Math.min(PLAN_REVIEW_MAX_CYCLES_BOUNDS.max, parsed),
+      );
+    }
+  }
+  return resolvePlanReviewMaxCycles(basePath);
+}
+
+/**
  * /gsd plan-review-convergence [--milestone Mxxx] [--claude] [--codex] ... [--max-cycles N]
  *
  * Rewritten for CONV-01 (Phase 20): this handler resolves the target and the
@@ -692,20 +725,25 @@ export async function handleVerifyWork(args: string, ctx: ExtensionCommandContex
  * driver in `plan-review-convergence.ts` (wired into `handleAgentEnd`) reads
  * the CYCLE_SUMMARY that turn writes and decides converged/reround/cap-hit
  * host-side (D-01/D-02), never inside one self-driving simulated-loop prompt.
+ *
+ * Rewritten again for CONV-02 (Phase 20-04): the cap is now resolved via
+ * `resolveEffectivePlanReviewMaxCycles` (flag > config > default) instead of
+ * a bare flag-vs-hardcoded-`3` fallback, and persisted onto the cycle-1 row
+ * exactly as before — nothing downstream re-resolves it (see
+ * `plan-review-convergence.ts`'s enforcement comparison, which reads the
+ * row's `max_cycles` column, never a fresh resolve).
  */
 export async function handlePlanReviewConvergence(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
   const milestoneMatch = args.match(/--milestone\s+(\S+)/i);
   const requested = REVIEWER_FLAGS.filter((f) => new RegExp(`(?:^|\\s)${f}(?=\\s|$)`).test(args));
   const reviewers = requested.length ? requested.map((f) => f.slice(2)).join(", ") : "default (single internal reviewer)";
 
-  // Resolve the effective cap ONCE (flag > default; Plan 20-03/20-04 slot a
-  // config value in between) and clamp before it is ever persisted or
-  // compared (RESEARCH.md Security Domain V5 / T-20-01).
-  const maxMatch = args.match(/--max-cycles\s+(\d+)/);
-  const rawCap = maxMatch ? Number(maxMatch[1]) : PLAN_REVIEW_DEFAULT_MAX_CYCLES;
-  const effectiveCap = Number.isFinite(rawCap)
-    ? Math.max(1, Math.min(10, Math.round(rawCap)))
-    : PLAN_REVIEW_DEFAULT_MAX_CYCLES;
+  const basePath = currentDirectoryRoot();
+
+  // Resolve the effective cap ONCE (flag > config > default) and clamp
+  // before it is ever persisted or compared (RESEARCH.md Security Domain
+  // V5 / T-20-01).
+  const effectiveCap = resolveEffectivePlanReviewMaxCycles(args, basePath);
 
   const activeMilestone = getActiveMilestoneFromDb();
   const milestoneId = milestoneMatch ? milestoneMatch[1] : activeMilestone?.id;
@@ -717,7 +755,6 @@ export async function handlePlanReviewConvergence(args: string, ctx: ExtensionCo
   const slice = getActiveSliceFromDb(milestoneId);
   const sliceId = slice?.id ?? "";
 
-  const basePath = currentDirectoryRoot();
   const cycle = 1;
   const artifactDir = join(basePath, ".gsd", "plan-review");
   mkdirSync(artifactDir, { recursive: true });

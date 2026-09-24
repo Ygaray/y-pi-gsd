@@ -25,12 +25,10 @@ import {
   planReviewCycleSummaryFileName,
   type PlanReviewCycleSummary,
 } from "../plan-review-cycle-summary.ts";
-import {
-  PLAN_REVIEW_DEFAULT_MAX_CYCLES,
-  checkPlanReviewConvergenceAdvance,
-} from "../plan-review-convergence.ts";
+import { checkPlanReviewConvergenceAdvance } from "../plan-review-convergence.ts";
 import { handlePlanReviewConvergence } from "../commands-gsd-core.ts";
 import { withCommandCwd } from "../commands/context.ts";
+import { PLAN_REVIEW_MAX_CYCLES_BOUNDS } from "../preferences-validation.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -501,6 +499,6 @@ describe("handlePlanReviewConvergence", () => {
     });
 
     const row = getOpenPlanReviewCycle("M001", "S01");
-    assert.equal(row?.maxCycles, PLAN_REVIEW_DEFAULT_MAX_CYCLES);
+    assert.equal(row?.maxCycles, PLAN_REVIEW_MAX_CYCLES_BOUNDS.default);
   });
 });
