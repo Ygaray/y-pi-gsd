@@ -344,6 +344,11 @@ export interface PostUnitHookConfig {
   enabled?: boolean;
 }
 
+export interface PlanReviewConfig {
+  /** Max plan-review convergence cycles before a cap-hit escalation. Default 3, max 10. */
+  max_cycles?: number;
+}
+
 export interface HookExecutionState {
   /** Hook name. */
   hookName: string;

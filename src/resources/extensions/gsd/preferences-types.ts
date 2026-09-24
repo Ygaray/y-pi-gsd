@@ -19,6 +19,7 @@ import type {
   ContextSelectionMode,
   ReactiveExecutionConfig,
   GateEvaluationConfig,
+  PlanReviewConfig,
 } from "./types.js";
 import type { DynamicRoutingConfig, ModelCapabilities } from "./model-router.js";
 
@@ -194,6 +195,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "min_request_interval_ms",
   "stale_commit_threshold_minutes",
   "context_management",
+  "plan_review",
   "tool_call_loop_guard",
   "experimental",
   "codebase",
@@ -556,6 +558,8 @@ export interface GSDPreferences {
    */
   context_window_override?: number;
   context_management?: ContextManagementConfig;
+  /** Plan-review convergence cycle cap (CONV-02). Default 3, clamped 1..10. */
+  plan_review?: PlanReviewConfig;
   /** User-tunable tool-call loop guard thresholds (#1198). */
   tool_call_loop_guard?: ToolCallLoopGuardConfig;
   /**

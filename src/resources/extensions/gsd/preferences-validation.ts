@@ -42,6 +42,14 @@ import {
  */
 const RESERVED_AGENTIC_GATE1_HOOK_NAME = "agentic-gate1";
 
+/**
+ * Single source of truth for `plan_review.max_cycles`'s accepted range and
+ * default (CONV-02, FA-02/FA-03). Both this validator's clamp block and
+ * `preferences.ts`'s `resolvePlanReviewMaxCycles` (defence-in-depth at the
+ * read site) import this record rather than restating the numbers.
+ */
+export const PLAN_REVIEW_MAX_CYCLES_BOUNDS = { min: 1, max: 10, default: 3 } as const;
+
 const VALID_TOKEN_PROFILES = new Set<TokenProfile>(["budget", "balanced", "quality", "burn-max"]);
 const VALID_THINKING_LEVELS = new Set<GSDThinkingLevel>([
   "off",
@@ -1037,6 +1045,35 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
     } else {
       errors.push("context_management must be an object");
+    }
+  }
+
+  // ─── Plan-Review Convergence Cap (CONV-02) ───────────────────────────
+  if (preferences.plan_review !== undefined) {
+    if (typeof preferences.plan_review === "object" && preferences.plan_review !== null) {
+      const pr = preferences.plan_review as unknown as Record<string, unknown>;
+      const validPlanReview: Record<string, unknown> = {};
+
+      if (pr.max_cycles !== undefined) {
+        const raw = pr.max_cycles;
+        const mc = typeof raw === "number" ? raw : Number.NaN;
+        if (Number.isFinite(mc)) {
+          validPlanReview.max_cycles = Math.max(
+            PLAN_REVIEW_MAX_CYCLES_BOUNDS.min,
+            Math.min(PLAN_REVIEW_MAX_CYCLES_BOUNDS.max, Math.round(mc)),
+          );
+        } else {
+          errors.push(
+            `plan_review.max_cycles must be a finite number between ${PLAN_REVIEW_MAX_CYCLES_BOUNDS.min} and ${PLAN_REVIEW_MAX_CYCLES_BOUNDS.max}`,
+          );
+        }
+      }
+
+      if (Object.keys(validPlanReview).length > 0) {
+        validated.plan_review = validPlanReview as any;
+      }
+    } else {
+      errors.push("plan_review must be an object");
     }
   }
 
