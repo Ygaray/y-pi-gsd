@@ -24,6 +24,7 @@ import {
   applyMigrationV48TaskToolRequirements,
   applyMigrationV51SliceSurface,
   applyMigrationV52HumanUatPending,
+  applyMigrationV55TrackerItem,
 } from "../db-migration-steps.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 
@@ -189,6 +190,43 @@ describe("db-migration-steps", () => {
     const db = new FakeAdapter();
 
     applyMigrationV52HumanUatPending(db);
+
+    assert.deepEqual(db.execCalls, []);
+  });
+
+  test("v55 creates the per-project tracker store", () => {
+    const dbPath = freshDbPath();
+    assert.equal(openDatabase(dbPath), true);
+    const db = _getAdapter();
+    assert.ok(db);
+
+    const tables = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tracker_items', 'track_item_refs')
+    `).all() as Array<Record<string, unknown>>;
+    assert.equal(tables.length, 2, "tracker_items and track_item_refs must exist after fresh install (already applied at v55)");
+
+    const triggers = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_tracker_items_%'
+    `).all() as Array<Record<string, unknown>>;
+    assert.equal(triggers.length, 3, "all three trg_tracker_items_* triggers must exist");
+
+    const index = db.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = 'idx_track_item_refs_unique'
+    `).get();
+    assert.ok(index, "idx_track_item_refs_unique index must exist");
+
+    // Idempotency: a second call on the already-migrated database must not throw.
+    assert.doesNotThrow(() => applyMigrationV55TrackerItem(db));
+  });
+
+  test("v55 no-ops when the workflow_operations foundation table is absent", () => {
+    // FakeAdapter's prepare().get() always returns undefined, simulating a
+    // synthetic/partially-provisioned database with no `workflow_operations`
+    // foundation table -- createTrackerItemSchemaV55 must return without
+    // issuing any DDL in that case (see db-tracker-item-schema.ts).
+    const db = new FakeAdapter();
+
+    applyMigrationV55TrackerItem(db);
 
     assert.deepEqual(db.execCalls, []);
   });
