@@ -15,6 +15,7 @@ import { afterEach, test } from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { withCommandCwd } from "../commands/context.ts";
 import { handleTrack } from "../commands-tracker.ts";
 import {
   handleTrackClose,
@@ -214,11 +215,12 @@ test("parity: /gsd track and the gsd_track_* tool reach identical DB state for e
   const ctx = makeMockCtx();
 
   // Create: one item through each surface with equivalent payloads.
-  await handleTrack(
-    'add --type backlog --title "parity" --severity LOW --detail "d" --tag t1 --ref phase:17 --ref requirement:TRACK-03',
-    ctx,
-    mockPi,
-  );
+  await withCommandCwd(basePath, () =>
+    handleTrack(
+      'add --type backlog --title "parity" --severity LOW --detail "d" --tag t1 --ref phase:17 --ref requirement:TRACK-03',
+      ctx,
+      mockPi,
+    ));
   const commandRows = _getAdapter()!.prepare("SELECT * FROM tracker_items ORDER BY id ASC").all() as Array<
     Record<string, unknown>
   >;
@@ -258,7 +260,8 @@ test("parity: /gsd track and the gsd_track_* tool reach identical DB state for e
   assert.deepEqual(refRows(toolTrackId), refRows(commandTrackId), "create: ref sets diverged");
 
   // Update: the same status/severity/ref change through both surfaces.
-  await handleTrack(`update ${commandTrackId} --severity HIGH --status in-progress --ref phase:18`, ctx, mockPi);
+  await withCommandCwd(basePath, () =>
+    handleTrack(`update ${commandTrackId} --severity HIGH --status in-progress --ref phase:18`, ctx, mockPi));
   const toolUpdate = await handleTrackUpdate(
     { trackId: toolTrackId, severity: "HIGH", status: "in-progress", refs: [{ refKind: "phase", refValue: "18" }] },
     basePath,
@@ -270,7 +273,8 @@ test("parity: /gsd track and the gsd_track_* tool reach identical DB state for e
   assert.deepEqual(refRows(toolTrackId), refRows(commandTrackId), "update: ref sets diverged");
 
   // Close: settle both items identically.
-  await handleTrack(`close ${commandTrackId} --status wont-fix --note "superseded"`, ctx, mockPi);
+  await withCommandCwd(basePath, () =>
+    handleTrack(`close ${commandTrackId} --status wont-fix --note "superseded"`, ctx, mockPi));
   const toolClose = await handleTrackClose(
     { trackId: toolTrackId, status: "wont-fix", resolutionNote: "superseded" },
     basePath,
@@ -288,7 +292,7 @@ test("parity of refusals: command and tool surfaces refuse identical invalid inp
   const ctx = makeMockCtx();
 
   // Blank title.
-  await handleTrack('add --type backlog --title "   "', ctx, mockPi);
+  await withCommandCwd(basePath, () => handleTrack('add --type backlog --title "   "', ctx, mockPi));
   const commandBlankMsg = ctx._notifications.at(-1)!.message;
   const toolBlank = await handleTrackCreate({ type: "backlog", title: "   " }, basePath);
   assert.ok("error" in toolBlank);
@@ -299,14 +303,14 @@ test("parity of refusals: command and tool surfaces refuse identical invalid inp
   const closeResult = await handleTrackClose({ trackId, status: "closed" }, basePath);
   assert.ok(!("error" in closeResult));
 
-  await handleTrack(`update ${trackId} --status in-progress`, ctx, mockPi);
+  await withCommandCwd(basePath, () => handleTrack(`update ${trackId} --status in-progress`, ctx, mockPi));
   const commandTransitionMsg = ctx._notifications.at(-1)!.message;
   const toolTransition = await handleTrackUpdate({ trackId, status: "in-progress" }, basePath);
   assert.ok("error" in toolTransition);
   assert.ok(commandTransitionMsg.includes((toolTransition as { error: string }).error));
 
   // Unknown id.
-  await handleTrack("close TRACK-999", ctx, mockPi);
+  await withCommandCwd(basePath, () => handleTrack("close TRACK-999", ctx, mockPi));
   const commandUnknownMsg = ctx._notifications.at(-1)!.message;
   const toolUnknown = await handleTrackClose({ trackId: "TRACK-999", status: "closed" }, basePath);
   assert.ok("error" in toolUnknown);
