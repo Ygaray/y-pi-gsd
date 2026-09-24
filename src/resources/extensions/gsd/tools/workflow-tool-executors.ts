@@ -89,6 +89,18 @@ import type { ReplanTaskParams } from "./replan-task.js";
 import { handleReplanTask } from "./replan-task.js";
 import type { ReworkBriefSaveParams } from "./rework-brief.js";
 import { handleReworkBriefSave } from "./rework-brief.js";
+import type {
+  TrackCloseParams,
+  TrackCreateParams,
+  TrackListParams,
+  TrackUpdateParams,
+} from "./tracker-tool.js";
+import {
+  handleTrackClose,
+  handleTrackCreate,
+  handleTrackList,
+  handleTrackUpdate,
+} from "./tracker-tool.js";
 import type { ReopenMilestoneParams } from "./reopen-milestone.js";
 import { handleReopenMilestone } from "./reopen-milestone.js";
 import type { ReopenSliceParams } from "./reopen-slice.js";
@@ -931,6 +943,10 @@ export type PlanSliceExecutorParams = PlanSliceParams;
 export type ReplanSliceExecutorParams = ReplanSliceParams;
 export type ReplanTaskExecutorParams = ReplanTaskParams;
 export type ReworkBriefSaveExecutorParams = ReworkBriefSaveParams;
+export type TrackCreateExecutorParams = TrackCreateParams;
+export type TrackUpdateExecutorParams = TrackUpdateParams;
+export type TrackCloseExecutorParams = TrackCloseParams;
+export type TrackListExecutorParams = TrackListParams;
 export type ReopenTaskExecutorParams = ReopenTaskParams;
 export interface TaskRecoveryResumeExecutorParams {
   recoveryActionId: string;
@@ -2558,6 +2574,150 @@ export async function executeReworkBriefSave(
     return {
       content: [{ type: "text", text: `Error saving rework brief: ${msg}` }],
       details: { operation: "rework_brief_save", error: msg },
+      isError: true,
+    };
+  }
+}
+
+export async function executeTrackCreate(
+  params: TrackCreateExecutorParams,
+  basePath: string = process.cwd(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot file a tracker item." }],
+      details: { operation: "track_create", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const result = await handleTrackCreate(params, basePath);
+    if ("error" in result) {
+      return {
+        content: [{ type: "text", text: `Error filing tracker item: ${result.error}` }],
+        details: { operation: "track_create", error: result.error },
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: "text", text: `Filed ${result.trackId} (${params.type}, ${params.severity ?? "MEDIUM"})` }],
+      details: { operation: "track_create", trackId: result.trackId },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `track_create tool failed: ${msg}`, { tool: "gsd_track_create", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error filing tracker item: ${msg}` }],
+      details: { operation: "track_create", error: msg },
+      isError: true,
+    };
+  }
+}
+
+export async function executeTrackUpdate(
+  params: TrackUpdateExecutorParams,
+  basePath: string = process.cwd(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot update tracker item." }],
+      details: { operation: "track_update", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const result = await handleTrackUpdate(params, basePath);
+    if ("error" in result) {
+      return {
+        content: [{ type: "text", text: `Error updating ${params.trackId}: ${result.error}` }],
+        details: { operation: "track_update", trackId: params.trackId, error: result.error },
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: "text", text: `Updated ${result.trackId}` }],
+      details: { operation: "track_update", trackId: result.trackId },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `track_update tool failed: ${msg}`, { tool: "gsd_track_update", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error updating ${params.trackId}: ${msg}` }],
+      details: { operation: "track_update", trackId: params.trackId, error: msg },
+      isError: true,
+    };
+  }
+}
+
+export async function executeTrackClose(
+  params: TrackCloseExecutorParams,
+  basePath: string = process.cwd(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot close tracker item." }],
+      details: { operation: "track_close", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const result = await handleTrackClose(params, basePath);
+    if ("error" in result) {
+      return {
+        content: [{ type: "text", text: `Error closing ${params.trackId}: ${result.error}` }],
+        details: { operation: "track_close", trackId: params.trackId, error: result.error },
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: "text", text: `Closed ${result.trackId} as ${result.status}` }],
+      details: { operation: "track_close", trackId: result.trackId, status: result.status },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `track_close tool failed: ${msg}`, { tool: "gsd_track_close", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error closing ${params.trackId}: ${msg}` }],
+      details: { operation: "track_close", trackId: params.trackId, error: msg },
+      isError: true,
+    };
+  }
+}
+
+export async function executeTrackList(
+  params: TrackListExecutorParams,
+  basePath: string = process.cwd(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot list tracker items." }],
+      details: { operation: "track_list", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const result = await handleTrackList(params);
+    if ("error" in result) {
+      return {
+        content: [{ type: "text", text: `Error listing tracker items: ${result.error}` }],
+        details: { operation: "track_list", error: result.error },
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: "text", text: `${result.items.length} tracker item(s)` }],
+      details: { operation: "track_list", count: result.items.length, items: result.items, summary: result.summary },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `track_list tool failed: ${msg}`, { tool: "gsd_track_list", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error listing tracker items: ${msg}` }],
+      details: { operation: "track_list", error: msg },
       isError: true,
     };
   }
