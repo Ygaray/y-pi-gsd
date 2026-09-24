@@ -51,8 +51,7 @@ import type { AgentEndEvent } from "./auto/types.js";
 import {
   countPlanReviewCyclesForTarget,
   getActiveMilestoneFromDb,
-  getActiveSliceFromDb,
-  getOpenPlanReviewCycle,
+  getOpenPlanReviewCycleForMilestone,
   savePlanReviewCycle,
   updatePlanReviewCycleOutcome,
 } from "./gsd-db.js";
@@ -78,31 +77,66 @@ export async function checkPlanReviewConvergenceAdvance(
   ctx: ExtensionContext,
   basePath: string | undefined,
 ): Promise<boolean> {
-  // `event`/`basePath` are part of this branch's stable signature (mirroring
-  // the other pre-gate checks in `handleAgentEnd`) but are not needed here:
-  // the DB row is the sole detection and decision authority (see module
-  // doc) — this module never reads `event.messages` or `basePath` to make
-  // its decision. `pi` IS used below, for the reround branch's redispatch.
-  void event;
+  // `basePath` is part of this branch's stable signature (mirroring the
+  // other pre-gate checks in `handleAgentEnd`) but is not needed here: the
+  // DB row is the sole detection and decision authority (see module doc).
+  // `event` IS read below (CR-02), but only its turn-completion metadata
+  // (`abortOrigin`/`stopReason`) to detect a genuinely-erroring/aborted
+  // turn — never its message content, which stays off-limits for deciding
+  // the convergence verdict itself (D-02). `pi` IS used below too, for the
+  // reround branch's redispatch.
   void basePath;
 
   const milestone = getActiveMilestoneFromDb();
   if (!milestone) return false;
-  const slice = getActiveSliceFromDb(milestone.id);
-  const sliceId = slice?.id ?? "";
 
-  const openCycle = getOpenPlanReviewCycle(milestone.id, sliceId);
+  // WR-02: look up the open row scoped ONLY by milestone — never also
+  // filtered by an independently-resolved "active slice." The row itself
+  // already carries the sliceId it was opened under (persisted at dispatch
+  // time in `handlePlanReviewConvergence`); read that back below instead of
+  // re-deriving "active slice" here, which can drift from what was active
+  // at dispatch time and silently miss the row.
+  const openCycle = getOpenPlanReviewCycleForMilestone(milestone.id);
   if (!openCycle) return false;
+  const sliceId = openCycle.sliceId;
 
   let artifactContent: string;
   try {
     artifactContent = readFileSync(openCycle.artifactPath, "utf8");
   } catch {
-    // Artifact not written yet — the turn that just ended may not be the
-    // review turn, or the review turn ended before writing it. Leave the
-    // row open; the next agent_end for this target re-checks. Still report
-    // "handled" so unrelated auto-mode logic below the insertion point does
-    // not also try to act on this turn.
+    // Artifact not written yet. Two distinct cases (CR-02):
+    //
+    // 1. The turn that just ended genuinely errored or was aborted (crash,
+    //    provider error, abort) — it will never write the artifact now. Do
+    //    NOT swallow this as "handled": close the row as cap-hit (so it
+    //    stops silently absorbing every later agent_end for this
+    //    milestone/slice, and so a future re-invocation of the standalone
+    //    command can open a fresh row instead of finding this one stuck
+    //    "open" forever) and report `false` so the turn's own error/abort
+    //    falls through to `handleAgentEnd`'s ordinary
+    //    retry/model-fallback/pause pipeline, exactly as it would have if no
+    //    plan-review row were open at all.
+    if (isErroredOrAbortedTurn(event)) {
+      updatePlanReviewCycleOutcome({
+        cycleRowId: openCycle.cycleRowId,
+        status: "cap-hit",
+        highCount: openCycle.highCount,
+        actionableCount: openCycle.actionableCount,
+        laneStates: openCycle.laneStates,
+      });
+      ctx.ui.notify(
+        `Plan-review cycle ${openCycle.cycle} ended without producing its CYCLE_SUMMARY artifact ` +
+          "(the turn errored or was aborted) — marking cap-hit and handing the turn's own error back " +
+          "to the normal error-recovery pipeline.",
+        "error",
+      );
+      return false;
+    }
+    // 2. The turn that just ended may simply not be the review turn, or the
+    //    review turn ended cleanly but hasn't written the artifact yet.
+    //    Leave the row open; the next agent_end for this target re-checks.
+    //    Still report "handled" so unrelated auto-mode logic below the
+    //    insertion point does not also try to act on this turn.
     return true;
   }
 
@@ -205,6 +239,25 @@ export async function checkPlanReviewConvergenceAdvance(
     "warning",
   );
   return true;
+}
+
+/**
+ * Whether the turn that just ended is known to have errored or been aborted
+ * (CR-02), read from `AgentEndEvent`'s own turn-completion metadata —
+ * `abortOrigin`, or the last message's `stopReason` — never its message
+ * content/text. This is a distinct concern from D-02 (which forbids trusting
+ * the chat's free-text CLAIMS about convergence): here we are only asking
+ * "did the turn itself end abnormally," not "what does the turn say about
+ * the review outcome."
+ */
+function isErroredOrAbortedTurn(event: AgentEndEvent): boolean {
+  if (event.abortOrigin) return true;
+  const lastMsg = event.messages[event.messages.length - 1];
+  if (lastMsg && typeof lastMsg === "object" && "stopReason" in lastMsg) {
+    const stopReason = (lastMsg as { stopReason?: unknown }).stopReason;
+    return stopReason === "error" || stopReason === "aborted";
+  }
+  return false;
 }
 
 /**

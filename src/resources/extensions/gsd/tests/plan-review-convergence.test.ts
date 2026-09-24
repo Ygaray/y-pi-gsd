@@ -35,6 +35,7 @@ import {
   closeDatabase,
   countPlanReviewCyclesForTarget,
   getOpenPlanReviewCycle,
+  getOpenPlanReviewCycleForMilestone,
   insertMilestone,
   insertSlice,
   openDatabase,
@@ -524,6 +525,88 @@ describe("checkPlanReviewConvergenceAdvance", () => {
       "SELECT status FROM plan_review_cycles WHERE id = :id",
     ).get({ ":id": openAfterC1!.cycleRowId }) as Record<string, unknown>;
     assert.equal(finalRow?.["status"], "cap-hit");
+  });
+
+  it("CR-02: does not swallow a turn that ended in error before writing its CYCLE_SUMMARY — marks the row cap-hit and lets the error fall through", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    // Never write the artifact — this simulates the review turn crashing or
+    // erroring before it could produce CYCLE_SUMMARY.
+    const artifactPath = join(artifactDir, "c1.md");
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [{ stopReason: "error" }] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(
+      handled,
+      false,
+      "an errored turn must NOT be reported as handled — it must fall through to ordinary error recovery",
+    );
+    assert.equal(pi.sent.length, 0, "no replan/review turn may be dispatched for an errored turn");
+
+    const row = _getAdapter()!.prepare("SELECT status FROM plan_review_cycles WHERE id = :id").get({ ":id": "PRC-M001-S01-c1" }) as Record<string, unknown>;
+    assert.equal(row?.["status"], "cap-hit", "the row must be closed so it stops swallowing future unrelated agent_end events");
+    assert.equal(getOpenPlanReviewCycle("M001", "S01"), null, "the row is no longer 'open'");
+
+    const notice = ctx.notifications.find((n) => n.message.includes("without producing its CYCLE_SUMMARY"));
+    assert.ok(notice, "an explanatory notice must be emitted");
+  });
+
+  it("CR-02: also closes the row for an aborted turn (abortOrigin set) with no artifact", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [], abortOrigin: "timeout" };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, false);
+    assert.equal(getOpenPlanReviewCycle("M001", "S01"), null);
+  });
+
+  it("still leaves the row open (reporting handled) when the artifact is simply not yet written and the turn did not error", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [{ stopReason: "end_turn" }] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true, "a non-erroring turn with no artifact yet must still be absorbed as handled");
+    assert.ok(getOpenPlanReviewCycle("M001", "S01"), "the row must remain open for a subsequent agent_end to re-check");
+  });
+
+  it("WR-02: finds the open row by milestone alone, even when the resolved active slice would otherwise differ from the row's own sliceId", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 0", "actionable: 0", ""].join("\n"));
+    // Open the row under a DIFFERENT sliceId than whatever getActiveSliceFromDb
+    // would resolve today (a stale/rotated slice pointer) — simulating the
+    // race where the active-slice pointer changed between dispatch and decide.
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "STALE-SLICE", cycle: 1, maxCycles: 3, artifactPath });
+    assert.equal(
+      getOpenPlanReviewCycleForMilestone("M001")?.sliceId,
+      "STALE-SLICE",
+      "sanity: the row really is opened under a slice id the active-slice resolver would not currently return",
+    );
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true, "the row must still be found and decided, scoped by milestone alone");
+    assert.ok(ctx.notifications.some((n) => n.message.includes("converged")));
   });
 
   it("behaves identically whether or not full auto-mode is active", async () => {

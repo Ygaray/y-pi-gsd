@@ -1407,6 +1407,31 @@ export function getOpenPlanReviewCycle(milestoneId: string, sliceId: string): Pl
   return rowToPlanReviewCycle(row);
 }
 
+/**
+ * The open cycle row for a milestone, scoped ONLY by `milestone_id` — never
+ * also filtered by an independently-resolved "current active slice" (WR-02).
+ * `checkPlanReviewConvergenceAdvance` uses this instead of
+ * `getOpenPlanReviewCycle(milestoneId, getActiveSliceFromDb(milestoneId))`:
+ * re-deriving "active slice" at decide time can drift from the slice that
+ * was active when `handlePlanReviewConvergence` actually dispatched and
+ * persisted the row (a concurrent slice transition, or the "no active slice"
+ * `""` case resolving to a real slice before the turn ends), silently
+ * missing the very row that should be decided. The row itself already
+ * carries the correct `sliceId` it was opened under — that is the value
+ * callers should read back and use, not a fresh independent resolve.
+ */
+export function getOpenPlanReviewCycleForMilestone(milestoneId: string): PlanReviewCycleRow | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT * FROM plan_review_cycles
+     WHERE milestone_id = :mid
+       AND status IN ('review-pending', 'reround-dispatched')
+     ORDER BY cycle DESC LIMIT 1`,
+  ).get({ ":mid": milestoneId }) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return rowToPlanReviewCycle(row);
+}
+
 /** Persist a decided cycle's outcome — counts, lane states, and terminal/interim status. */
 export function updatePlanReviewCycleOutcome(entry: {
   cycleRowId: string;
