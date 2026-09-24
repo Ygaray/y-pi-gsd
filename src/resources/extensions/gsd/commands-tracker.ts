@@ -22,13 +22,18 @@ import {
   type UpdateTrackerItemInput,
 } from "./db/writers/tracker-item.js";
 import {
+  readTrackerItems,
   TRACKER_BACKLOG_PROJECTION_FILENAME,
   TRACKER_INCIDENTS_PROJECTION_FILENAME,
 } from "./tracker-projection.js";
+import { getTrackerStatusSummary, type TrackerStatusSummaryRow } from "./db/queries.js";
 import { gsdProjectionRoot } from "./paths.js";
+
+const NON_TERMINAL_STATUSES: readonly TrackerItemStatus[] = ["open", "in-progress"];
 
 const USAGE = 'Usage: /gsd track add --type <backlog|incident> --title "..." '
   + "[--severity HIGH|MEDIUM|LOW] [--detail \"...\"] [--tag <tag>] [--ref <kind>:<value>]\n"
+  + "       /gsd track list [--type <backlog|incident>] [--status <status>] [--all]\n"
   + '       /gsd track update <id> [--title "..."] [--severity HIGH|MEDIUM|LOW] '
   + '[--detail "..."] [--status <status>] [--tag <tag>] [--ref <kind>:<value>]\n'
   + '       /gsd track close <id> [--status resolved|closed|wont-fix] [--note "..."]';
@@ -79,7 +84,14 @@ interface CloseArgs {
   note?: string;
 }
 
-type ParsedTrackArgs = AddArgs | UpdateArgs | CloseArgs | { error: string };
+interface ListArgs {
+  kind: "list";
+  type?: TrackerItemType;
+  status?: TrackerItemStatus;
+  all: boolean;
+}
+
+type ParsedTrackArgs = AddArgs | ListArgs | UpdateArgs | CloseArgs | { error: string };
 
 function tokenize(raw: string): string[] {
   const tokens: string[] = [];
@@ -213,6 +225,48 @@ function parseCloseArgs(tokens: string[]): CloseArgs | { error: string } {
   return { kind: "close", trackId, status, ...(note !== undefined ? { note } : {}) };
 }
 
+/**
+ * Filters and formatting flags are parsed leniently and never error — an
+ * empty invocation, a bare `list`, and any other unrecognised-but-flagless
+ * leading token all fall through to this parser and produce a listing
+ * rather than an error (Task 1's note; Task 2 Test 9).
+ */
+function parseListArgs(tokens: string[]): ListArgs {
+  let type: TrackerItemType | undefined;
+  let status: TrackerItemStatus | undefined;
+  let all = false;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t.startsWith("--")) continue;
+    switch (t) {
+      case "--type": {
+        const next = tokens[++i];
+        if (next && TRACKER_ITEM_TYPES.includes(next as TrackerItemType)) {
+          type = next as TrackerItemType;
+        }
+        break;
+      }
+      case "--status": {
+        const next = tokens[++i];
+        if (next && TRACKER_ITEM_STATUSES.includes(next as TrackerItemStatus)) {
+          status = next as TrackerItemStatus;
+        }
+        break;
+      }
+      case "--all":
+        all = true;
+        break;
+      default:
+        // Unknown flags never error on the list path -- worst case, a typo
+        // is silently ignored and the (unfiltered) list still renders.
+        break;
+    }
+  }
+
+  return { kind: "list", ...(type ? { type } : {}), ...(status ? { status } : {}), all };
+}
+
 function parseArgs(raw: string): ParsedTrackArgs {
   const tokens = tokenize(raw);
   if (tokens[0] === "update") {
@@ -222,7 +276,7 @@ function parseArgs(raw: string): ParsedTrackArgs {
     return parseCloseArgs(tokens);
   }
   if (tokens[0] !== "add") {
-    return { error: USAGE };
+    return parseListArgs(tokens);
   }
 
   let type: TrackerItemType | undefined;
@@ -294,6 +348,66 @@ function parseArgs(raw: string): ParsedTrackArgs {
     tags,
     refs,
   };
+}
+
+/**
+ * Renders D-02's deterministic summary as one line, e.g.
+ * "Tracker: backlog 2 open, 1 closed; incident 1 open" — grouped by type,
+ * each non-zero (type, status) pair named once.
+ */
+function formatStatusSummaryLine(summary: TrackerStatusSummaryRow[]): string {
+  if (summary.length === 0) return "Tracker: no items.";
+  const byType = new Map<string, string[]>();
+  for (const row of summary) {
+    const counts = byType.get(row.type) ?? [];
+    counts.push(`${row.count} ${row.status}`);
+    byType.set(row.type, counts);
+  }
+  const parts = [...byType.entries()].map(([type, counts]) => `${type} ${counts.join(", ")}`);
+  return `Tracker: ${parts.join("; ")}`;
+}
+
+/**
+ * Renders the item list from `readTrackerItems()` (the projection module's
+ * one full-table read — never a second query) filtered per `args`, preceded
+ * by D-02's deterministic status summary. A summary-read failure is reported
+ * as its own warning and never renders as a silent zero count (T-17-08).
+ */
+async function list(args: ListArgs, ctx: ExtensionCommandContext): Promise<void> {
+  const basePath = projectRoot();
+  try {
+    const opened = await ensureDbOpen(basePath);
+    if (!opened) {
+      ctx.ui.notify("No GSD database found — nothing tracked yet.", "info");
+      return;
+    }
+
+    try {
+      const summary = getTrackerStatusSummary();
+      ctx.ui.notify(formatStatusSummaryLine(summary), "info");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`Warning: tracker status summary could not be read: ${msg}`, "warning");
+    }
+
+    const items = readTrackerItems()
+      .filter((item) => (args.type ? item.type === args.type : true))
+      .filter((item) => {
+        if (args.status) return item.status === args.status;
+        if (args.all) return true;
+        return NON_TERMINAL_STATUSES.includes(item.status);
+      });
+
+    const lines = items.map((item) => `${item.id} [${item.severity}] ${item.status} — ${item.title}`);
+    const backlogPath = join(gsdProjectionRoot(basePath), TRACKER_BACKLOG_PROJECTION_FILENAME);
+    const incidentsPath = join(gsdProjectionRoot(basePath), TRACKER_INCIDENTS_PROJECTION_FILENAME);
+    lines.push(`Full detail: ${backlogPath}, ${incidentsPath}`);
+
+    ctx.ui.notify(lines.join("\n"), "info");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ctx.ui.notify(`Failed to list tracker items: ${msg}`, "warning");
+  }
 }
 
 async function add(args: AddArgs, ctx: ExtensionCommandContext): Promise<void> {
@@ -391,6 +505,10 @@ export async function handleTrack(
   }
   if (parsed.kind === "add") {
     await add(parsed, ctx);
+    return;
+  }
+  if (parsed.kind === "list") {
+    await list(parsed, ctx);
     return;
   }
   if (parsed.kind === "update") {

@@ -380,6 +380,9 @@ const NESTED_COMPLETIONS: CompletionMap = {
   ],
   track: [
     { cmd: "add", desc: "File a backlog item or incident" },
+    { cmd: "list", desc: "List open tracker items with a status summary" },
+    { cmd: "update", desc: "Update a tracker item's fields, status, or back-references" },
+    { cmd: "close", desc: "Close, resolve, or mark a tracker item wont-fix" },
   ],
   "pr-branch": [
     { cmd: "--dry-run", desc: "Preview what would be filtered" },

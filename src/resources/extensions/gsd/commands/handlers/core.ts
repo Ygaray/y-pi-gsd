@@ -137,7 +137,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd do <text>      Route freeform text to the right GSD command",
     "  /gsd session-report Show session cost, tokens, and work summary  [--json|--save]",
     "  /gsd backlog        Manage backlog items  [add|promote|remove|list]",
-    "  /gsd track          Per-project tracker — durable backlog items and incidents  [add]",
+    "  /gsd track          Per-project tracker — durable backlog items and incidents  [add|list|update|close]",
     "  /gsd pr-branch      Create a clean PR branch filtering .gsd/ commits  [--dry-run|--name]",
     "  /gsd add-tests      Generate tests for completed slices",
     "  /gsd eval-review <sliceId>  Audit a slice's AI evaluation strategy  [--force|--show]",

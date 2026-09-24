@@ -1297,6 +1297,33 @@ export function getDependentSlices(milestoneId: string, sliceId: string): string
   return rowsToStringColumn(rows, "slice_id");
 }
 
+export interface TrackerStatusSummaryRow {
+  type: string;
+  status: string;
+  count: number;
+}
+
+/**
+ * Deterministic COUNT/GROUP BY summary of the per-project tracker (D-02,
+ * TRACK-05) — the mechanically-guaranteed half of status surfacing (the
+ * `prompts/progress.md` instruction is the ergonomic half). Returns `[]`
+ * ONLY for three verified cases: no database open, the tracker tables never
+ * provisioned (the schema's own foundation guard can leave them absent on a
+ * synthetic/sealed-import DB), or genuinely zero rows. Any other read
+ * failure MUST propagate — this summary must never fail open and render as
+ * "zero open items" when something is actually wrong (T-17-08).
+ */
+export function getTrackerStatusSummary(): TrackerStatusSummaryRow[] {
+  if (!getDbOrNull()!) return [];
+  const provisioned = getDbOrNull()!.prepare(
+    `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'tracker_items'`,
+  ).get();
+  if (!provisioned) return [];
+  return getDbOrNull()!.prepare(
+    `SELECT type, status, COUNT(*) AS count FROM tracker_items GROUP BY type, status ORDER BY type ASC, status ASC`,
+  ).all() as unknown as TrackerStatusSummaryRow[];
+}
+
 export function getReplanHistory(milestoneId: string, sliceId?: string): Array<Record<string, unknown>> {
   if (!getDbOrNull()!) return [];
   if (sliceId) {
