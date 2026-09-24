@@ -39,7 +39,7 @@ const ROUTES: Route[] = [
   { keywords: ["context usage", "context window", "how much context", "token usage", "tokens used"], command: "usage" },
   { keywords: ["context breakdown", "what is using context", "skills in context", "agents in context"], command: "context" },
   { keywords: ["session report", "session summary", "cost summary", "how much"], command: "session-report" },
-  { keywords: ["backlog", "parking lot", "later", "someday"], command: "backlog" },
+  { keywords: ["backlog", "parking lot", "later", "someday"], command: "track" },
   { keywords: ["add tests", "write tests", "generate tests", "test coverage"], command: "add-tests" },
   { keywords: ["next", "step", "next step", "what's next"], command: "next" },
   { keywords: ["logs", "debug logs", "log files"], command: "logs" },
@@ -186,4 +186,12 @@ test("/gsd do: 'diagnose' alone routes to doctor (health check), not debug", () 
   const match = matchRoute("diagnose my project");
   assert.ok(match);
   assert.equal(match.command, "doctor");
+});
+
+test("/gsd do: routes 'add this to the backlog for later' to track (D-03 supersession)", () => {
+  // The file-authoritative /gsd backlog command is retired (D-03); backlog
+  // phrasing now lands on the durable per-project tracker.
+  const match = matchRoute("add this to the backlog for later");
+  assert.ok(match);
+  assert.equal(match.command, "track");
 });

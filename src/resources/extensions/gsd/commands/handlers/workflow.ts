@@ -561,11 +561,52 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     await handleDo(trimmed.replace(/^do\s*/, "").trim(), ctx, pi);
     return true;
   }
-  // ── Backlog management ──
+  // ── Backlog management — superseded by the durable tracker (D-03) ──
+  // The prior file-authoritative /gsd backlog implementation is retired: it
+  // parsed and wrote its own .gsd/BACKLOG.md, a second backlog representation
+  // alongside the tracker's own regenerated projection. This arm persists
+  // nothing of its own — it notifies the supersession once, then delegates
+  // every legacy verb onto a real /gsd track action so existing operator
+  // muscle memory lands on the durable tracker_items store instead of an
+  // unknown-subcommand warning.
   if (trimmed === "backlog" || trimmed.startsWith("backlog ")) {
     if (requireNotAutoActive("/gsd backlog", ctx)) return true;
-    const { handleBacklog } = await import("../../commands-backlog.js");
-    await handleBacklog(trimmed.replace(/^backlog\s*/, "").trim(), ctx, pi);
+    const { handleTrack } = await import("../../commands-tracker.js");
+    ctx.ui.notify(
+      "/gsd backlog is superseded by /gsd track — backlog items now live in the durable "
+        + "per-project tracker store, which survives phase and milestone cleanup.",
+      "warning",
+    );
+    const legacyArgs = trimmed.replace(/^backlog\s*/, "").trim();
+    const legacyParts = legacyArgs.split(/\s+/).filter(Boolean);
+    const legacySub = legacyParts[0] ?? "";
+    const legacyRest = legacyParts.slice(1).join(" ");
+    if (legacySub === "add") {
+      await handleTrack(`add --type backlog --title "${legacyRest}"`, ctx, pi);
+      return true;
+    }
+    if (legacySub === "promote") {
+      ctx.ui.notify(
+        "Promotion is now an update — run /gsd track update <id> --status in-progress "
+          + "(or another legal status) using the id shown below.",
+        "info",
+      );
+      await handleTrack("list", ctx, pi);
+      return true;
+    }
+    if (legacySub === "remove") {
+      ctx.ui.notify(
+        "Tracker items are durable and cannot be removed — close them instead with "
+          + "/gsd track close <id>. Matching ids:",
+        "info",
+      );
+      await handleTrack("list", ctx, pi);
+      return true;
+    }
+    // Empty invocation, bare "list", or any other unrecognised legacy verb
+    // all land on the tracker's own list — never the generic unknown-
+    // subcommand warning.
+    await handleTrack("list", ctx, pi);
     return true;
   }
   // ── Per-project tracker (backlog + incidents) ──

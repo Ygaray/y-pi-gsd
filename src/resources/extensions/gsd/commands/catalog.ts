@@ -98,7 +98,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "ship", desc: "Create PR from milestone artifacts and open for review" },
   { cmd: "do", desc: "Route freeform text to the right GSD command" },
   { cmd: "session-report", desc: "Session cost, tokens, and work summary" },
-  { cmd: "backlog", desc: "Manage backlog items (add, promote, remove, list)" },
+  { cmd: "backlog", desc: "Superseded — use /gsd track (durable per-project tracker)" },
   { cmd: "track", desc: "Per-project tracker — durable backlog items and incidents (add, list, update, close)" },
   { cmd: "pr-branch", desc: "Create clean PR branch filtering .gsd/ commits" },
   { cmd: "add-tests", desc: "Generate tests for completed slices" },
@@ -374,9 +374,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "--json", desc: "Machine-readable JSON output" },
   ],
   backlog: [
-    { cmd: "add", desc: "Add item to backlog" },
-    { cmd: "promote", desc: "Promote backlog item to active slice" },
-    { cmd: "remove", desc: "Remove backlog item" },
+    { cmd: "list", desc: "Redirects to /gsd track list" },
   ],
   track: [
     { cmd: "add", desc: "File a backlog item or incident" },

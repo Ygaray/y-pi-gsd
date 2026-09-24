@@ -136,7 +136,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd ship           Create a PR from milestone artifacts  [--dry-run|--draft|--base|--force]",
     "  /gsd do <text>      Route freeform text to the right GSD command",
     "  /gsd session-report Show session cost, tokens, and work summary  [--json|--save]",
-    "  /gsd backlog        Manage backlog items  [add|promote|remove|list]",
+    "  /gsd backlog        Superseded — redirects to /gsd track  [list]",
     "  /gsd track          Per-project tracker — durable backlog items and incidents  [add|list|update|close]",
     "  /gsd pr-branch      Create a clean PR branch filtering .gsd/ commits  [--dry-run|--name]",
     "  /gsd add-tests      Generate tests for completed slices",
