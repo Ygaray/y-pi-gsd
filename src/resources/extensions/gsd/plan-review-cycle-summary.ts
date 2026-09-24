@@ -57,6 +57,33 @@ function isFiniteNonNegativeIntegerString(value: string): boolean {
 }
 
 /**
+ * Thrown by {@link renderPlanReviewCycleSummary} when the caller hands it a
+ * malformed payload — a negative/non-integer count, a lane status outside
+ * {@link PLAN_REVIEW_LANE_STATUSES}, or a field carrying content that
+ * resembles a version-control change marker. Unlike
+ * {@link parsePlanReviewCycleSummary} (which reads untrusted model-turn
+ * output and must never throw), the renderer's input is host code's own
+ * data — a caller-payload mistake here is a programming error, not
+ * adversarial input, so it is safe and correct to throw.
+ */
+export class PlanReviewCycleSummaryRenderError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "PlanReviewCycleSummaryRenderError";
+  }
+}
+
+/**
+ * WR-02-style newline collapse (mirrors `verify-agentic-log.ts`'s
+ * `collapseNewlines`): every emitted field is squashed to one physical line
+ * at the render boundary, so the parser's one-line-per-field invariant holds
+ * exactly even when a lane name or field value carries embedded newlines.
+ */
+function collapseNewlines(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, " ");
+}
+
+/**
  * Parse a CYCLE_SUMMARY document's body into per-lane records, inverting the
  * review prompt's own required emission shape: a `### N. <lane>` heading
  * (ordinal-prefixed) opens a record; while a record is open, `status: `,
@@ -155,6 +182,83 @@ export function parsePlanReviewCycleSummary(content: string): PlanReviewCycleSum
   flush();
 
   return { target, cycle, lanes };
+}
+
+/**
+ * Render a CYCLE_SUMMARY document from a summary object — the inverse of
+ * {@link parsePlanReviewCycleSummary} and the ONLY producer of the accepted
+ * format (mirrors `renderSelfUat`/`parseSelfUatCriteria`'s render/parse
+ * pairing). Emits a `target:`/`cycle:` header block, then one
+ * `### N. <lane>` heading per lane followed by `status: `, `high: `, and
+ * `actionable: ` lines, in lane-array order (the array's own order IS the
+ * ordinal numbering — there is no separate sort key).
+ *
+ * Every emitted field is passed through {@link collapseNewlines} first, so a
+ * lane name or field value containing an embedded newline can never produce
+ * an unprefixed continuation line the parser would silently misattribute.
+ *
+ * Throws {@link PlanReviewCycleSummaryRenderError} on a caller-payload
+ * mistake: a `high`/`actionable` count that is negative or not an integer, a
+ * lane `status` outside {@link PLAN_REVIEW_LANE_STATUSES}, or any field
+ * matching {@link PATCH_MARKER_PATTERN} — these are programming errors in
+ * host code, not untrusted model-turn input, so (unlike the parser) it is
+ * correct to throw rather than silently drop.
+ */
+export function renderPlanReviewCycleSummary(summary: PlanReviewCycleSummary): string {
+  if (PATCH_MARKER_PATTERN.test(summary.target)) {
+    throw new PlanReviewCycleSummaryRenderError(
+      "renderPlanReviewCycleSummary: target carries content resembling a version-control change marker",
+    );
+  }
+  if (!Number.isInteger(summary.cycle) || summary.cycle < 0) {
+    throw new PlanReviewCycleSummaryRenderError(
+      `renderPlanReviewCycleSummary: cycle must be a non-negative integer, got ${summary.cycle}`,
+    );
+  }
+
+  for (const lane of summary.lanes) {
+    if (!isPlanReviewLaneStatus(lane.status)) {
+      throw new PlanReviewCycleSummaryRenderError(
+        `renderPlanReviewCycleSummary: lane "${lane.lane}" has status "${lane.status}" outside the closed set (${PLAN_REVIEW_LANE_STATUSES.join(", ")})`,
+      );
+    }
+    for (const [field, value] of [
+      ["high", lane.high],
+      ["actionable", lane.actionable],
+    ] as const) {
+      if (!Number.isInteger(value) || value < 0) {
+        throw new PlanReviewCycleSummaryRenderError(
+          `renderPlanReviewCycleSummary: lane "${lane.lane}" field "${field}" must be a non-negative integer, got ${value}`,
+        );
+      }
+    }
+    if (
+      PATCH_MARKER_PATTERN.test(lane.lane) ||
+      PATCH_MARKER_PATTERN.test(lane.status) ||
+      PATCH_MARKER_PATTERN.test(String(lane.high)) ||
+      PATCH_MARKER_PATTERN.test(String(lane.actionable))
+    ) {
+      throw new PlanReviewCycleSummaryRenderError(
+        `renderPlanReviewCycleSummary: lane "${lane.lane}" carries content resembling a version-control change marker`,
+      );
+    }
+  }
+
+  const lines: string[] = [];
+  lines.push(`target: ${collapseNewlines(summary.target)}`);
+  lines.push(`cycle: ${summary.cycle}`);
+  lines.push("");
+
+  summary.lanes.forEach((lane, index) => {
+    const n = index + 1;
+    lines.push(`### ${n}. ${collapseNewlines(lane.lane)}`);
+    lines.push(`status: ${lane.status}`);
+    lines.push(`high: ${lane.high}`);
+    lines.push(`actionable: ${lane.actionable}`);
+    lines.push("");
+  });
+
+  return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
 /**
