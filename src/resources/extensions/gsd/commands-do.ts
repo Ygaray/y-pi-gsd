@@ -93,6 +93,27 @@ export async function handleDo(
   const match = matchRoute(args);
 
   if (match) {
+    // The tracker route (WR-01) needs special handling: /gsd track's
+    // parseArgs only recognizes add/update/close as the first token, so
+    // forwarding arbitrary freeform text verbatim either silently produces
+    // a list (when it doesn't start with the literal word "add") or an
+    // "Unknown flag" error and writes nothing (when it does, since the rest
+    // of the phrase isn't `--type ... --title ...` shaped). File the
+    // remaining text directly as a backlog item's title instead of
+    // re-serializing it into a command string.
+    if (match.command === "track") {
+      const title = match.remainingArgs.trim();
+      const { handleTrack, fileFreeformTrackerItem } = await import("./commands-tracker.js");
+      if (!title) {
+        ctx.ui.notify("→ /gsd track list", "info");
+        await handleTrack("list", ctx, pi);
+        return;
+      }
+      ctx.ui.notify(`→ /gsd track add --type backlog --title "${title}"`, "info");
+      await fileFreeformTrackerItem("backlog", title, ctx);
+      return;
+    }
+
     const fullCommand = match.remainingArgs
       ? `${match.command} ${match.remainingArgs}`
       : match.command;

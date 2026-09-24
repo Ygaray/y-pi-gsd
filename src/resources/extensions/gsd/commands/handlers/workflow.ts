@@ -571,7 +571,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
   // unknown-subcommand warning.
   if (trimmed === "backlog" || trimmed.startsWith("backlog ")) {
     if (requireNotAutoActive("/gsd backlog", ctx)) return true;
-    const { handleTrack } = await import("../../commands-tracker.js");
+    const { handleTrack, fileFreeformTrackerItem } = await import("../../commands-tracker.js");
     ctx.ui.notify(
       "/gsd backlog is superseded by /gsd track — backlog items now live in the durable "
         + "per-project tracker store, which survives phase and milestone cleanup.",
@@ -582,7 +582,10 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     const legacySub = legacyParts[0] ?? "";
     const legacyRest = legacyParts.slice(1).join(" ");
     if (legacySub === "add") {
-      await handleTrack(`add --type backlog --title "${legacyRest}"`, ctx, pi);
+      // WR-02: file the title as data via fileFreeformTrackerItem rather than
+      // re-serializing it into a command string and re-tokenizing — a title
+      // containing a literal double quote previously broke tokenize().
+      await fileFreeformTrackerItem("backlog", legacyRest, ctx);
       return true;
     }
     if (legacySub === "promote") {

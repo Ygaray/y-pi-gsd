@@ -493,6 +493,24 @@ async function close(args: CloseArgs, ctx: ExtensionCommandContext): Promise<voi
   }
 }
 
+/**
+ * Programmatic entry point for filing a tracker item from a freeform title
+ * string, bypassing the command-line tokenizer entirely (WR-01/WR-02: a
+ * title containing a literal double quote survives verbatim here instead of
+ * being mis-tokenized by re-serializing into `add --type ... --title "..."`
+ * and re-parsing it through `tokenize()`, which has no escape handling).
+ * Used by `/gsd do`'s freeform routing to the tracker and by the retired
+ * `/gsd backlog add` legacy shim — both previously round-tripped user text
+ * through a reconstructed command string.
+ */
+export async function fileFreeformTrackerItem(
+  type: TrackerItemType,
+  title: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  await add({ kind: "add", type, title: title.trim(), tags: [], refs: [] }, ctx);
+}
+
 export async function handleTrack(
   args: string,
   ctx: ExtensionCommandContext,
