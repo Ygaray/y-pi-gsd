@@ -139,6 +139,10 @@ test("migrateOwnedControlPlaneIncidents: the incidents pane renders the created 
 
 // ─── Test 5: positive scope proof (D-02 anti-pollution filter) ────────────
 
+// IN-01: this length assertion is the mechanical backstop for D-02's
+// anti-pollution scope. Update it by hand alongside every future addition to
+// OWNED_CONTROL_PLANE_INCIDENTS (tracker-owned-incident-migration.ts) --
+// that array's own doc comment cross-references back to this test.
 test("OWNED_CONTROL_PLANE_INCIDENTS: holds exactly one record, the GREEN-05 incident id", () => {
   assert.equal(OWNED_CONTROL_PLANE_INCIDENTS.length, 1);
   assert.equal(OWNED_CONTROL_PLANE_INCIDENTS[0]!.incidentId, "INC-2026-09-20-07");

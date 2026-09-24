@@ -34,6 +34,12 @@ export interface OwnedControlPlaneIncident {
  * the classification judgment that produced this single entry is this
  * phase's own analytical pass (RESEARCH's Working Classification Table),
  * not a mechanical filter this module re-derives at runtime.
+ *
+ * IN-01: adding a record here means also updating the size assertion in
+ * tests/tracker-owned-incident-migration.test.ts ("OWNED_CONTROL_PLANE_INCIDENTS:
+ * holds exactly one record...") -- that test pins this array's length as the
+ * mechanical proof of D-02's anti-pollution scope, so it must grow in lockstep
+ * with this array, by hand, every time.
  */
 export const OWNED_CONTROL_PLANE_INCIDENTS: readonly OwnedControlPlaneIncident[] = [
   {
