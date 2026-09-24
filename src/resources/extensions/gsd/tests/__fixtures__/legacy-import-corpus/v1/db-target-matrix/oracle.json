@@ -29,12 +29,12 @@
       "encoding": "binary"
     },
     {
-      "source_id": "database-future-v54",
-      "path": "future-v54/.gsd/gsd.db",
+      "source_id": "database-future-v56",
+      "path": "future-v56/.gsd/gsd.db",
       "kind": "sqlite-database",
       "outcome": "unparsed",
       "byte_size": 9728,
-      "sha256": "sha256:9991beb5775ae92349844ef47b8f57328add86859e97f42e392bce429c5db324",
+      "sha256": "sha256:ac973e69ed96970f2ad6bf5437eb354911a6e41b9171f2b2e4b58feb58cb45bf",
       "parser_id": "gsd-sqlite-target",
       "parser_version": "1",
       "encoding": "binary"
@@ -201,10 +201,10 @@
       "message": "The target is not an openable SQLite database and cannot be classified safely."
     },
     {
-      "diagnosis_id": "diagnosis-future-v54",
+      "diagnosis_id": "diagnosis-future-v56",
       "code": "future-schema-version",
       "severity": "blocker",
-      "source_id": "database-future-v54",
+      "source_id": "database-future-v56",
       "locator": {
         "start_byte": 0,
         "end_byte": 16
@@ -213,7 +213,7 @@
         "redacted": true,
         "sha256": "sha256:3f8434aff012ffcb594ad7527d6042841ce94f499887f86ab828f84a9a275f91"
       },
-      "message": "Schema v54 is newer than the accepted v53 target and must remain untouched."
+      "message": "Schema v56 is newer than the accepted v55 target and must remain untouched."
     },
     {
       "diagnosis_id": "diagnosis-historical-v30",
@@ -387,7 +387,7 @@
       "disposition": "unsupported"
     },
     {
-      "diagnosis_id": "diagnosis-future-v54",
+      "diagnosis_id": "diagnosis-future-v56",
       "disposition": "unsupported"
     },
     {
