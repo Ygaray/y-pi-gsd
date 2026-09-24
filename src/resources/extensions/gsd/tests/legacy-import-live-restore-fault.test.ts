@@ -57,6 +57,15 @@ const CORPUS_ROOT = fileURLToPath(new URL("./__fixtures__/legacy-import-corpus/v
 const CHILD_PATH = fileURLToPath(new URL("./legacy-import-live-restore-child.ts", import.meta.url));
 const RESOLVER_PATH = fileURLToPath(new URL("./resolve-ts.mjs", import.meta.url));
 const CHILD_DEADLINE_MS = 30_000;
+// The four boundary-matrix tests below each iterate a 43-entry boundary matrix, spawning up to
+// three real OS child processes per boundary. Measured standalone on 2026-09-24, before
+// optimisation, this file took 373,551 ms end-to-end with 21 passing / 0 failing test cases.
+// If this file goes quiet for a minute or more, that is expected:
+// a busy worker process sustaining 20%+ CPU with no TAP output growth is real work in flight, not
+// a hang. Only treat it as a hang if the worker process is near-0% CPU with no live child process
+// — that combination is the actual deadlock signature; CPU-idle-with-no-child is the only thing
+// that should motivate killing the run.
+const BOUNDARY_TEST_TIMEOUT_MS = 300_000;
 const tempDirectories = new Set<string>();
 const managedChildren = new Set<ManagedChild>();
 let sequence = 0;
@@ -790,7 +799,7 @@ test("restart and maintenance remain non-writing while replacement intent is act
   });
 });
 
-test("every durable live restore boundary converges after real SIGKILL", async () => {
+test("every durable live restore boundary converges after real SIGKILL", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, async () => {
   for (const boundary of CRASH_BOUNDARIES) {
     const prepared = prepareRestoreCase();
     const backupHash = sha256(prepared.input.backup.backup_ref);
@@ -918,7 +927,7 @@ test("reopen rejects in-place database content drift before the reopen proof bou
   assert.equal(database().prepare("SELECT COUNT(*) AS count FROM workflow_import_restores").get()?.["count"], 1);
 });
 
-test("every live restore boundary converges after a synchronous exception", () => {
+test("every live restore boundary converges after a synchronous exception", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, () => {
   for (const boundary of CRASH_BOUNDARIES) {
     const prepared = prepareRestoreCase();
     let injected = false;
@@ -948,7 +957,7 @@ test("every live restore boundary converges after a synchronous exception", () =
   }
 });
 
-test("every recovery publication boundary converges after real SIGKILL", async () => {
+test("every recovery publication boundary converges after real SIGKILL", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, async () => {
   for (const boundary of RECOVERY_BOUNDARIES) {
     const prepared = prepareRestoreCase();
     const backupHash = sha256(prepared.input.backup.backup_ref);
@@ -996,7 +1005,7 @@ test("every recovery publication boundary converges after real SIGKILL", async (
   }
 });
 
-test("every recovery publication boundary preserves a usable handle after an exception", async () => {
+test("every recovery publication boundary preserves a usable handle after an exception", { timeout: BOUNDARY_TEST_TIMEOUT_MS }, async () => {
   for (const boundary of RECOVERY_BOUNDARIES) {
     const prepared = prepareRestoreCase();
     await leaveTamperedPublication(prepared);
