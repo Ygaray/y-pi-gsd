@@ -118,7 +118,7 @@ test("opening a newer (v55) database throws SchemaTooNewError with the exact mes
   assert.equal(
     thrown.message,
     "gsd.db schema is v55, newer than the v54 this gsd-pi supports. " +
-    "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.",
+    "Rebuild your fork: run pnpm build before opening this project.",
   );
 });
 
@@ -141,7 +141,7 @@ test("openWorkflowDatabase maps refuse-newer to a schema-too-new result with the
   assert.equal(
     result.error.message,
     "gsd.db schema is v55, newer than the v54 this gsd-pi supports. " +
-    "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.",
+    "Rebuild your fork: run pnpm build before opening this project.",
   );
 });
 

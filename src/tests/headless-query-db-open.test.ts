@@ -28,7 +28,7 @@ import { deriveState } from "../resources/extensions/gsd/state.ts";
 
 const V54_MESSAGE =
   "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
+  "Rebuild your fork: run pnpm build before opening this project.";
 
 test("headless-query opens the DB before deriveState (#4123)", async () => {
   const calls: string[] = [];

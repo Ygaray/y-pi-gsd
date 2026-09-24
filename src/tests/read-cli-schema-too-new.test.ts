@@ -34,7 +34,7 @@ import { readProgressFromDb } from "../resources/extensions/gsd/state/progress-f
 
 const V54_MESSAGE =
   "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
+  "Rebuild your fork: run pnpm build before opening this project.";
 
 // Real preflight probe: the same pieces the production jiti loader wires up,
 // loaded through this test process's module graph.

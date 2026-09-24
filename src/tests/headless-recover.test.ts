@@ -748,7 +748,7 @@ test("headless recover choice-required prints full executable forward-repair com
 
 const V54_MESSAGE =
   "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
+  "Rebuild your fork: run pnpm build before opening this project.";
 
 test("headless recover forwards the exact refuse-newer message for a newer-schema project", async (t) => {
   const base = makeMarkdownFixture();
