@@ -916,7 +916,8 @@ test("Milestone completion never halts for an unresolvable residual item: it com
   assert.equal(result.status, "committed");
   assert.equal(result.residualCapture.created.length, 1);
   assert.equal(result.residualCapture.skipped.length, 0);
-  assert.equal(result.residualCapture.warnings.length, 1);
+  // WR-02/IN-01 fix: `failures` is failure-only, never populated on success.
+  assert.equal(result.residualCapture.failures.length, 0);
   assert.equal(
     Number(row(
       "SELECT COUNT(*) AS count FROM tracker_items WHERE title = 'Deferred item the operator never resolved'",
@@ -932,7 +933,7 @@ test("Milestone completion with no residual items reports an empty capture and l
   const result = await completeMilestone(input("milestone-complete/residual/absent-is-noop"));
 
   assert.equal(result.status, "committed");
-  assert.deepEqual(result.residualCapture, { created: [], skipped: [], warnings: [] });
+  assert.deepEqual(result.residualCapture, { created: [], skipped: [], failures: [] });
   assert.equal(trackerItemCount(), trackerBefore);
 
   const storedCloseout = storedEventPayload(result.operationId)["closeout"] as Record<string, unknown>;
@@ -999,22 +1000,22 @@ test("Milestone completion residual items never bypass hard block 3: outstanding
   assert.equal(trackerItemCount(), trackerBefore);
 });
 
-test("Milestone completion still commits when the residual capture reports a failure warning", async () => {
+test("Milestone completion still commits when the residual capture reports a failure", async () => {
   await prepareFixture();
 
   const result = await completeMilestone(input("milestone-complete/residual/capture-failure-still-commits", {
     // A whitespace-only title trips createTrackerItem's own
     // validateCreateTrackerItemInput ("title is required") — a real
     // production failure path, forcing captureMilestoneCloseoutResiduals to
-    // record a warning without throwing.
+    // record a failure without throwing.
     residualItems: [{ title: "   " }],
   }));
 
   assert.equal(result.status, "committed");
   assert.equal(result.canonicalStatus, "completed");
   assert.equal(result.residualCapture.created.length, 0);
-  assert.equal(result.residualCapture.warnings.length, 1);
-  assert.match(result.residualCapture.warnings[0]!, /title is required/);
+  assert.equal(result.residualCapture.failures.length, 1);
+  assert.match(result.residualCapture.failures[0]!, /title is required/);
 
   assert.equal(row(`
     SELECT COUNT(*) AS count FROM workflow_domain_events
@@ -1050,14 +1051,14 @@ test("GREEN-05 never-halt guarantee: a forced residual-capture failure still yie
 
   const result = await completeMilestone(input("milestone-complete/residual/never-halt-guarantee", {
     // Whitespace-only title forces createTrackerItem's own validation to
-    // fail — captureMilestoneCloseoutResiduals must record this as a
-    // warning and never rethrow, per the file-purpose header on
+    // fail — captureMilestoneCloseoutResiduals must record this in
+    // `failures` and never rethrow, per the file-purpose header on
     // milestone-closeout-residual-capture.ts.
     residualItems: [{ title: "   " }],
   }));
 
   assert.equal(result.status, "committed");
-  assert.equal(result.residualCapture.warnings.length > 0, true);
+  assert.equal(result.residualCapture.failures.length > 0, true);
   assert.deepEqual(row(`
     SELECT lifecycle.lifecycle_status AS canonical_status
     FROM workflow_item_lifecycles lifecycle

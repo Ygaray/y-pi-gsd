@@ -53,8 +53,8 @@ export interface MilestoneCompletionCloseout {
    * Deferred/residual items this closeout could not resolve (GREEN-05,
    * D-05). Optional so every existing caller compiles unchanged and every
    * already-written `milestone.completed` event stays readable. Captured
-   * into the durable tracker post-commit and surfaced as warnings on the
-   * receipt — never a reason to block the close.
+   * into the durable tracker post-commit and surfaced on the receipt's
+   * `residualCapture` — never a reason to block the close.
    */
   residualItems?: MilestoneCloseoutResidualItem[];
 }

@@ -53,7 +53,7 @@ test("captureMilestoneCloseoutResiduals: an empty item array is a no-op", () => 
 
   const result = captureMilestoneCloseoutResiduals({ milestoneId: "M001", items: [], basePath });
 
-  assert.deepEqual(result, { created: [], skipped: [], warnings: [] });
+  assert.deepEqual(result, { created: [], skipped: [], failures: [] });
   assert.equal(allRows().length, before);
 });
 
@@ -87,7 +87,10 @@ test("captureMilestoneCloseoutResiduals: a single item creates exactly one corre
   const tags = JSON.parse(String(row.disposition_tags)) as string[];
   assert.ok(tags.includes("milestone:M001"), `expected a milestone:M001 disposition tag, got ${JSON.stringify(tags)}`);
   assert.equal(result.skipped.length, 0);
-  assert.equal(result.warnings.length, 1);
+  // WR-02/IN-01 fix: a successful capture never populates `failures` — the
+  // field is failure-only, so a caller can treat non-empty as "attention
+  // needed" without it firing on every successful close.
+  assert.equal(result.failures.length, 0);
 });
 
 // ─── Test 3: adjacency / idempotency ───────────────────────────────────────
@@ -167,7 +170,7 @@ test("captureMilestoneCloseoutResiduals: refs are written only for supplied phas
 
 // ─── Test 6: write failure never throws ────────────────────────────────────
 
-test("captureMilestoneCloseoutResiduals: a write failure is recorded as a warning and never thrown", () => {
+test("captureMilestoneCloseoutResiduals: a write failure is recorded in failures and never thrown", () => {
   const basePath = makeBase();
 
   const result = captureMilestoneCloseoutResiduals({
@@ -181,8 +184,8 @@ test("captureMilestoneCloseoutResiduals: a write failure is recorded as a warnin
 
   assert.equal(result.created.length, 0);
   assert.equal(result.skipped.length, 0);
-  assert.equal(result.warnings.length, 1);
-  assert.match(result.warnings[0]!, /title is required/);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0]!, /title is required/);
   assert.equal(allRows().length, 0);
 });
 

@@ -41,7 +41,16 @@ export interface MilestoneCloseoutResidualItem {
 export interface MilestoneCloseoutResidualCapture {
   created: string[];
   skipped: string[];
-  warnings: string[];
+  /**
+   * Genuine per-item write failures ONLY (WR-02/IN-01 fix) — never populated
+   * on a successful capture. A future caller/UI can safely treat a non-empty
+   * `failures` array as "something needs attention" without it firing on
+   * every successful close that captured at least one item. Successful
+   * captures are fully described by `created` (the trackId list); logging a
+   * matching success-path message here would just duplicate that
+   * information in the same channel a failure uses.
+   */
+  failures: string[];
 }
 
 /**
@@ -90,7 +99,7 @@ function itemIdentity(title: string, refs: readonly TrackerItemRefInput[]): stri
  * `backlog` row.
  *
  * Never throws: a per-item createTrackerItem failure is caught and recorded
- * as a warning, and the loop continues to the next item. The caller has
+ * in `failures`, and the loop continues to the next item. The caller has
  * already committed its own transaction by the time this function runs —
  * see the file-purpose header above.
  */
@@ -108,7 +117,7 @@ export function captureMilestoneCloseoutResiduals(input: {
 
     const created: string[] = [];
     const skipped: string[] = [];
-    const warnings: string[] = [];
+    const failures: string[] = [];
 
     for (const item of input.items) {
       const refs = itemRefs(item);
@@ -136,13 +145,12 @@ export function captureMilestoneCloseoutResiduals(input: {
           input.basePath,
         );
         created.push(trackId);
-        warnings.push(`Captured residual item ${trackId}: ${item.title.trim()}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        warnings.push(`Failed to capture residual item "${item.title.trim()}": ${message}`);
+        failures.push(`Failed to capture residual item "${item.title.trim()}": ${message}`);
       }
     }
 
-    return { created, skipped, warnings };
+    return { created, skipped, failures };
   });
 }
