@@ -6,10 +6,6 @@
 // the live `SCHEMA_VERSION` export and a real `SchemaTooNewError` instance
 // -- never typed as a literal digit sequence in this file -- so the guard
 // itself never goes stale across a future schema bump.
-//
-// RED-phase stub (#19-01 Task 2): the version-marker predicate is not yet
-// implemented -- it always reports "no violation" so Test 4 (the guard has
-// teeth) fails for real before any implementation exists.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -17,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { SCHEMA_VERSION } from "../resources/extensions/gsd/db/engine.ts";
+import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
 
 const testsDir = dirname(fileURLToPath(import.meta.url));
 
@@ -40,14 +36,49 @@ function lineNumberAt(source: string, index: number): number {
   return source.slice(0, index).split("\n").length;
 }
 
-/** RED-phase stub: TODO(GREEN) derive markers from a real SchemaTooNewError message. */
-function findBakedInVersionViolations(_source: string): Array<{ line: number; text: string }> {
-  return [];
+/**
+ * The production SchemaTooNewError message is the single source of truth
+ * for the refuse-newer wording. Split a real instance's message at each
+ * embedded version-number run to recover the fixed text markers that
+ * immediately precede a version number -- e.g. "schema is v" and
+ * "newer than the v" -- without ever typing those markers by hand.
+ */
+function deriveVersionMarkers(): string[] {
+  const sample = new SchemaTooNewError(SCHEMA_VERSION + 1, SCHEMA_VERSION).message;
+  const markers: string[] = [];
+  const versionRunPattern = /v\d+/g;
+  let match: RegExpExecArray | null;
+  let previousEnd = 0;
+  while ((match = versionRunPattern.exec(sample)) !== null) {
+    markers.push(sample.slice(previousEnd, match.index + 1));
+    previousEnd = match.index + match[0].length;
+  }
+  return markers;
 }
 
-/** RED-phase stub: TODO(GREEN) reuse the real marker-derived pattern. */
-function hasBakedInVersionLiteral(_source: string): boolean {
-  return false;
+function buildBakedInVersionPattern(): RegExp {
+  const escaped = deriveVersionMarkers().map((marker) =>
+    marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  );
+  return new RegExp(`(?:${escaped.join("|")})\\d+`, "g");
+}
+
+function findBakedInVersionViolations(source: string): Array<{ line: number; text: string }> {
+  const pattern = buildBakedInVersionPattern();
+  const violations: Array<{ line: number; text: string }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    violations.push({ line: lineNumberAt(source, match.index), text: match[0] });
+    if (match[0].length === 0) pattern.lastIndex += 1;
+  }
+  return violations;
+}
+
+/** Fail-first predicate: true when `source` re-templates a version marker
+ * with a baked-in digit run instead of an expression referencing
+ * SCHEMA_VERSION. */
+function hasBakedInVersionLiteral(source: string): boolean {
+  return buildBakedInVersionPattern().test(source);
 }
 
 function findBareIntegerRecordSchemaVersionCalls(
