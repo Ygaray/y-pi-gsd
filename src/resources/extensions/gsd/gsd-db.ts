@@ -1370,6 +1370,10 @@ export function savePlanReviewCycle(entry: {
        ON CONFLICT(id) DO UPDATE SET
          max_cycles = :max_cycles,
          artifact_path = :artifact_path,
+         status = 'review-pending',
+         high_count = 0,
+         actionable_count = 0,
+         lane_states = '[]',
          updated_at = :updated_at`,
     ).run({
       ":id": cycleRowId,

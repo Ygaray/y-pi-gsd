@@ -39,6 +39,7 @@ import {
   insertSlice,
   openDatabase,
   savePlanReviewCycle,
+  updatePlanReviewCycleOutcome,
 } from "../gsd-db.ts";
 
 const tempDirs = new Set<string>();
@@ -590,5 +591,78 @@ describe("handlePlanReviewConvergence", () => {
 
     const row = getOpenPlanReviewCycle("M001", "S01");
     assert.equal(row?.maxCycles, PLAN_REVIEW_MAX_CYCLES_BOUNDS.default);
+  });
+
+  it("CR-01: re-invoking on a target already decided to 'converged' re-arms the cycle-1 row instead of leaving it stale", async () => {
+    const basePath = makeBase();
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+
+    await withCommandCwd(basePath, async () => {
+      await handlePlanReviewConvergence("--max-cycles 3", ctx, pi);
+    });
+    const firstRow = getOpenPlanReviewCycle("M001", "S01");
+    assert.ok(firstRow, "the first run must open a cycle-1 row");
+
+    // Decide the first run to a terminal state, exactly as
+    // checkPlanReviewConvergenceAdvance would on convergence.
+    updatePlanReviewCycleOutcome({
+      cycleRowId: firstRow!.cycleRowId,
+      status: "converged",
+      highCount: 3,
+      actionableCount: 2,
+      laneStates: JSON.stringify([{ lane: "claude", status: "reviewed", high: 3, actionable: 2 }]),
+    });
+    assert.equal(getOpenPlanReviewCycle("M001", "S01"), null, "the terminal row must no longer be 'open'");
+
+    // Re-invoke the same command against the same milestone/slice — a normal,
+    // expected re-review after further edits. The deterministic row id
+    // means this upserts onto the SAME row (PRC-M001-S01-c1).
+    const pi2 = createMockPi();
+    const ctx2 = createMockCtx();
+    await withCommandCwd(basePath, async () => {
+      await handlePlanReviewConvergence("--max-cycles 3", ctx2, pi2);
+    });
+
+    const reopened = getOpenPlanReviewCycle("M001", "S01");
+    assert.ok(reopened, "the re-invoked run's cycle-1 row must be detected as open again");
+    assert.equal(reopened?.cycleRowId, firstRow!.cycleRowId, "it is genuinely the same row id, re-armed in place");
+    assert.equal(reopened?.status, "review-pending");
+    assert.equal(reopened?.highCount, 0, "stale residual high_count from the prior run must be reset");
+    assert.equal(reopened?.actionableCount, 0, "stale residual actionable_count from the prior run must be reset");
+    assert.equal(reopened?.laneStates, "[]", "stale lane_states from the prior run must be reset");
+  });
+
+  it("CR-01: re-invoking on a target already decided to 'cap-hit' also re-arms the row", async () => {
+    const basePath = makeBase();
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+
+    await withCommandCwd(basePath, async () => {
+      await handlePlanReviewConvergence("--max-cycles 1", ctx, pi);
+    });
+    const firstRow = getOpenPlanReviewCycle("M001", "S01");
+    assert.ok(firstRow);
+
+    updatePlanReviewCycleOutcome({
+      cycleRowId: firstRow!.cycleRowId,
+      status: "cap-hit",
+      highCount: 5,
+      actionableCount: 1,
+      laneStates: JSON.stringify([{ lane: "claude", status: "reviewed", high: 5, actionable: 1 }]),
+    });
+    assert.equal(getOpenPlanReviewCycle("M001", "S01"), null);
+
+    const pi2 = createMockPi();
+    const ctx2 = createMockCtx();
+    await withCommandCwd(basePath, async () => {
+      await handlePlanReviewConvergence("--max-cycles 1", ctx2, pi2);
+    });
+
+    const reopened = getOpenPlanReviewCycle("M001", "S01");
+    assert.ok(reopened, "a cap-hit terminal row must also be re-armed on re-invocation");
+    assert.equal(reopened?.status, "review-pending");
+    assert.equal(reopened?.highCount, 0);
+    assert.equal(reopened?.actionableCount, 0);
   });
 });
