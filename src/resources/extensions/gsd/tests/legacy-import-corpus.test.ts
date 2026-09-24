@@ -2445,6 +2445,14 @@ test("legacy corpus supplemental preserves evidence without replay or filesystem
 
 test("legacy corpus capstone classifies database targets and changes without applying", () => {
   const corpusRoot = new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url);
+  // Derived (not hand-typed) so the "future" schema-version fixture name/version stay in
+  // lockstep with SCHEMA_VERSION -- see schema-version-literal-drift.test.ts's header comment
+  // for why a hardcoded literal here is exactly the staleness class this phase set out to
+  // eliminate. Deriving the literal does not rename the on-disk fixture directory (a manual
+  // step, same as every prior schema bump); it does turn a silent semantic drift ("future"
+  // quietly becoming "current") into a loud, immediate ENOENT/mismatch at test time instead.
+  const FUTURE_SCHEMA_VERSION = SCHEMA_VERSION + 1;
+  const FUTURE_SCENARIO_NAME = `future-v${FUTURE_SCHEMA_VERSION}`;
   const caseNames = ["db-target-matrix", "action-matrix", "composite-capstone"] as const;
   const cases = caseNames.map((caseName) => loadLegacyImportCorpusCase(corpusRoot, caseName));
   for (const corpusCase of cases) validateLegacyImportCorpusCase(corpusCase);
@@ -2491,7 +2499,7 @@ test("legacy corpus capstone classifies database targets and changes without app
 
   assert.deepEqual(sourceRows("db-target-matrix"), [
     ["corrupt/.gsd/gsd.db", "gsd-sqlite-target", "unparsed"],
-    ["future-v56/.gsd/gsd.db", "gsd-sqlite-target", "unparsed"],
+    [`${FUTURE_SCENARIO_NAME}/.gsd/gsd.db`, "gsd-sqlite-target", "unparsed"],
     ["historical-v30/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["historical-v34/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["historical-v43/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
@@ -2509,7 +2517,7 @@ test("legacy corpus capstone classifies database targets and changes without app
   assert.deepEqual(changeRows("db-target-matrix"), []);
   assert.deepEqual(diagnosisRows("db-target-matrix"), [
     ["diagnosis-corrupt-database", "corrupt-database", "blocker", "database-corrupt"],
-    ["diagnosis-future-v56", "future-schema-version", "blocker", "database-future-v56"],
+    [`diagnosis-${FUTURE_SCENARIO_NAME}`, "future-schema-version", "blocker", `database-${FUTURE_SCENARIO_NAME}`],
     ["diagnosis-historical-v30", "historical-schema-version", "info", "database-historical-v30"],
     ["diagnosis-historical-v34", "historical-schema-version", "info", "database-historical-v34"],
     ["diagnosis-historical-v43", "historical-schema-version", "info", "database-historical-v43"],
@@ -2524,7 +2532,7 @@ test("legacy corpus capstone classifies database targets and changes without app
   ]);
   assert.deepEqual(oracle("db-target-matrix").resolutions, [
     { diagnosis_id: "diagnosis-corrupt-database", disposition: "unsupported" },
-    { diagnosis_id: "diagnosis-future-v56", disposition: "unsupported" },
+    { diagnosis_id: `diagnosis-${FUTURE_SCENARIO_NAME}`, disposition: "unsupported" },
     {
       diagnosis_id: "diagnosis-historical-v30",
       disposition: "mapped",
@@ -2596,7 +2604,7 @@ test("legacy corpus capstone classifies database targets and changes without app
     database.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = ? AND name = ?")
       .get(type, name)?.count === 1;
   const validTargetScenarios = [
-    "future-v56",
+    FUTURE_SCENARIO_NAME,
     "historical-v30",
     "historical-v34",
     "historical-v43",
@@ -2617,7 +2625,7 @@ test("legacy corpus capstone classifies database targets and changes without app
       (database) => database.prepare("SELECT max(version) AS version FROM schema_version").get()?.version ?? 0,
     )])),
     {
-      "future-v56": 56,
+      [FUTURE_SCENARIO_NAME]: FUTURE_SCHEMA_VERSION,
       "historical-v30": 30,
       "historical-v34": 34,
       "historical-v43": 43,

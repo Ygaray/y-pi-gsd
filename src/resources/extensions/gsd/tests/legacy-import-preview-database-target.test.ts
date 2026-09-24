@@ -45,9 +45,17 @@ import { SCHEMA_VERSION } from "../db/engine.ts";
 import { loadLegacyImportCorpusCase } from "./helpers/legacy-import-corpus.ts";
 
 const CORPUS_ROOT = new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url);
+// Derived (not hand-typed) so the "future" schema-version fixture name/version stay in
+// lockstep with SCHEMA_VERSION -- see schema-version-literal-drift.test.ts's header comment
+// for why a hardcoded literal here is exactly the staleness class this phase set out to
+// eliminate. Deriving the literal does not rename the on-disk fixture directory (a manual
+// step, same as every prior schema bump); it does turn a silent semantic drift ("future"
+// quietly becoming "current") into a loud, immediate ENOENT/mismatch at test time instead.
+const FUTURE_SCHEMA_VERSION = SCHEMA_VERSION + 1;
+const FUTURE_SCENARIO_NAME = `future-v${FUTURE_SCHEMA_VERSION}`;
 const DATABASE_MATRIX_SCENARIOS = [
   "corrupt",
-  "future-v56",
+  FUTURE_SCENARIO_NAME,
   "historical-v30",
   "historical-v34",
   "historical-v43",
@@ -978,7 +986,7 @@ test("legacy preview database target classifies supported schema boundaries and 
     { name: "historical-v49", version: 49, code: "historical-schema-version", outcome: "mapped" },
     { name: "historical-v51", version: 51, code: "historical-schema-version", outcome: "mapped" },
     { name: "historical-v52", version: 52, code: "historical-schema-version", outcome: "mapped" },
-    { name: "future-v56", version: 56, code: "future-schema-version", outcome: "unparsed" },
+    { name: FUTURE_SCENARIO_NAME, version: FUTURE_SCHEMA_VERSION, code: "future-schema-version", outcome: "unparsed" },
   ] as const;
   for (const scenario of scenarios) {
     const gsd = join(base, scenario.name);
