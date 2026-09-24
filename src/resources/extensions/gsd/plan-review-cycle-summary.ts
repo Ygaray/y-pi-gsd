@@ -113,6 +113,14 @@ export function parsePlanReviewCycleSummary(content: string): PlanReviewCycleSum
     high?: string;
     actionable?: string;
   } | null = null;
+  // WR-01: gates the `target:`/`cycle:` header branches. Distinct from
+  // `!current` (which is also true again once a lane record CLOSES) — this
+  // tracks "has any lane record ever opened," matching the documented
+  // contract that header lines are recognized "before any lane record
+  // opens," not merely "while none is currently open." Without this, a
+  // `target:`/`cycle:` line appearing after the first `### N.` heading would
+  // silently overwrite the already-parsed values.
+  let headerClosed = false;
 
   const flush = (): void => {
     if (!current) return;
@@ -146,7 +154,7 @@ export function parsePlanReviewCycleSummary(content: string): PlanReviewCycleSum
   };
 
   for (const line of content.split("\n")) {
-    if (!current) {
+    if (!headerClosed) {
       if (line.startsWith("target: ")) {
         target = line.slice("target: ".length).trim();
         continue;
@@ -160,6 +168,7 @@ export function parsePlanReviewCycleSummary(content: string): PlanReviewCycleSum
 
     const orderedHeading = line.match(/^### (\d+)\. (.*)$/);
     if (orderedHeading) {
+      headerClosed = true;
       flush();
       current = { lane: orderedHeading[2] ?? "" };
       continue;
@@ -167,6 +176,7 @@ export function parsePlanReviewCycleSummary(content: string): PlanReviewCycleSum
     if (line.startsWith("### ")) {
       // A `### ` heading with no ordinal prefix never opens a record; it
       // only closes whatever record (if any) was already open.
+      headerClosed = true;
       flush();
       continue;
     }

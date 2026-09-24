@@ -217,6 +217,33 @@ describe("plan-review-cycle-summary", () => {
   it("exposes the closed verdict set", () => {
     assert.deepEqual(PLAN_REVIEW_CYCLE_VERDICTS, ["converged", "reround", "blocked"]);
   });
+
+  it("WR-01: rejects a target:/cycle: line reappearing after a lane record closes (the !current re-open window), never silently overwriting the header", () => {
+    const content = [
+      "target: Milestone M001",
+      "cycle: 1",
+      "",
+      "### 1. claude",
+      "status: reviewed",
+      "high: 0",
+      "actionable: 0",
+      // A bare (non-ordinal) `### ` heading closes lane 1 without opening a
+      // new record — this is the exact window where `!current` becomes true
+      // again post-close, distinct from "no lane has opened yet".
+      "### Notes",
+      "target: Milestone HIJACKED",
+      "cycle: 99",
+      "### 2. codex",
+      "status: reviewed",
+      "high: 0",
+      "actionable: 0",
+      "",
+    ].join("\n");
+    const summary = parsePlanReviewCycleSummary(content);
+    assert.equal(summary.target, "Milestone M001", "a target: line after a lane record closes must never overwrite the original");
+    assert.equal(summary.cycle, 1, "a cycle: line after a lane record closes must never overwrite the original");
+    assert.equal(summary.lanes.length, 2, "the lane records themselves are unaffected");
+  });
 });
 
 describe("checkPlanReviewConvergenceAdvance", () => {
