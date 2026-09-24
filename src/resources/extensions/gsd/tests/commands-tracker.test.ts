@@ -273,6 +273,50 @@ test("handleTrack('update ...') applies severity, tag, and ref changes and notif
   assert.ok(ctx._notifications[0].message.includes(trackId));
 });
 
+// ─── Test 9b: /gsd track update --clear-tags/--clear-refs (IN-01) ────────
+
+test("handleTrack('update ... --clear-tags --clear-refs') clears both sets to an explicit empty array", async () => {
+  const basePath = makeBase();
+  const { trackId } = createTrackerItem(
+    {
+      type: "backlog",
+      title: "clearable",
+      dispositionTags: ["deferred-to-phase-21"],
+      refs: [{ refKind: "phase", refValue: "17" }],
+    },
+    basePath,
+  );
+  const ctx = makeMockCtx();
+
+  await withCommandCwd(basePath, () =>
+    handleTrack(`update ${trackId} --clear-tags --clear-refs`, ctx, mockPi));
+
+  const row = getRow(basePath, trackId);
+  assert.deepEqual(JSON.parse(String(row.disposition_tags)), []);
+  assert.equal(refRows(trackId).length, 0);
+  assert.equal(ctx._notifications.length, 1);
+  assert.ok(ctx._notifications[0].message.includes(trackId));
+});
+
+test("handleTrack('update ... --clear-tags --tag ...') refuses the ambiguous combination and writes nothing", async () => {
+  const basePath = makeBase();
+  const { trackId } = createTrackerItem(
+    { type: "backlog", title: "ambiguous clear", dispositionTags: ["kept"] },
+    basePath,
+  );
+  const before = getRow(basePath, trackId);
+  const ctx = makeMockCtx();
+
+  await withCommandCwd(basePath, () =>
+    handleTrack(`update ${trackId} --clear-tags --tag new-tag`, ctx, mockPi));
+
+  assert.equal(ctx._notifications.length, 1);
+  assert.match(ctx._notifications[0].message, /--clear-tags cannot be combined with --tag/);
+  const after = getRow(basePath, trackId);
+  assert.equal(after.updated_at, before.updated_at);
+  assert.deepEqual(JSON.parse(String(after.disposition_tags)), ["kept"]);
+});
+
 // ─── Test 10: /gsd track close end to end ────────────────────────────────
 
 test("handleTrack('close ...') settles the row and notifies the resulting status", async () => {

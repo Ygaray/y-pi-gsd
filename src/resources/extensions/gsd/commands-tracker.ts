@@ -35,7 +35,8 @@ const USAGE = 'Usage: /gsd track add --type <backlog|incident> --title "..." '
   + "[--severity HIGH|MEDIUM|LOW] [--detail \"...\"] [--tag <tag>] [--ref <kind>:<value>]\n"
   + "       /gsd track list [--type <backlog|incident>] [--status <status>] [--all]\n"
   + '       /gsd track update <id> [--title "..."] [--severity HIGH|MEDIUM|LOW] '
-  + '[--detail "..."] [--status <status>] [--tag <tag>] [--ref <kind>:<value>]\n'
+  + '[--detail "..."] [--status <status>] [--tag <tag>] [--ref <kind>:<value>] '
+  + "[--clear-tags] [--clear-refs]\n"
   + '       /gsd track close <id> [--status resolved|closed|wont-fix] [--note "..."]';
 
 const TRACKER_ITEM_TYPES: readonly TrackerItemType[] = ["backlog", "incident"];
@@ -75,6 +76,8 @@ interface UpdateArgs {
   status?: TrackerItemStatus;
   tags: string[];
   refs: TrackerItemRefInput[];
+  clearTags: boolean;
+  clearRefs: boolean;
 }
 
 interface CloseArgs {
@@ -128,6 +131,8 @@ function parseUpdateArgs(tokens: string[]): UpdateArgs | { error: string } {
   let status: TrackerItemStatus | undefined;
   const tags: string[] = [];
   const refs: TrackerItemRefInput[] = [];
+  let clearTags = false;
+  let clearRefs = false;
 
   for (let i = 2; i < tokens.length; i++) {
     const t = tokens[i];
@@ -174,9 +179,25 @@ function parseUpdateArgs(tokens: string[]): UpdateArgs | { error: string } {
         refs.push(parsed);
         break;
       }
+      case "--clear-tags":
+        clearTags = true;
+        break;
+      case "--clear-refs":
+        clearRefs = true;
+        break;
       default:
         return { error: `Unknown flag "${t}". ${USAGE}` };
     }
+  }
+
+  // IN-01: --clear-tags/--clear-refs express "set to an explicit empty
+  // array", which is ambiguous when combined with --tag/--ref on the same
+  // invocation — refuse rather than silently picking one.
+  if (clearTags && tags.length > 0) {
+    return { error: "--clear-tags cannot be combined with --tag" };
+  }
+  if (clearRefs && refs.length > 0) {
+    return { error: "--clear-refs cannot be combined with --ref" };
   }
 
   return {
@@ -188,6 +209,8 @@ function parseUpdateArgs(tokens: string[]): UpdateArgs | { error: string } {
     ...(status !== undefined ? { status } : {}),
     tags,
     refs,
+    clearTags,
+    clearRefs,
   };
 }
 
@@ -459,8 +482,14 @@ async function update(args: UpdateArgs, ctx: ExtensionCommandContext): Promise<v
     if (args.severity !== undefined) input.severity = args.severity;
     if (args.detail !== undefined) input.detail = args.detail;
     if (args.status !== undefined) input.status = args.status;
-    if (args.tags.length > 0) input.dispositionTags = args.tags;
-    if (args.refs.length > 0) input.refs = args.refs;
+    // IN-01: --clear-tags/--clear-refs forward an explicit [] the same way
+    // the MCP tool surface can (params.dispositionTags/refs !== undefined) —
+    // CLI flags are otherwise purely additive and could never express
+    // "clear everything" from the command surface.
+    if (args.clearTags) input.dispositionTags = [];
+    else if (args.tags.length > 0) input.dispositionTags = args.tags;
+    if (args.clearRefs) input.refs = [];
+    else if (args.refs.length > 0) input.refs = args.refs;
     updateTrackerItem(input, basePath);
     ctx.ui.notify(`Updated ${args.trackId}.`, "success");
   } catch (err) {
