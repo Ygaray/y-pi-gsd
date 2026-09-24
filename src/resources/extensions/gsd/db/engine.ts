@@ -97,6 +97,7 @@ import {
   applyMigrationV52HumanUatPending,
   applyMigrationV53MilestoneVerdictPolicyScope,
   applyMigrationV54RunLog,
+  applyMigrationV55TrackerItem,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -167,7 +168,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 54;
+export const SCHEMA_VERSION = 55;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -422,6 +423,7 @@ function initSchema(
         applyMigrationV52HumanUatPending(db);
         applyMigrationV53MilestoneVerdictPolicyScope(db);
         applyMigrationV54RunLog(db);
+        applyMigrationV55TrackerItem(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -877,6 +879,16 @@ function migrateSchema(
       applyMigrationV54RunLog(db);
       stampStateCutoverPragmas(db, 54);
       recordSchemaVersion(db, 54);
+    }
+
+    if (currentVersion < 55) {
+      // V55 -- per-project tracker store (Phase 17, TRACK-01/TRACK-02):
+      // additive tracker_items + track_item_refs tables backing durable
+      // backlog/incident tracking and the .gsd/BACKLOG.md + .gsd/INCIDENTS.md
+      // projections.
+      applyMigrationV55TrackerItem(db);
+      stampStateCutoverPragmas(db, 55);
+      recordSchemaVersion(db, 55);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

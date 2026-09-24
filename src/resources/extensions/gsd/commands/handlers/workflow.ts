@@ -568,6 +568,13 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     await handleBacklog(trimmed.replace(/^backlog\s*/, "").trim(), ctx, pi);
     return true;
   }
+  // ── Per-project tracker (backlog + incidents) ──
+  if (trimmed === "track" || trimmed.startsWith("track ")) {
+    if (requireNotAutoActive("/gsd track", ctx)) return true;
+    const { handleTrack } = await import("../../commands-tracker.js");
+    await handleTrack(trimmed.replace(/^track\s*/, "").trim(), ctx, pi);
+    return true;
+  }
   // ── Custom workflow commands (`/gsd workflow ...`) ──
   if (trimmed === "workflow" || trimmed.startsWith("workflow ")) {
     const sub = trimmed.slice("workflow".length).trim();

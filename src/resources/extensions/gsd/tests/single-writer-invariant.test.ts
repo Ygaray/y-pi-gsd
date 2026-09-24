@@ -72,6 +72,7 @@ const SCHEMA_DB_WRITER_FILES = new Set([
   "db-milestone-reopen-schema.ts",
   "db-milestone-validation-schema.ts",
   "db-schema-metadata.ts",
+  "db-tracker-item-schema.ts",
   "db-verification-evidence-schema.ts",
 ]);
 

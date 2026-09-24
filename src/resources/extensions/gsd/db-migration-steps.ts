@@ -17,6 +17,7 @@ import {
 import { createBlockerAcceptedCloseoutSchemaV50 } from "./db-blocker-accepted-closeout-schema.js";
 import { createHumanUatPendingSchemaV52 } from "./db-human-uat-pending-schema.js";
 import { createRunLogSchemaV54 } from "./db-run-log-schema.js";
+import { createTrackerItemSchemaV55 } from "./db-tracker-item-schema.js";
 import { createMilestoneCompletionSchemaV43 } from "./db-milestone-completion-schema.js";
 import { createMilestoneReopenSchemaV44 } from "./db-milestone-reopen-schema.js";
 import { createCanonicalFoundationSchemaV31 } from "./db-canonical-foundation-schema.js";
@@ -617,4 +618,8 @@ export function applyMigrationV53MilestoneVerdictPolicyScope(db: DbAdapter): voi
 
 export function applyMigrationV54RunLog(db: DbAdapter): void {
   createRunLogSchemaV54(db);
+}
+
+export function applyMigrationV55TrackerItem(db: DbAdapter): void {
+  createTrackerItemSchemaV55(db);
 }
