@@ -27,6 +27,8 @@ import {
   saveGateResult,
 } from "../gsd-db.ts";
 import { proveMilestoneCloseout } from "../milestone-closeout-proof.ts";
+import type { MilestoneCloseoutResidualItem } from "../milestone-closeout-residual-capture.ts";
+import { registerGate2HumanUatPending } from "../milestone-gate2-human-uat-domain-operation.ts";
 import { completeMilestone } from "../milestone-lifecycle-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
 import {
@@ -56,6 +58,7 @@ interface MilestoneCompletionCloseout {
   lessonsLearned: string[];
   followUps: string;
   deviations: string;
+  residualItems?: MilestoneCloseoutResidualItem[];
 }
 
 function db() {
@@ -887,4 +890,153 @@ test("Milestone completion rejects Slice and Task shadow mismatches", async (t) 
       cleanupFixtures();
     });
   }
+});
+
+// ─── GREEN-05/D-05: close-time residual capture never halts, never bypasses
+// a hard block ──────────────────────────────────────────────────────────
+
+function trackerItemCount(): number {
+  return Number(row("SELECT COUNT(*) AS count FROM tracker_items").count);
+}
+
+function storedEventPayload(operationId: string): Record<string, unknown> {
+  const event = row(`
+    SELECT payload_json FROM workflow_domain_events WHERE operation_id = '${operationId}'
+  `);
+  return JSON.parse(String(event.payload_json)) as Record<string, unknown>;
+}
+
+test("Milestone completion never halts for an unresolvable residual item: it commits and reports the capture on the receipt", async () => {
+  await prepareFixture();
+
+  const result = await completeMilestone(input("milestone-complete/residual/never-halts", {
+    residualItems: [{ title: "Deferred item the operator never resolved", severity: "MEDIUM" }],
+  }));
+
+  assert.equal(result.status, "committed");
+  assert.equal(result.residualCapture.created.length, 1);
+  assert.equal(result.residualCapture.skipped.length, 0);
+  assert.equal(result.residualCapture.warnings.length, 1);
+  assert.equal(
+    Number(row(
+      "SELECT COUNT(*) AS count FROM tracker_items WHERE title = 'Deferred item the operator never resolved'",
+    ).count),
+    1,
+  );
+});
+
+test("Milestone completion with no residual items reports an empty capture and leaves the tracker untouched", async () => {
+  await prepareFixture();
+  const trackerBefore = trackerItemCount();
+
+  const result = await completeMilestone(input("milestone-complete/residual/absent-is-noop"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.residualCapture, { created: [], skipped: [], warnings: [] });
+  assert.equal(trackerItemCount(), trackerBefore);
+
+  const storedCloseout = storedEventPayload(result.operationId)["closeout"] as Record<string, unknown>;
+  assert.ok(
+    !("residualItems" in storedCloseout),
+    "closeout must omit residualItems entirely when the caller never supplied it",
+  );
+});
+
+test("Milestone completion residual items never bypass hard block 1: canonical validation not current", async () => {
+  makeBase(); // no validation recorded — authorization.authorized is false
+  const trackerBefore = trackerItemCount();
+
+  await assert.rejects(
+    async () => completeMilestone(input("milestone-complete/residual/hard-block-authorization", {
+      residualItems: [{ title: "Must not unblock an unauthorized close" }],
+    })),
+    /canonical validation is not current/,
+  );
+
+  assert.equal(trackerItemCount(), trackerBefore);
+});
+
+test("Milestone completion residual items never bypass hard block 2: unresolved pending quality gate", async () => {
+  await prepareFixture();
+  insertGateRow({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    gateId: "Q5",
+    scope: "task",
+    status: "pending",
+  });
+  const trackerBefore = trackerItemCount();
+
+  await assert.rejects(
+    async () => completeMilestone(input("milestone-complete/residual/hard-block-gate", {
+      residualItems: [{ title: "Must not unblock a pending quality gate" }],
+    })),
+    /quality gate Q5 is still pending for S01/i,
+  );
+
+  assert.equal(trackerItemCount(), trackerBefore);
+});
+
+test("Milestone completion residual items never bypass hard block 3: outstanding Gate-2 human UAT", async () => {
+  await prepareFixture();
+  registerGate2HumanUatPending({
+    invocation: invocation("fixture/residual/gate2-pending"),
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "Awaiting human sign-off before this Milestone may close.",
+    partialCriteria: [],
+  });
+  const trackerBefore = trackerItemCount();
+
+  await assert.rejects(
+    async () => completeMilestone(input("milestone-complete/residual/hard-block-gate2", {
+      residualItems: [{ title: "Must not unblock outstanding Gate-2 human UAT" }],
+    })),
+    /outstanding Gate-2 human UAT/,
+  );
+
+  assert.equal(trackerItemCount(), trackerBefore);
+});
+
+test("Milestone completion still commits when the residual capture reports a failure warning", async () => {
+  await prepareFixture();
+
+  const result = await completeMilestone(input("milestone-complete/residual/capture-failure-still-commits", {
+    // A whitespace-only title trips createTrackerItem's own
+    // validateCreateTrackerItemInput ("title is required") — a real
+    // production failure path, forcing captureMilestoneCloseoutResiduals to
+    // record a warning without throwing.
+    residualItems: [{ title: "   " }],
+  }));
+
+  assert.equal(result.status, "committed");
+  assert.equal(result.canonicalStatus, "completed");
+  assert.equal(result.residualCapture.created.length, 0);
+  assert.equal(result.residualCapture.warnings.length, 1);
+  assert.match(result.residualCapture.warnings[0]!, /title is required/);
+
+  assert.equal(row(`
+    SELECT COUNT(*) AS count FROM workflow_domain_events
+    WHERE operation_id = '${result.operationId}' AND event_type = 'milestone.completed'
+  `).count, 1);
+  assert.deepEqual(row(`
+    SELECT lifecycle.lifecycle_status AS canonical_status
+    FROM workflow_item_lifecycles lifecycle
+    WHERE lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = 'M001'
+      AND lifecycle.slice_id IS NULL AND lifecycle.task_id IS NULL
+  `), { canonical_status: "completed" });
+});
+
+test("Milestone completion's event payload carries the supplied residual items even when the tracker write fails", async () => {
+  await prepareFixture();
+  const items: MilestoneCloseoutResidualItem[] = [{ title: "   " }];
+
+  const result = await completeMilestone(input("milestone-complete/residual/provenance", {
+    residualItems: items,
+  }));
+
+  assert.equal(result.residualCapture.created.length, 0);
+  const storedCloseout = storedEventPayload(result.operationId)["closeout"] as Record<string, unknown>;
+  assert.deepEqual(storedCloseout["residualItems"], items);
 });
