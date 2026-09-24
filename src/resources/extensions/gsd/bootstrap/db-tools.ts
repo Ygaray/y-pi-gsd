@@ -2390,6 +2390,186 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
 	registerWorkflowTool(pi, reworkBriefSaveTool);
 
+	// ─── gsd_track_create ───────────────────────────────────────────────────
+
+	const trackCreateExecute = async (
+		_toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeTrackCreate } = await loadWorkflowExecutors();
+		return executeTrackCreate(params, resolveWorkflowToolBasePath(_ctx, params));
+	};
+
+	const trackCreateTool = {
+		name: "gsd_track_create",
+		label: "File Tracker Item",
+		description:
+			"Create a durable backlog item or incident in the per-project tracker. Tracker items survive phase and milestone cleanup/archival.",
+		promptSnippet: "File a durable backlog item or incident",
+		promptGuidelines: [
+			"Use type 'incident' for a defect in the harness/tooling itself; use 'backlog' for deferred work or a future improvement.",
+			"Name the phase and/or requirement the item came from via refs — back-references make an item traceable later, after its originating phase directory is archived.",
+			"Filing a tracker item never blocks the current unit — the tracker is a durable sink, not a gate.",
+		],
+		parameters: Type.Object({
+			type: StringEnum(["backlog", "incident"], {
+				description: "Whether this item is a deferred backlog entry or a harness/tooling incident",
+			}),
+			title: Type.String({ description: "Short, human-readable title" }),
+			severity: Type.Optional(
+				StringEnum(["HIGH", "MEDIUM", "LOW"], {
+					description: "Severity/priority; defaults to MEDIUM",
+				}),
+			),
+			detail: Type.Optional(Type.String({ description: "Longer free-text detail/context" })),
+			dispositionTags: Type.Optional(
+				Type.Array(Type.String(), { description: "Freeform classification tags (e.g. y-pi-gsd-owned)" }),
+			),
+			refs: Type.Optional(
+				Type.Array(
+					Type.Object({
+						refKind: StringEnum(["phase", "requirement", "reviews_md", "track_item", "control_plane_incident"], {
+							description: "What kind of thing this back-reference points at",
+						}),
+						refValue: Type.String({ description: "The referenced id/value (e.g. a phase number)" }),
+					}),
+					{ description: "Back-references to phases, requirements, REVIEWS.md, other tracker items, or control-plane incidents" },
+				),
+			),
+		}),
+		execute: trackCreateExecute,
+	};
+
+	registerWorkflowTool(pi, trackCreateTool);
+
+	// ─── gsd_track_update ───────────────────────────────────────────────────
+
+	const trackUpdateExecute = async (
+		_toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeTrackUpdate } = await loadWorkflowExecutors();
+		return executeTrackUpdate(params, resolveWorkflowToolBasePath(_ctx, params));
+	};
+
+	const trackUpdateTool = {
+		name: "gsd_track_update",
+		label: "Update Tracker Item",
+		description: "Update one or more mutable fields (and/or the back-reference set) on an existing tracker item.",
+		promptSnippet: "Update a tracker item's fields, status, or refs",
+		promptGuidelines: [
+			"Only supply the fields that changed — an omitted field is left untouched.",
+			"Supplying refs REPLACES the whole back-reference set for this item, not a merge.",
+			"An illegal status move (e.g. a terminal status back to in-progress) is refused with a readable message naming both statuses.",
+		],
+		parameters: Type.Object({
+			trackId: Type.String({ description: "The tracker item id to update (e.g. TRACK-003)" }),
+			title: Type.Optional(Type.String({ description: "New title" })),
+			severity: Type.Optional(StringEnum(["HIGH", "MEDIUM", "LOW"], { description: "New severity" })),
+			detail: Type.Optional(Type.String({ description: "New detail/context text" })),
+			dispositionTags: Type.Optional(
+				Type.Array(Type.String(), { description: "Replacement set of freeform classification tags" }),
+			),
+			status: Type.Optional(
+				StringEnum(["open", "in-progress", "resolved", "closed", "wont-fix"], {
+					description: "New status; must be a legal transition from the current status",
+				}),
+			),
+			refs: Type.Optional(
+				Type.Array(
+					Type.Object({
+						refKind: StringEnum(["phase", "requirement", "reviews_md", "track_item", "control_plane_incident"], {
+							description: "What kind of thing this back-reference points at",
+						}),
+						refValue: Type.String({ description: "The referenced id/value" }),
+					}),
+					{ description: "Replaces the ENTIRE back-reference set for this item — not a merge" },
+				),
+			),
+		}),
+		execute: trackUpdateExecute,
+	};
+
+	registerWorkflowTool(pi, trackUpdateTool);
+
+	// ─── gsd_track_close ────────────────────────────────────────────────────
+
+	const trackCloseExecute = async (
+		_toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeTrackClose } = await loadWorkflowExecutors();
+		return executeTrackClose(params, resolveWorkflowToolBasePath(_ctx, params));
+	};
+
+	const trackCloseTool = {
+		name: "gsd_track_close",
+		label: "Close Tracker Item",
+		description: "Settle a tracker item exactly once — resolved, closed, or wont-fix.",
+		promptSnippet: "Settle (close/resolve) a tracker item",
+		promptGuidelines: [
+			"A repeat close on an already-terminal item is refused with a message naming its current status — it never silently re-settles.",
+		],
+		parameters: Type.Object({
+			trackId: Type.String({ description: "The tracker item id to close (e.g. TRACK-003)" }),
+			status: Type.Optional(
+				StringEnum(["resolved", "closed", "wont-fix"], {
+					description: "Terminal status to settle into; defaults to closed",
+				}),
+			),
+			resolutionNote: Type.Optional(Type.String({ description: "Free-text note explaining the resolution" })),
+		}),
+		execute: trackCloseExecute,
+	};
+
+	registerWorkflowTool(pi, trackCloseTool);
+
+	// ─── gsd_track_list ─────────────────────────────────────────────────────
+
+	const trackListExecute = async (
+		_toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeTrackList } = await loadWorkflowExecutors();
+		return executeTrackList(params, resolveWorkflowToolBasePath(_ctx, params));
+	};
+
+	const trackListTool = {
+		name: "gsd_track_list",
+		label: "List Tracker Items",
+		description: "List tracker items with the deterministic open/closed status summary — the read to run before assuming nothing is outstanding.",
+		promptSnippet: "List tracker items and the open-item status summary",
+		promptGuidelines: [
+			"Run this before assuming nothing is outstanding — it is the mechanically-guaranteed surface for tracker status, independent of any narrated summary.",
+		],
+		parameters: Type.Object({
+			type: Type.Optional(StringEnum(["backlog", "incident"], { description: "Filter to one item type" })),
+			status: Type.Optional(
+				StringEnum(["open", "in-progress", "resolved", "closed", "wont-fix"], {
+					description: "Filter to one status",
+				}),
+			),
+			all: Type.Optional(
+				Type.Boolean({ description: "Include terminal items (resolved/closed/wont-fix); defaults to non-terminal only" }),
+			),
+		}),
+		execute: trackListExecute,
+	};
+
+	registerWorkflowTool(pi, trackListTool);
+
 	// ─── gsd_reassess_roadmap (gsd_roadmap_reassess alias) ─────────────────
 
 	const reassessRoadmapExecute = async (

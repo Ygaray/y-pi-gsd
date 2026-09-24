@@ -344,6 +344,38 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		writePolicy: "read",
 		auditEvent: "workflow.project.snapshot",
 	},
+	{
+		canonicalName: "gsd_track_create",
+		aliases: [],
+		schemaId: "workflow.track.create",
+		executorId: "executeTrackCreate",
+		writePolicy: "write",
+		auditEvent: "workflow.track.create",
+	},
+	{
+		canonicalName: "gsd_track_update",
+		aliases: [],
+		schemaId: "workflow.track.update",
+		executorId: "executeTrackUpdate",
+		writePolicy: "write",
+		auditEvent: "workflow.track.update",
+	},
+	{
+		canonicalName: "gsd_track_close",
+		aliases: [],
+		schemaId: "workflow.track.close",
+		executorId: "executeTrackClose",
+		writePolicy: "write",
+		auditEvent: "workflow.track.close",
+	},
+	{
+		canonicalName: "gsd_track_list",
+		aliases: [],
+		schemaId: "workflow.track.list",
+		executorId: "executeTrackList",
+		writePolicy: "read",
+		auditEvent: "workflow.track.list",
+	},
 ] as const satisfies readonly WorkflowToolContractMetadata[];
 
 /** Literal union of canonical workflow tool names. Typing a name list with this union makes drift from WORKFLOW_TOOL_CONTRACTS a compile error. */
