@@ -98,6 +98,26 @@ function computeCaseEntry(corpusCase) {
   };
 }
 
+/** oracle.schema.json pins base_database_schema_version to a JSON-Schema `const` so a
+ * mistyped oracle can never silently claim the wrong baseline. That const itself is a
+ * schema-version literal and must move in lockstep, or every oracle rewrite above fails
+ * Ajv validation with "must be equal to constant" (discovered live, not in the original
+ * files_modified list - the schema file is fixture-adjacent, same drift class Task 2 owns). */
+function rewriteOracleSchemaConst(changed) {
+  const schemaPath = `${CORPUS_ROOT_PATH}oracle.schema.json`;
+  const raw = readFileSync(schemaPath, "utf8");
+  const parsed = JSON.parse(raw);
+  const constHolder = parsed?.properties?.base_database_schema_version;
+  if (!constHolder || typeof constHolder.const !== "number") {
+    throw new Error("oracle.schema.json: properties.base_database_schema_version.const not found");
+  }
+  if (constHolder.const === LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION) return;
+  constHolder.const = LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION;
+  const next = `${JSON.stringify(parsed, null, 2)}\n`;
+  writeFileSync(schemaPath, next);
+  changed.push("oracle.schema.json");
+}
+
 function discoverCaseNames() {
   return readdirSync(CORPUS_ROOT_PATH, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -112,13 +132,40 @@ function discoverCaseNames() {
     .sort();
 }
 
-function rewriteOracleBaseSchemaVersion(caseName, changed) {
+/** Rewrites one case's oracle.json in two ways: (1) base_database_schema_version tracks
+ * the live constant, and (2) every $.sources[] entry's byte_size/sha256 tracks the actual
+ * discovered file on disk. (2) matters whenever a case's own source bytes changed (e.g. a
+ * database re-stamp) - validateLegacyImportCorpusCase's whole-file fingerprint check (helper
+ * lines 457-463) compares every source's declared byte_size/sha256 against real discovered
+ * bytes unconditionally, for every case, not just the ones this bump's fixture re-stamp
+ * touched. Uses the helper's own exported loadLegacyImportCorpusCase for discovery, so this
+ * fingerprint is derived with the same function the validator checks it with. */
+function rewriteOracleFile(caseName, changed) {
   const oraclePath = `${CORPUS_ROOT_PATH}${caseName}/oracle.json`;
   const raw = readFileSync(oraclePath, "utf8");
   const parsed = JSON.parse(raw);
-  if (parsed.base_database_schema_version === LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION) return;
-  parsed.base_database_schema_version = LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION;
+
+  if (parsed.base_database_schema_version !== LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION) {
+    parsed.base_database_schema_version = LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION;
+  }
+
+  const discovered = loadLegacyImportCorpusCase(CORPUS_ROOT_URL, caseName);
+  const filesByPath = new Map(discovered.files.map((file) => [file.path, file]));
+  for (const source of parsed.sources ?? []) {
+    const file = filesByPath.get(source.path);
+    if (!file) continue;
+    if (source.byte_size !== file.byteSize) source.byte_size = file.byteSize;
+    if (source.sha256 !== file.sha256) source.sha256 = file.sha256;
+  }
+
+  // The oracle self-declares a hash over its own $.sources array (validateLegacyImportCorpusCase
+  // line 564); any source rewrite above must be followed by re-deriving this field or the oracle
+  // fails its own internal determinism check.
+  const recomputedSourceSetHash = legacyImportCorpusHash(parsed.sources ?? []);
+  if (parsed.source_set_hash !== recomputedSourceSetHash) parsed.source_set_hash = recomputedSourceSetHash;
+
   const next = `${JSON.stringify(parsed, null, 2)}\n`;
+  if (next === raw) return;
   writeFileSync(oraclePath, next);
   changed.push(`${caseName}/oracle.json`);
 }
@@ -157,7 +204,8 @@ function main() {
   }
 
   const changed = [];
-  for (const caseName of caseNames) rewriteOracleBaseSchemaVersion(caseName, changed);
+  rewriteOracleSchemaConst(changed);
+  for (const caseName of caseNames) rewriteOracleFile(caseName, changed);
   rewriteCorpusManifest(caseNames, changed);
 
   for (const file of changed) console.log(`changed: ${file}`);

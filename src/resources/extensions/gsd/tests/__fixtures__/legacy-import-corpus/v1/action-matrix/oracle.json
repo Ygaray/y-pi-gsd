@@ -6,7 +6,7 @@
   "base_project_revision": 17,
   "base_authority_epoch": 2,
   "base_database_schema_version": 55,
-  "source_set_hash": "sha256:e5a7d2e1e79ffa3e57e81451f6f3eef0a1b9f4f33e64a417cae5d3774bb13b12",
+  "source_set_hash": "sha256:2c8ff3cbc50b61473dd8e4e4576f7970f7a96cd32b505fe7bc463b52ff907cb8",
   "change_set_hash": "sha256:5ee816447ea03a7c8d1ffb391c2b49e7dc3e3cc6ec348c06c777a166c9f51099",
   "counts": {
     "create": 1,
@@ -33,7 +33,7 @@
       "path": ".gsd/gsd.db",
       "kind": "sqlite-database",
       "byte_size": 61440,
-      "sha256": "sha256:faba0e172c73fb62e2b9452b6c4848438e791d8a73073f71c4c6c25d5ff20a82",
+      "sha256": "sha256:2d5efe6669bd21524fec1c7a0c83c19bb2897b3f39d20e40ae41f1d36731f218",
       "parser_id": "gsd-sqlite-target",
       "parser_version": "1",
       "encoding": "binary",
