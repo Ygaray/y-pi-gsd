@@ -494,8 +494,27 @@ describe("Batch 3 prompt templates resolve", () => {
     const out = loadPrompt("verify-work", { target: "active slice" });
     assert.match(out, /UAT/i);
   });
-  test("plan-review-convergence.md loads with all vars", () => {
-    const out = loadPrompt("plan-review-convergence", { target: "plan", reviewers: "claude", maxCycles: "3" });
+  // Phase 20 (CONV-01) split the single self-driving `plan-review-convergence`
+  // prompt into two focused single-turn prompts; the old prompt file is
+  // deleted (superseded), so this coverage now targets its replacements.
+  test("plan-review-convergence-review.md loads with all vars", () => {
+    const out = loadPrompt("plan-review-convergence-review", {
+      target: "plan",
+      reviewers: "claude",
+      maxCycles: "3",
+      cycle: "1",
+      summaryPath: "/tmp/c1.md",
+    });
+    assert.match(out, /3/);
+  });
+  test("plan-review-convergence-replan.md loads with all vars", () => {
+    const out = loadPrompt("plan-review-convergence-replan", {
+      target: "plan",
+      priorSummaryPath: "/tmp/c1.md",
+      summaryPath: "/tmp/c2.md",
+      cycle: "2",
+      maxCycles: "3",
+    });
     assert.match(out, /3/);
   });
 });

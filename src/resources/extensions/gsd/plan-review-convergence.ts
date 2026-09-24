@@ -3,11 +3,11 @@
  * (Phase 20, CONV-01, D-01).
  *
  * Mirrors `rule-registry.ts`'s gap-closure cap branch and `auto.ts`'s own
- * reactive-driver shape: after a dispatched review turn ends, this module —
- * never the LLM — reads the durable `plan_review_cycles` row plus the
- * on-disk CYCLE_SUMMARY artifact the turn wrote, decides
- * converged/reround/cap-hit, and (for reround, Plan 02's expansion) would
- * redispatch the next turn via the same fire-and-forget
+ * reactive-driver shape: after a dispatched review/replan turn ends, this
+ * module — never the LLM — reads the durable `plan_review_cycles` row plus
+ * the on-disk CYCLE_SUMMARY artifact the turn wrote, decides
+ * converged/reround/cap-hit, and (for reround, below the cap) redispatches
+ * the next turn via the same fire-and-forget
  * `pi.sendMessage(..., {triggerTurn: true})` shape every other dispatch site
  * in this codebase uses — no spawn-and-await primitive exists here.
  *
@@ -25,13 +25,26 @@
  * milestone/slice target. Never the ended turn's free-text chat reply (D-02):
  * this module never reads `event.messages` content to make its decision.
  *
- * This plan (20-01) wires the converged happy path end-to-end. The
- * reround/blocked branches record the real outcome and cap count — so
- * Plan 02 has durable history to read — and notify that the redispatch path
- * is not yet wired, but do not yet dispatch another turn.
+ * Plan 20-01 wired the converged happy path end-to-end. Plan 20-02 (this
+ * plan) wires the two remaining branches:
+ *   - `reround`, below the persisted cap: mark the current row
+ *     `reround-dispatched`, open the next cycle's row, and dispatch exactly
+ *     one replan turn.
+ *   - `reround` AT the cap, or `blocked` at ANY cycle (a failed/stubbed lane,
+ *     or no lane at all): mark the row `cap-hit`, persist the residual
+ *     counts and lane states (Phase 21 reads these for residual-HIGH
+ *     promotion), dispatch nothing, and emit an escalation notice — never
+ *     one that reads as a clean convergence.
+ *
+ * The cap comparison mirrors `_routeAgenticGateGapClosure`'s ordering
+ * exactly: `countPlanReviewCyclesForTarget` is read into a local and compared
+ * `>=` against the CURRENT ROW's persisted `max_cycles` BEFORE the next cycle
+ * number is ever derived — the row is the per-run cap authority, never a
+ * fresh resolve and never a second hardcoded literal (RESEARCH.md Pitfall 4).
  */
 
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import type { AgentEndEvent } from "./auto/types.js";
@@ -40,9 +53,16 @@ import {
   getActiveMilestoneFromDb,
   getActiveSliceFromDb,
   getOpenPlanReviewCycle,
+  savePlanReviewCycle,
   updatePlanReviewCycleOutcome,
 } from "./gsd-db.js";
-import { aggregatePlanReviewCycle, parsePlanReviewCycleSummary } from "./plan-review-cycle-summary.js";
+import {
+  aggregatePlanReviewCycle,
+  parsePlanReviewCycleSummary,
+  planReviewCycleSummaryFileName,
+  type PlanReviewCycleSummary,
+} from "./plan-review-cycle-summary.js";
+import { loadPrompt } from "./prompt-loader.js";
 
 /**
  * The single literal `3` this feature owns (RESEARCH.md Pitfall 4). Plan
@@ -66,12 +86,11 @@ export async function checkPlanReviewConvergenceAdvance(
   ctx: ExtensionContext,
   basePath: string | undefined,
 ): Promise<boolean> {
-  // `pi`/`event`/`basePath` are part of this branch's stable signature
-  // (mirroring the other pre-gate checks in `handleAgentEnd`) but are not
-  // needed by this plan's happy path: the DB row is the sole detection and
-  // decision authority (see module doc), and Plan 02 is where a genuine
-  // redispatch via `pi.sendMessage` is wired.
-  void pi;
+  // `event`/`basePath` are part of this branch's stable signature (mirroring
+  // the other pre-gate checks in `handleAgentEnd`) but are not needed here:
+  // the DB row is the sole detection and decision authority (see module
+  // doc) — this module never reads `event.messages` or `basePath` to make
+  // its decision. `pi` IS used below, for the reround branch's redispatch.
   void event;
   void basePath;
 
@@ -113,25 +132,100 @@ export async function checkPlanReviewConvergenceAdvance(
     return true;
   }
 
-  // reround / blocked: Plan 02 wires the redispatch, the lane-health ladder,
-  // and cap-hit escalation. This plan records the real outcome (including
-  // whether the cap is already exhausted) so that history is durable, and
-  // notifies rather than silently dropping the result — but does not yet
-  // dispatch another turn.
+  // reround / blocked: decide cap-hit-vs-redispatch. `blocked` (a failed or
+  // stubbed lane, or no lane at all) ALWAYS escalates to cap-hit regardless
+  // of the cycle count — a lane-health failure is not something another
+  // replan round can fix, unlike outstanding HIGH/actionable concerns.
   const priorCycles = countPlanReviewCyclesForTarget(milestone.id, sliceId);
-  const capHit = priorCycles >= openCycle.maxCycles;
+  const capHit = aggregate.verdict === "blocked" || priorCycles >= openCycle.maxCycles;
+
+  if (capHit) {
+    updatePlanReviewCycleOutcome({
+      cycleRowId: openCycle.cycleRowId,
+      status: "cap-hit",
+      highCount: aggregate.highCount,
+      actionableCount: aggregate.actionableCount,
+      laneStates: JSON.stringify(summary.lanes),
+    });
+    const reason =
+      aggregate.verdict === "blocked"
+        ? describeBlockedLaneHealth(summary)
+        : `${aggregate.highCount} HIGH / ${aggregate.actionableCount} actionable concern(s) remain unresolved ` +
+          `after ${priorCycles} cycle(s) (max ${openCycle.maxCycles})`;
+    // Escalation wording only — never phrase this as convergence (T-20-07).
+    ctx.ui.notify(
+      `Plan-review cap-hit at cycle ${openCycle.cycle}: ${reason} — stopping with outstanding concerns, ` +
+        "no further replan will be dispatched.",
+      "error",
+    );
+    return true;
+  }
+
+  // reround, below the cap: mark the current row, open the next cycle's row
+  // (cycle numbers embedded in the row id so the cap COUNT genuinely
+  // advances — Phase 12 Plan 1 lesson), and dispatch exactly one replan turn
+  // via the same fire-and-forget shape every other dispatch site uses (D-01).
+  const nextCycle = openCycle.cycle + 1;
+  const targetLabel = summary.target.trim() || `Milestone ${milestone.id}`;
+  const nextArtifactPath = join(
+    dirname(openCycle.artifactPath),
+    planReviewCycleSummaryFileName(targetLabel, nextCycle),
+  );
+
   updatePlanReviewCycleOutcome({
     cycleRowId: openCycle.cycleRowId,
-    status: capHit ? "cap-hit" : openCycle.status,
+    status: "reround-dispatched",
     highCount: aggregate.highCount,
     actionableCount: aggregate.actionableCount,
     laneStates: JSON.stringify(summary.lanes),
   });
+  savePlanReviewCycle({
+    milestoneId: milestone.id,
+    sliceId,
+    cycle: nextCycle,
+    maxCycles: openCycle.maxCycles,
+    artifactPath: nextArtifactPath,
+  });
+
+  pi.sendMessage(
+    {
+      customType: "gsd-plan-review-convergence-replan",
+      content: loadPrompt("plan-review-convergence-replan", {
+        target: targetLabel,
+        priorSummaryPath: openCycle.artifactPath,
+        summaryPath: nextArtifactPath,
+        cycle: String(nextCycle),
+        maxCycles: String(openCycle.maxCycles),
+      }),
+      display: false,
+    },
+    { triggerTurn: true },
+  );
+
   ctx.ui.notify(
-    `Plan-review cycle ${openCycle.cycle} reports ${aggregate.highCount} HIGH / ` +
-      `${aggregate.actionableCount} actionable concern(s) (verdict: ${aggregate.verdict}` +
-      `${capHit ? ", cap reached" : ""}) — reround/replan dispatch is not yet wired (Phase 20 Plan 02).`,
+    `Plan-review cycle ${openCycle.cycle} found ${aggregate.highCount} HIGH / ` +
+      `${aggregate.actionableCount} actionable concern(s) — dispatching a replan into cycle ${nextCycle} ` +
+      `of ${openCycle.maxCycles}.`,
     "warning",
   );
   return true;
+}
+
+/**
+ * Describe WHY a `blocked` verdict fired, for the cap-hit escalation notice
+ * (T-20-07/T-20-08): names the unhealthy lane(s) — `stubbed` or `failed` — or
+ * states plainly that no lane produced a review at all, rather than a
+ * concern count that would misrepresent a lane-health failure as "N
+ * concerns remain."
+ */
+function describeBlockedLaneHealth(summary: PlanReviewCycleSummary): string {
+  if (summary.lanes.length === 0) return "no reviewer lane produced a review";
+  const unhealthy = summary.lanes.filter((lane) => lane.status === "stubbed" || lane.status === "failed");
+  if (unhealthy.length === 0) {
+    // aggregatePlanReviewCycle only returns "blocked" for zero lanes or an
+    // unhealthy lane, so this is unreachable in practice — a safe fallback
+    // that still never fabricates a concern count.
+    return "a reviewer lane reported an unrecognized health state";
+  }
+  return unhealthy.map((lane) => `"${lane.lane}" (${lane.status})`).join(", ");
 }

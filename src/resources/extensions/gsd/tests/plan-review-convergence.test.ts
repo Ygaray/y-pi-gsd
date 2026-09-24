@@ -3,8 +3,11 @@
 // CONV-01). Covers the pure CYCLE_SUMMARY parse/aggregate contract
 // (plan-review-cycle-summary.ts) and the reactive decide-and-redispatch
 // driver (plan-review-convergence.ts), including the free-text-override
-// rejection (D-02) and that the driver behaves identically regardless of
-// auto-mode state (RESEARCH.md Pitfall 1).
+// rejection (D-02), that the driver behaves identically regardless of
+// auto-mode state (RESEARCH.md Pitfall 1), and (Plan 20-02) the
+// reround-dispatch branch (mechanical cap advance, replan redispatch) and
+// the cap-hit escalation branch (reached from reround-at-cap and from any
+// blocked lane-health failure).
 
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -249,7 +252,7 @@ describe("checkPlanReviewConvergenceAdvance", () => {
     assert.notEqual(row?.status, "converged");
   });
 
-  it("marks the row cap-hit once the prior-cycle count reaches the persisted cap", async () => {
+  it("marks the row cap-hit (with residual counts + lane states persisted) once the prior-cycle count reaches the persisted cap, dispatching nothing", async () => {
     const basePath = makeBase();
     const artifactDir = join(basePath, ".gsd", "plan-review");
     mkdirSync(artifactDir, { recursive: true });
@@ -270,10 +273,168 @@ describe("checkPlanReviewConvergenceAdvance", () => {
     const event: AgentEndEvent = { messages: [] };
     const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
     assert.equal(handled, true);
-    assert.equal(pi.sent.length, 0, "this plan does not yet redispatch — Plan 02 wires reround/cap-hit dispatch");
+    assert.equal(pi.sent.length, 0, "reaching the cap must dispatch zero further messages");
 
-    const rowAfter = _getAdapter()!.prepare("SELECT status FROM plan_review_cycles WHERE id = :id").get({ ":id": "PRC-M001-S01-c3" });
+    const rowAfter = _getAdapter()!.prepare(
+      "SELECT status, high_count, actionable_count, lane_states FROM plan_review_cycles WHERE id = :id",
+    ).get({ ":id": "PRC-M001-S01-c3" }) as Record<string, unknown>;
     assert.equal(rowAfter?.["status"], "cap-hit");
+    assert.equal(rowAfter?.["high_count"], 1, "the residual HIGH count must be persisted, not left at its default");
+    assert.notEqual(rowAfter?.["lane_states"], "[]", "the lane states must be persisted, not left at their default");
+
+    // T-20-07: the notice must escalate — name the residual HIGH count and
+    // never read as a clean convergence.
+    const notice = ctx.notifications.find((n) => n.message.includes("cap-hit"));
+    assert.ok(notice, "a cap-hit notice must be emitted");
+    assert.ok(notice!.message.includes("1 HIGH"), "the notice must name the residual HIGH count");
+    assert.ok(!/\bconverg/i.test(notice!.message), "a cap-hit notice must never contain convergence wording");
+  });
+
+  it("hits the cap immediately when max_cycles is 1 and the very first cycle is not converged", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 1", "actionable: 0", ""].join("\n"));
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 1, artifactPath });
+
+    assert.equal(countPlanReviewCyclesForTarget("M001", "S01"), 1);
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true);
+    assert.equal(pi.sent.length, 0, "a max_cycles of 1 means the first non-converged outcome is already at the cap");
+
+    const row = _getAdapter()!.prepare("SELECT status FROM plan_review_cycles WHERE id = :id").get({ ":id": "PRC-M001-S01-c1" });
+    assert.equal(row?.["status"], "cap-hit");
+  });
+
+  it("dispatches exactly one replan turn and opens the next cycle's row when reround is below the cap", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "milestone-m001-c1-CYCLE-SUMMARY.md");
+    writeArtifact(
+      artifactPath,
+      ["target: Milestone M001", "cycle: 1", "", "### 1. claude", "status: reviewed", "high: 2", "actionable: 0", ""].join("\n"),
+    );
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true);
+    assert.equal(pi.sent.length, 1, "a reround below the cap must dispatch exactly one message");
+    assert.equal(pi.sent[0]?.customType, "gsd-plan-review-convergence-replan");
+
+    // The current (cycle 1) row is reround-dispatched, not converged/cap-hit.
+    const c1Row = _getAdapter()!.prepare(
+      "SELECT status, high_count FROM plan_review_cycles WHERE id = :id",
+    ).get({ ":id": "PRC-M001-S01-c1" }) as Record<string, unknown>;
+    assert.equal(c1Row?.["status"], "reround-dispatched");
+    assert.equal(c1Row?.["high_count"], 2);
+
+    // A new row opened at cycle 2, carrying the same cap, with a genuinely
+    // different row id — the COUNT advances, it never upserts onto one row.
+    const openRow = getOpenPlanReviewCycle("M001", "S01");
+    assert.ok(openRow, "the newly-opened cycle-2 row must now be the 'open' row");
+    assert.equal(openRow?.cycle, 2);
+    assert.equal(openRow?.maxCycles, 3, "the cap carries forward onto the new row");
+    assert.notEqual(openRow?.cycleRowId, "PRC-M001-S01-c1");
+    assert.equal(countPlanReviewCyclesForTarget("M001", "S01"), 2, "the COUNT genuinely advances, proving the cap is reachable");
+
+    const notice = ctx.notifications.find((n) => n.message.includes("cycle 2"));
+    assert.ok(notice, "the operator notice must name the cycle being entered");
+    assert.ok(notice!.message.includes("2 HIGH"), "the operator notice must name the outstanding counts");
+  });
+
+  it("escalates a blocked verdict (a stubbed lane) to cap-hit immediately, naming the lane rather than a concern count", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    // maxCycles is 3 (far from the cap) — a blocked verdict must escalate
+    // regardless of how much cap headroom remains.
+    writeArtifact(artifactPath, ["### 1. gemini", "status: stubbed", "high: 0", "actionable: 0", ""].join("\n"));
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true);
+    assert.equal(pi.sent.length, 0, "a lane-health failure must never dispatch a replan turn");
+
+    const row = _getAdapter()!.prepare("SELECT status FROM plan_review_cycles WHERE id = :id").get({ ":id": "PRC-M001-S01-c1" });
+    assert.equal(row?.["status"], "cap-hit");
+
+    const notice = ctx.notifications.find((n) => n.message.includes("cap-hit"));
+    assert.ok(notice);
+    assert.ok(notice!.message.includes('"gemini"'), "the notice must name the unhealthy lane");
+    assert.ok(notice!.message.includes("stubbed"), "the notice must name the lane's health status");
+    assert.ok(!/\d+ HIGH/.test(notice!.message), "a lane-health notice must never be phrased as a concern count");
+  });
+
+  it("escalates a blocked verdict (zero lanes) to cap-hit, naming that no lane produced a review", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    writeArtifact(artifactPath, "");
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true);
+    assert.equal(pi.sent.length, 0);
+
+    const notice = ctx.notifications.find((n) => n.message.includes("cap-hit"));
+    assert.ok(notice?.message.includes("no reviewer lane produced a review"));
+  });
+
+  it("drives a full multi-cycle sequence: cycle 1 rerounds once, cycle 2 hits the cap and dispatches nothing", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+
+    const c1Path = join(artifactDir, "c1.md");
+    writeArtifact(
+      c1Path,
+      ["target: Milestone M001", "cycle: 1", "", "### 1. claude", "status: reviewed", "high: 2", "actionable: 0", ""].join("\n"),
+    );
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 2, artifactPath: c1Path });
+
+    const pi1 = createMockPi();
+    const ctx1 = createMockCtx();
+    const handled1 = await checkPlanReviewConvergenceAdvance(pi1, { messages: [] }, ctx1, basePath);
+    assert.equal(handled1, true);
+    assert.equal(pi1.sent.length, 1, "cycle 1 (below the cap of 2) must dispatch exactly one replan turn");
+    assert.equal(countPlanReviewCyclesForTarget("M001", "S01"), 2, "the COUNT genuinely advances after the reround");
+
+    const openAfterC1 = getOpenPlanReviewCycle("M001", "S01");
+    assert.ok(openAfterC1);
+    assert.equal(openAfterC1?.cycle, 2);
+    assert.equal(openAfterC1?.maxCycles, 2, "the cap carries forward onto the new row, never re-resolved");
+
+    // The replan turn (simulated here) writes cycle 2's CYCLE_SUMMARY, still
+    // reporting an outstanding concern — but the COUNT is now AT the cap.
+    writeArtifact(openAfterC1!.artifactPath, ["### 1. claude", "status: reviewed", "high: 1", "actionable: 0", ""].join("\n"));
+
+    const pi2 = createMockPi();
+    const ctx2 = createMockCtx();
+    const handled2 = await checkPlanReviewConvergenceAdvance(pi2, { messages: [] }, ctx2, basePath);
+    assert.equal(handled2, true);
+    assert.equal(pi2.sent.length, 0, "cycle 2 is at the cap — no further replan may be dispatched");
+
+    const finalRow = _getAdapter()!.prepare(
+      "SELECT status FROM plan_review_cycles WHERE id = :id",
+    ).get({ ":id": openAfterC1!.cycleRowId }) as Record<string, unknown>;
+    assert.equal(finalRow?.["status"], "cap-hit");
   });
 
   it("behaves identically whether or not full auto-mode is active", async () => {
