@@ -121,4 +121,26 @@ files above alone account for roughly 5-6 minutes combined; the native build ste
 number, not against the historical instinct to kill anything running longer than a minute or two.
 
 <!-- Runtime total below updated to the actual measured value from Task 2's run -->
-**Measured total (this run):** *(filled in by Task 2 — see below)*
+**Measured total (2026-09-24 gate run):** **15 m 53 s** (953 s wall clock; `real 15m53.106s`,
+`user 60m7.322s`, `sys 8m20.207s`) for the full `pnpm run test:unit:native` chain — native build
+(0.4 s, warm Cargo cache) + compile (cache hit, 0.35 s) + mirror (<1 s) + the compiled unit suite +
+`test:live-workflow:unit`. This is the number a future operator should size patience against.
+
+The run **terminated on its own and emitted a summary** — the first complete, non-killed full-suite
+run in this project since Phase 11. That closes the "mistaken for a hang / dead-park" behaviour
+(INC-2026-09-20-01) independent of the pass/fail tally.
+
+**This run was NOT green.** It reported **16086 passed, 9 failed, 17 skipped** (exit 1). All 9
+failures are in files untouched by Phase 19 (model-router / model-unittype-mapping preference
+resolution, session-lock acquire/detect roundtrip, and a stale `TERMINAL_STATUS_SQL` literal) — they
+are pre-existing reds that this first complete run surfaced, not regressions from 19-01..19-05. See
+`.planning/phases/19-green-harness/19-06-SUMMARY.md` for the per-test breakdown and disposition.
+GREEN-06 (a green full suite) is therefore **not yet closed**; the terminating-run and skip-inventory
+halves are done, the zero-failure half is not.
+
+The **17 reported skipped** exceeds the 1 in-scope literal skip tabulated above, because `node:test`
+also counts runtime/conditional skips the static grep cannot see (OS-conditional cases such as
+`migrate-safety-audit.test.ts`'s Windows-only test skipped on Linux, and any computed
+`{ skip: <expr> }`). This is the known limit of a grep-based inventory that 19-06-PLAN's "Flagged
+assumptions" section anticipated; the delta between 17 and the literal count is runtime-conditional
+skips, not undocumented deliberate quarantines.
