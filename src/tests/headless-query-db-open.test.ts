@@ -23,12 +23,11 @@ import { join } from "node:path";
 import { runHeadlessQuery } from "../headless-query.ts";
 import { closeDatabase, openDatabase, _getAdapter } from "../resources/extensions/gsd/gsd-db.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
-import { SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
+import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
 import { deriveState } from "../resources/extensions/gsd/state.ts";
 
-const V54_MESSAGE =
-  "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Rebuild your fork: run pnpm build before opening this project.";
+const NEWER_SCHEMA_VERSION = SCHEMA_VERSION + 1;
+const NEWER_MESSAGE = new SchemaTooNewError(NEWER_SCHEMA_VERSION, SCHEMA_VERSION).message;
 
 test("headless-query opens the DB before deriveState (#4123)", async () => {
   const calls: string[] = [];
@@ -77,7 +76,7 @@ test("SchemaTooNewError from deriveState exits non-zero with the exact engine me
     {
       openProjectDbIfPresent: async () => {},
       deriveState: async () => {
-        throw new SchemaTooNewError(54, 53);
+        throw new SchemaTooNewError(NEWER_SCHEMA_VERSION, SCHEMA_VERSION);
       },
       resolveDispatch: async () => {
         throw new Error("resolveDispatch should not run after a refused deriveState");
@@ -96,7 +95,7 @@ test("SchemaTooNewError from deriveState exits non-zero with the exact engine me
   assert.notEqual(result.exitCode, 0);
   assert.equal(result.data, undefined);
   assert.equal(output, "");
-  assert.equal(errors, `[gsd] ${V54_MESSAGE}\n`);
+  assert.equal(errors, `[gsd] ${NEWER_MESSAGE}\n`);
 });
 
 test("non-version deriveState failures keep current handling (they propagate)", async () => {
@@ -132,7 +131,7 @@ function makeNewerSchemaProject(version: number): string {
 }
 
 test("newer-schema fixture: real deriveState refuses, and the CLI boundary exits non-zero with the exact message", async () => {
-  const base = makeNewerSchemaProject(54);
+  const base = makeNewerSchemaProject(NEWER_SCHEMA_VERSION);
   try {
     // Real read seam: engine refuse-newer → db-workspace "schema-too-new"
     // result → state/derive/db-open loud throw.
@@ -143,7 +142,7 @@ test("newer-schema fixture: real deriveState refuses, and the CLI boundary exits
       thrown = err;
     }
     assert.ok(thrown instanceof SchemaTooNewError, `expected SchemaTooNewError, got ${String(thrown)}`);
-    assert.equal(thrown.message, V54_MESSAGE);
+    assert.equal(thrown.message, NEWER_MESSAGE);
 
     // The headless-query boundary converts that exact error into a loud
     // non-zero refusal — never a degraded all-zero payload with exit 0.
@@ -171,7 +170,7 @@ test("newer-schema fixture: real deriveState refuses, and the CLI boundary exits
     );
     assert.notEqual(result.exitCode, 0);
     assert.equal(output, "");
-    assert.equal(errors, `[gsd] ${V54_MESSAGE}\n`);
+    assert.equal(errors, `[gsd] ${NEWER_MESSAGE}\n`);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

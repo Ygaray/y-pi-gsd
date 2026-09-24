@@ -42,6 +42,7 @@ import { captureCurrentLegacyImportBaseSnapshot } from "../resources/extensions/
 import { createLegacyImportPreview } from "../resources/extensions/gsd/legacy-import-preview.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
 import { executeDomainOperation } from "../resources/extensions/gsd/db/domain-operation.ts";
+import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
 import { fingerprintLegacyImportCorpusTree } from "../resources/extensions/gsd/tests/helpers/legacy-import-corpus.ts";
 
 const previousAgentDir = process.env.GSD_AGENT_DIR;
@@ -746,9 +747,8 @@ test("headless recover choice-required prints full executable forward-repair com
   );
 });
 
-const V54_MESSAGE =
-  "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Rebuild your fork: run pnpm build before opening this project.";
+const NEWER_SCHEMA_VERSION = SCHEMA_VERSION + 1;
+const NEWER_MESSAGE = new SchemaTooNewError(NEWER_SCHEMA_VERSION, SCHEMA_VERSION).message;
 
 test("headless recover forwards the exact refuse-newer message for a newer-schema project", async (t) => {
   const base = makeMarkdownFixture();
@@ -761,7 +761,7 @@ test("headless recover forwards the exact refuse-newer message for a newer-schem
   });
 
   assert.equal(await ensureDbOpen(base), true);
-  recordSchemaVersion(_getAdapter()!, 54);
+  recordSchemaVersion(_getAdapter()!, NEWER_SCHEMA_VERSION);
   closeDatabase();
   process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr.push(String(chunk));
@@ -772,7 +772,7 @@ test("headless recover forwards the exact refuse-newer message for a newer-schem
 
   assert.equal(result.exitCode, 1, "a newer-schema project is a recover failure");
   assert.ok(
-    stderr.join("").includes(V54_MESSAGE),
+    stderr.join("").includes(NEWER_MESSAGE),
     `recover must forward the exact refuse-newer message:\n${stderr.join("")}`,
   );
   assert.doesNotMatch(

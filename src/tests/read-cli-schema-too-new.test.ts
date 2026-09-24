@@ -32,9 +32,8 @@ import {
 import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
 import { readProgressFromDb } from "../resources/extensions/gsd/state/progress-from-db.ts";
 
-const V54_MESSAGE =
-  "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Rebuild your fork: run pnpm build before opening this project.";
+const NEWER_SCHEMA_VERSION = SCHEMA_VERSION + 1;
+const NEWER_MESSAGE = new SchemaTooNewError(NEWER_SCHEMA_VERSION, SCHEMA_VERSION).message;
 
 // Real preflight probe: the same pieces the production jiti loader wires up,
 // loaded through this test process's module graph.
@@ -88,14 +87,14 @@ test("gsd read progress --json on a newer-schema project exits non-zero with the
     assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
     const db = _getAdapter();
     assert.ok(db);
-    recordSchemaVersion(db, 54);
+    recordSchemaVersion(db, NEWER_SCHEMA_VERSION);
     closeDatabase();
 
     const run = await captureReadCli(readProgressArgv(base));
     assert.notEqual(run.exitCode, 0);
     assert.equal(run.stdout, "");
     assert.ok(
-      run.stderr.includes(V54_MESSAGE),
+      run.stderr.includes(NEWER_MESSAGE),
       `stderr should contain the exact engine message, got: ${run.stderr}`,
     );
   } finally {
@@ -112,13 +111,13 @@ test("gsd read progress checks the project DB schema from a canonical milestone 
   assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
   const db = _getAdapter();
   assert.ok(db);
-  recordSchemaVersion(db, 54);
+  recordSchemaVersion(db, NEWER_SCHEMA_VERSION);
   closeDatabase();
 
   const run = await captureReadCli(readProgressArgv(worktree));
 
   assert.notEqual(run.exitCode, 0);
-  assert.match(run.stderr, new RegExp(V54_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(run.stderr, new RegExp(NEWER_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("gsd read progress --json on a current-schema project serves the DB-backed payload", async () => {

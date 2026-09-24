@@ -22,10 +22,10 @@ import {
   openDatabase,
 } from "../resources/extensions/gsd/gsd-db.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
+import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
 
-const V54_MESSAGE =
-  "gsd.db schema is v54, newer than the v53 this gsd-pi supports. " +
-  "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
+const NEWER_SCHEMA_VERSION = SCHEMA_VERSION + 1;
+const NEWER_MESSAGE = new SchemaTooNewError(NEWER_SCHEMA_VERSION, SCHEMA_VERSION).message;
 
 function makeProject(version: "current" | "newer" | "missing"): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-graph-gate-"));
@@ -36,7 +36,7 @@ function makeProject(version: "current" | "newer" | "missing"): string {
       if (version === "newer") {
         const db = _getAdapter();
         assert.ok(db);
-        recordSchemaVersion(db, 54);
+        recordSchemaVersion(db, NEWER_SCHEMA_VERSION);
       }
     } finally {
       closeDatabase();
@@ -81,7 +81,7 @@ test("graph build on a newer-schema project refuses without writing graph.json",
 
   assert.equal(run.status, 1, `refusal must exit non-zero:\n${run.stderr}`);
   assert.ok(
-    run.stderr.includes(V54_MESSAGE),
+    run.stderr.includes(NEWER_MESSAGE),
     `stderr must carry the exact refuse-newer message:\n${run.stderr}`,
   );
   assert.equal(
@@ -120,7 +120,7 @@ test("graph status on a newer-schema project warns with the exact message but st
 
   assert.equal(run.status, 0, `read-only status must keep exit 0:\n${run.stderr}`);
   assert.ok(
-    run.stderr.includes(V54_MESSAGE),
+    run.stderr.includes(NEWER_MESSAGE),
     `status must warn with the exact refuse-newer message:\n${run.stderr}`,
   );
   assert.equal(
