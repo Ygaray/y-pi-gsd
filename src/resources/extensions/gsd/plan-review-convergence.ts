@@ -129,6 +129,10 @@ export async function checkPlanReviewConvergenceAdvance(
   // of the cycle count — a lane-health failure is not something another
   // replan round can fix, unlike outstanding HIGH/actionable concerns.
   const priorCycles = countPlanReviewCyclesForTarget(milestone.id, sliceId);
+  // Compared against the row's own persisted cap, never a fresh config-layer
+  // lookup: a run must finish under the cap it began with, so an operator
+  // editing preferences — or a concurrent run using a different override —
+  // mid-flight cannot extend or truncate a run already in progress (CONV-02).
   const capHit = aggregate.verdict === "blocked" || priorCycles >= openCycle.maxCycles;
 
   if (capHit) {

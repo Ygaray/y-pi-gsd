@@ -28,6 +28,7 @@ import {
 import { checkPlanReviewConvergenceAdvance } from "../plan-review-convergence.ts";
 import { handlePlanReviewConvergence } from "../commands-gsd-core.ts";
 import { withCommandCwd } from "../commands/context.ts";
+import { resolvePlanReviewMaxCycles } from "../preferences.ts";
 import { PLAN_REVIEW_MAX_CYCLES_BOUNDS } from "../preferences-validation.ts";
 import {
   _getAdapter,
@@ -89,6 +90,27 @@ function createMockCtx(): (ExtensionContext & ExtensionCommandContext) & {
 
 function writeArtifact(path: string, body: string): void {
   writeFileSync(path, body);
+}
+
+/**
+ * Sandbox `GSD_HOME` to an empty temp dir for the duration of `fn` — hermetic
+ * to whatever global `~/.gsd/PREFERENCES.md` may exist on the host running
+ * these tests, mirroring `tests/preferences-plan-review.test.ts`'s
+ * `withSandbox` pattern. Needed only by the row-cap-vs-resolver tests below,
+ * which write a real project-level PREFERENCES.md and must prove the
+ * enforcement comparison ignores it.
+ */
+async function withSandboxedGsdHome(fn: () => void | Promise<void>): Promise<void> {
+  const originalGsdHome = process.env.GSD_HOME;
+  const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-plan-review-convergence-home-"));
+  process.env.GSD_HOME = tempGsdHome;
+  try {
+    await fn();
+  } finally {
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    rmSync(tempGsdHome, { recursive: true, force: true });
+  }
 }
 
 describe("plan-review-cycle-summary", () => {
@@ -286,6 +308,74 @@ describe("checkPlanReviewConvergenceAdvance", () => {
     assert.ok(notice, "a cap-hit notice must be emitted");
     assert.ok(notice!.message.includes("1 HIGH"), "the notice must name the residual HIGH count");
     assert.ok(!/\bconverg/i.test(notice!.message), "a cap-hit notice must never contain convergence wording");
+  });
+
+  it("the row's cap wins over the resolver: a row cap of 2 stops the run even though preferences configure 9", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+
+    await withSandboxedGsdHome(async () => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nplan_review:\n  max_cycles: 9\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), 9, "sanity: the sandboxed config really is 9");
+
+      // One prior cycle row plus this cycle's open row == 2 total rows for a
+      // ROW cap of 2 — the comparison must read the row, not re-resolve.
+      savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 2, artifactPath: join(artifactDir, "c1.md") });
+      const artifactPath = join(artifactDir, "c2.md");
+      writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 1", "actionable: 0", ""].join("\n"));
+      savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 2, maxCycles: 2, artifactPath });
+
+      assert.equal(countPlanReviewCyclesForTarget("M001", "S01"), 2);
+
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      const handled = await checkPlanReviewConvergenceAdvance(pi, { messages: [] }, ctx, basePath);
+      assert.equal(handled, true);
+      assert.equal(pi.sent.length, 0, "the row's cap of 2 must stop the run even though config configures 9");
+
+      const row = _getAdapter()!.prepare(
+        "SELECT status FROM plan_review_cycles WHERE id = :id",
+      ).get({ ":id": "PRC-M001-S01-c2" }) as Record<string, unknown>;
+      assert.equal(row?.["status"], "cap-hit");
+    });
+  });
+
+  it("the converse also holds: a row cap of 9 keeps the run going even though preferences configure 2", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+
+    await withSandboxedGsdHome(async () => {
+      writeFileSync(
+        join(basePath, ".gsd", "PREFERENCES.md"),
+        "---\nplan_review:\n  max_cycles: 2\n---\n",
+        "utf-8",
+      );
+      assert.equal(resolvePlanReviewMaxCycles(basePath), 2, "sanity: the sandboxed config really is 2");
+
+      // Two prior rows plus this cycle's open row == 3 total for a ROW cap
+      // of 9 — far under the row's own cap, even though config (2) would
+      // already have stopped this run had the comparison re-resolved it.
+      savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 9, artifactPath: join(artifactDir, "c1.md") });
+      savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 2, maxCycles: 9, artifactPath: join(artifactDir, "c2.md") });
+      const artifactPath = join(artifactDir, "c3.md");
+      writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 1", "actionable: 0", ""].join("\n"));
+      savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 3, maxCycles: 9, artifactPath });
+
+      assert.equal(countPlanReviewCyclesForTarget("M001", "S01"), 3);
+
+      const pi = createMockPi();
+      const ctx = createMockCtx();
+      const handled = await checkPlanReviewConvergenceAdvance(pi, { messages: [] }, ctx, basePath);
+      assert.equal(handled, true);
+      assert.equal(pi.sent.length, 1, "the row's cap of 9 must keep the run going even though config configures 2");
+      assert.equal(pi.sent[0]?.customType, "gsd-plan-review-convergence-replan");
+    });
   });
 
   it("hits the cap immediately when max_cycles is 1 and the very first cycle is not converged", async () => {
