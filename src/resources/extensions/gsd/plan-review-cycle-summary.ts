@@ -213,6 +213,15 @@ export function parsePlanReviewCycleSummary(content: string): PlanReviewCycleSum
  * matching {@link PATCH_MARKER_PATTERN} — these are programming errors in
  * host code, not untrusted model-turn input, so (unlike the parser) it is
  * correct to throw rather than silently drop.
+ *
+ * IN-01: has zero production call sites as of Phase 20 — CYCLE_SUMMARY
+ * documents are currently only ever produced by the dispatched LLM turn
+ * itself, per the prompt templates, never rendered host-side. This function
+ * is kept as the documented inverse of {@link parsePlanReviewCycleSummary}
+ * for an intended future host-side writer (e.g. Phase 21's residual-HIGH
+ * promotion re-emitting a summary, or any host-side synthetic-artifact path)
+ * — not leftover dead code. Wire it up once that caller exists rather than
+ * duplicating this render logic ad hoc.
  */
 export function renderPlanReviewCycleSummary(summary: PlanReviewCycleSummary): string {
   if (PATCH_MARKER_PATTERN.test(summary.target)) {
