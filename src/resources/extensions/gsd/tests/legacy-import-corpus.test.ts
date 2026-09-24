@@ -2859,13 +2859,13 @@ test("legacy corpus capstone classifies database targets and changes without app
     ]),
     [
       [
-        "sha256:f7f9bbf1ee994f5cfb90399b7f0a49c600f42ac2c39f53eda273380ffc95ff12",
+        "sha256:58767cdc5cea37b4c510219a153069025a7223fda8c36e26942972619093d751",
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "sha256:c250a2b50f63371932d7dd17c651693086cd3c4419fbdd09188bbfe6ff5759b8",
-        "sha256:98d5f45a94ced4a737ebf80cea504319170db54aa818502d4760f77c06d9e701",
+        "sha256:3c10d1d9d84b8940de8445e86a59533d1cfd62652c50bda513b9c8d15d006a9d",
+        "sha256:ea2ac394a34dbcea3cde002b1eebf51bab793e5a9061dc4584078b9429bb4d78",
       ],
       [
-        "sha256:2c8ff3cbc50b61473dd8e4e4576f7970f7a96cd32b505fe7bc463b52ff907cb8",
+        "sha256:4628a21f2f8298b37481ec319a2ede4e6bcbd7737c26640b514d09431ade55f6",
         "sha256:5ee816447ea03a7c8d1ffb391c2b49e7dc3e3cc6ec348c06c777a166c9f51099",
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
