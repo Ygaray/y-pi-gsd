@@ -108,6 +108,8 @@
     "build:native": "node native/scripts/build.js",
     "build:native:dev": "node native/scripts/build.js --dev",
     "build:native:test": "node native/scripts/build.js --dev --test-fault-injection",
+    "native:addon:mirror": "node scripts/mirror-native-addon-to-dist-test.mjs",
+    "test:unit:native": "pnpm run build:native:test && pnpm run test:compile && pnpm run native:addon:mirror && cross-env GSD_NATIVE_PREFER_LOCAL=1 pnpm run test:unit:compiled && pnpm run test:live-workflow:unit",
     "dev": "node scripts/dev.js",
     "gsd": "node scripts/dev-cli.js",
     "gsd:web": "pnpm run build:contracts && pnpm run build:pi && pnpm run copy-resources && node scripts/build-web-if-stale.cjs && node scripts/dev-cli.js --web",
