@@ -98,6 +98,7 @@ import {
   applyMigrationV53MilestoneVerdictPolicyScope,
   applyMigrationV54RunLog,
   applyMigrationV55TrackerItem,
+  applyMigrationV56PlanReviewCycles,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -168,7 +169,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 55;
+export const SCHEMA_VERSION = 56;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -424,6 +425,7 @@ function initSchema(
         applyMigrationV53MilestoneVerdictPolicyScope(db);
         applyMigrationV54RunLog(db);
         applyMigrationV55TrackerItem(db);
+        applyMigrationV56PlanReviewCycles(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -889,6 +891,16 @@ function migrateSchema(
       applyMigrationV55TrackerItem(db);
       stampStateCutoverPragmas(db, 55);
       recordSchemaVersion(db, 55);
+    }
+
+    if (currentVersion < 56) {
+      // V56 -- plan-review convergence cycle store (Phase 20, CONV-01):
+      // additive plan_review_cycles table backing the reactive
+      // decide-and-redispatch driver's DB-COUNT cap authority and
+      // CYCLE_SUMMARY outcome persistence.
+      applyMigrationV56PlanReviewCycles(db);
+      stampStateCutoverPragmas(db, 56);
+      recordSchemaVersion(db, 56);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

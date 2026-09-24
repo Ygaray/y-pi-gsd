@@ -1301,6 +1301,154 @@ function escapeLikePattern(value: string): string {
 }
 
 /**
+ * Plan-review convergence cycle row (Phase 20, CONV-01). Each cycle number
+ * gets its own row (see {@link planReviewCycleId}) so
+ * {@link countPlanReviewCyclesForTarget}'s `SELECT COUNT(*)` genuinely
+ * advances across cycles rather than upserting a single row per target — the
+ * Phase 12 Plan 1 lesson RESEARCH.md's Pattern 3 names explicitly.
+ */
+export interface PlanReviewCycleRow {
+  cycleRowId: string;
+  milestoneId: string;
+  sliceId: string;
+  cycle: number;
+  maxCycles: number;
+  status: string;
+  highCount: number;
+  actionableCount: number;
+  laneStates: string;
+  artifactPath: string;
+}
+
+function planReviewCycleId(milestoneId: string, sliceId: string, cycle: number): string {
+  return `PRC-${milestoneId}-${sliceId}-c${cycle}`;
+}
+
+function rowToPlanReviewCycle(row: Record<string, unknown>): PlanReviewCycleRow {
+  return {
+    cycleRowId: String(row["id"] ?? ""),
+    milestoneId: String(row["milestone_id"] ?? ""),
+    sliceId: String(row["slice_id"] ?? ""),
+    cycle: Number(row["cycle"] ?? 0),
+    maxCycles: Number(row["max_cycles"] ?? 0),
+    status: String(row["status"] ?? ""),
+    highCount: Number(row["high_count"] ?? 0),
+    actionableCount: Number(row["actionable_count"] ?? 0),
+    laneStates: String(row["lane_states"] ?? "[]"),
+    artifactPath: String(row["artifact_path"] ?? ""),
+  };
+}
+
+/**
+ * Insert (or idempotently re-save) the row for one plan-review-convergence
+ * cycle. `handlePlanReviewConvergence` calls this once per cycle it
+ * dispatches, persisting the resolved cap onto the row so the `agent_end`
+ * decide branch never has to re-derive or re-hardcode it (RESEARCH.md
+ * Pitfall 4).
+ */
+export function savePlanReviewCycle(entry: {
+  milestoneId: string;
+  sliceId: string;
+  cycle: number;
+  maxCycles: number;
+  artifactPath: string;
+}): { cycleRowId: string } {
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
+  const cycleRowId = planReviewCycleId(entry.milestoneId, entry.sliceId, entry.cycle);
+  const now = new Date().toISOString();
+  transaction(() => {
+    getDbOrNull()!.prepare(
+      `INSERT INTO plan_review_cycles (
+         id, milestone_id, slice_id, cycle, max_cycles, status,
+         high_count, actionable_count, lane_states, artifact_path,
+         created_at, updated_at
+       ) VALUES (
+         :id, :mid, :sid, :cycle, :max_cycles, 'review-pending',
+         0, 0, '[]', :artifact_path,
+         :created_at, :updated_at
+       )
+       ON CONFLICT(id) DO UPDATE SET
+         max_cycles = :max_cycles,
+         artifact_path = :artifact_path,
+         updated_at = :updated_at`,
+    ).run({
+      ":id": cycleRowId,
+      ":mid": entry.milestoneId,
+      ":sid": entry.sliceId,
+      ":cycle": entry.cycle,
+      ":max_cycles": entry.maxCycles,
+      ":artifact_path": entry.artifactPath,
+      ":created_at": now,
+      ":updated_at": now,
+    });
+  });
+  return { cycleRowId };
+}
+
+/**
+ * The open (not-yet-decided) cycle row for a target, if any — the highest
+ * `cycle` row whose status is still `review-pending` or `reround-dispatched`.
+ * This IS the detection authority for `checkPlanReviewConvergenceAdvance`
+ * (`AgentEndEvent` exposes no `customType` of its own to key off instead).
+ */
+export function getOpenPlanReviewCycle(milestoneId: string, sliceId: string): PlanReviewCycleRow | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT * FROM plan_review_cycles
+     WHERE milestone_id = :mid AND slice_id = :sid
+       AND status IN ('review-pending', 'reround-dispatched')
+     ORDER BY cycle DESC LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId }) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return rowToPlanReviewCycle(row);
+}
+
+/** Persist a decided cycle's outcome — counts, lane states, and terminal/interim status. */
+export function updatePlanReviewCycleOutcome(entry: {
+  cycleRowId: string;
+  status: string;
+  highCount: number;
+  actionableCount: number;
+  laneStates: string;
+}): void {
+  if (!getDbOrNull()!) return;
+  const now = new Date().toISOString();
+  transaction(() => {
+    getDbOrNull()!.prepare(
+      `UPDATE plan_review_cycles SET
+         status = :status,
+         high_count = :high_count,
+         actionable_count = :actionable_count,
+         lane_states = :lane_states,
+         updated_at = :updated_at
+       WHERE id = :id`,
+    ).run({
+      ":id": entry.cycleRowId,
+      ":status": entry.status,
+      ":high_count": entry.highCount,
+      ":actionable_count": entry.actionableCount,
+      ":lane_states": entry.laneStates,
+      ":updated_at": now,
+    });
+  });
+}
+
+/**
+ * Durable, DB-derived cap authority for the plan-review-convergence loop
+ * (D-02, mirrors {@link countReworkBriefsForSlice}'s gap-closure precedent).
+ * `plan_review_cycles` is a DEDICATED table (RESEARCH.md Pitfall 3), so unlike
+ * `countReworkBriefsForSlice` this query needs no `LIKE`-on-id-shape scope —
+ * every row for this milestone/slice belongs to this feature.
+ */
+export function countPlanReviewCyclesForTarget(milestoneId: string, sliceId: string): number {
+  if (!getDbOrNull()!) return 0;
+  const row = getDbOrNull()!.prepare(
+    `SELECT COUNT(*) AS n FROM plan_review_cycles WHERE milestone_id = :mid AND slice_id = :sid`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId }) as Record<string, unknown> | undefined;
+  return row ? Number(row["n"] ?? 0) : 0;
+}
+
+/**
  * Count of UNRESOLVED, blocking `rework_brief_findings` rows across a
  * slice's gap-closure briefs — the DB-derived readiness signal for
  * `run-pause-resume.ts`'s `gap-closure-cap` resume condition (Phase 16,

@@ -38,6 +38,7 @@ import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
 import { scheduleFallbackContinuation } from "./fallback-continuation.js";
 import { clearGuidedUnitContext, getGuidedUnitContext, type GuidedUnitContext } from "../guided-unit-context.js";
+import { checkPlanReviewConvergenceAdvance } from "../plan-review-convergence.js";
 import { resumeAutoAfterProviderDelay } from "./provider-error-resume.js";
 import {
   classifyError,
@@ -577,6 +578,14 @@ export async function handleAgentEnd(
   // is user-driven). Runs before `isAutoActive` early return so pending
   // discussions (where isAutoActive may be false) still get recovered.
   if (maybeHandleEmptyIntentTurn(event, isAutoActive(), basePath)) return;
+
+  // CONV-01 (Phase 20): the plan-review-convergence decide-and-redispatch
+  // branch must fire even when full auto-mode is not active — the
+  // `/gsd plan-review-convergence` command is standalone, not an auto-mode
+  // unit. Placed here, alongside the other pre-gate checks above and
+  // strictly BEFORE the `isAutoActive()` early return below (RESEARCH.md
+  // Pitfall 1), so it works regardless of auto-mode state.
+  if (await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath)) return;
 
   if (!isAutoActive()) {
     observeManualDiscussTerminalError(ctx, lastMsg, guidedUnit);

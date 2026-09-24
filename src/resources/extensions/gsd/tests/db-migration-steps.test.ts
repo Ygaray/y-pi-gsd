@@ -25,6 +25,7 @@ import {
   applyMigrationV51SliceSurface,
   applyMigrationV52HumanUatPending,
   applyMigrationV55TrackerItem,
+  applyMigrationV56PlanReviewCycles,
 } from "../db-migration-steps.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 
@@ -227,6 +228,38 @@ describe("db-migration-steps", () => {
     const db = new FakeAdapter();
 
     applyMigrationV55TrackerItem(db);
+
+    assert.deepEqual(db.execCalls, []);
+  });
+
+  test("v56 creates the plan-review convergence cycle store", () => {
+    const dbPath = freshDbPath();
+    assert.equal(openDatabase(dbPath), true);
+    const db = _getAdapter();
+    assert.ok(db);
+
+    const tables = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'plan_review_cycles'
+    `).all() as Array<Record<string, unknown>>;
+    assert.equal(tables.length, 1, "plan_review_cycles must exist after fresh install (already applied at v56)");
+
+    const indexes = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_plan_review_cycles_%'
+    `).all() as Array<Record<string, unknown>>;
+    assert.equal(indexes.length, 2, "both idx_plan_review_cycles_* indexes must exist");
+
+    // Idempotency: a second call on the already-migrated database must not throw.
+    assert.doesNotThrow(() => applyMigrationV56PlanReviewCycles(db));
+  });
+
+  test("v56 no-ops when the workflow_operations foundation table is absent", () => {
+    // FakeAdapter's prepare().get() always returns undefined, simulating a
+    // synthetic/partially-provisioned database with no `workflow_operations`
+    // foundation table -- createPlanReviewCycleSchemaV56 must return without
+    // issuing any DDL in that case (see db-plan-review-cycles-schema.ts).
+    const db = new FakeAdapter();
+
+    applyMigrationV56PlanReviewCycles(db);
 
     assert.deepEqual(db.execCalls, []);
   });

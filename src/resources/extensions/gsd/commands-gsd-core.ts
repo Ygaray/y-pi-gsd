@@ -35,6 +35,9 @@ import {
   resolveEffectiveAutonomousScope,
 } from "./autonomous-scope.js";
 import { autoSession } from "./auto-runtime-state.js";
+import { getActiveMilestoneFromDb, getActiveSliceFromDb, savePlanReviewCycle } from "./gsd-db.js";
+import { planReviewCycleSummaryFileName } from "./plan-review-cycle-summary.js";
+import { PLAN_REVIEW_DEFAULT_MAX_CYCLES } from "./plan-review-convergence.js";
 
 /**
  * Catalog entries for commands IMPLEMENTED natively in this module.
@@ -680,19 +683,60 @@ export async function handleVerifyWork(args: string, ctx: ExtensionCommandContex
   );
 }
 
-/** /gsd plan-review-convergence [target] [--claude] [--codex] ... [--max-cycles N] */
+/**
+ * /gsd plan-review-convergence [--milestone Mxxx] [--claude] [--codex] ... [--max-cycles N]
+ *
+ * Rewritten for CONV-01 (Phase 20): this handler resolves the target and the
+ * effective cycle cap, persists a durable cycle-1 row, and dispatches ONE
+ * review turn. It does not itself loop — the reactive decide-and-redispatch
+ * driver in `plan-review-convergence.ts` (wired into `handleAgentEnd`) reads
+ * the CYCLE_SUMMARY that turn writes and decides converged/reround/cap-hit
+ * host-side (D-01/D-02), never inside one self-driving simulated-loop prompt.
+ */
 export async function handlePlanReviewConvergence(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
   const milestoneMatch = args.match(/--milestone\s+(\S+)/i);
-  const target = milestoneMatch ? `Milestone ${milestoneMatch[1]}` : "Active slice/milestone plan";
   const requested = REVIEWER_FLAGS.filter((f) => new RegExp(`(?:^|\\s)${f}(?=\\s|$)`).test(args));
   const reviewers = requested.length ? requested.map((f) => f.slice(2)).join(", ") : "default (single internal reviewer)";
+
+  // Resolve the effective cap ONCE (flag > default; Plan 20-03/20-04 slot a
+  // config value in between) and clamp before it is ever persisted or
+  // compared (RESEARCH.md Security Domain V5 / T-20-01).
   const maxMatch = args.match(/--max-cycles\s+(\d+)/);
+  const rawCap = maxMatch ? Number(maxMatch[1]) : PLAN_REVIEW_DEFAULT_MAX_CYCLES;
+  const effectiveCap = Number.isFinite(rawCap)
+    ? Math.max(1, Math.min(10, Math.round(rawCap)))
+    : PLAN_REVIEW_DEFAULT_MAX_CYCLES;
+
+  const activeMilestone = getActiveMilestoneFromDb();
+  const milestoneId = milestoneMatch ? milestoneMatch[1] : activeMilestone?.id;
+  if (!milestoneId) {
+    ctx.ui.notify("No active milestone found — cannot start plan-review convergence.", "error");
+    return;
+  }
+  const target = milestoneMatch ? `Milestone ${milestoneMatch[1]}` : "Active slice/milestone plan";
+  const slice = getActiveSliceFromDb(milestoneId);
+  const sliceId = slice?.id ?? "";
+
+  const basePath = currentDirectoryRoot();
+  const cycle = 1;
+  const artifactDir = join(basePath, ".gsd", "plan-review");
+  mkdirSync(artifactDir, { recursive: true });
+  const artifactPath = join(artifactDir, planReviewCycleSummaryFileName(target, cycle));
+
+  savePlanReviewCycle({ milestoneId, sliceId, cycle, maxCycles: effectiveCap, artifactPath });
+
   dispatchPrompt(
     {
-      prompt: "plan-review-convergence",
-      customType: "gsd-plan-review-convergence",
+      prompt: "plan-review-convergence-review",
+      customType: "gsd-plan-review-convergence-review",
       verb: "Plan convergence",
-      vars: { target, reviewers, maxCycles: maxMatch ? maxMatch[1] : "3" },
+      vars: {
+        target,
+        reviewers,
+        maxCycles: String(effectiveCap),
+        cycle: String(cycle),
+        summaryPath: artifactPath,
+      },
     },
     ctx,
     pi,
