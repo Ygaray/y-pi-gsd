@@ -1,13 +1,15 @@
 // Project/App: gsd-pi
 // File Purpose: Replay-safe Milestone completion Domain Operation.
 
+import { dirname } from "node:path";
+
 import {
   executeDomainOperation,
   type DomainJsonValue,
   type DomainOperationRequest,
   type DomainOperationResult,
 } from "./db/domain-operation.js";
-import { getDb } from "./db/engine.js";
+import { getDb, getDbPath } from "./db/engine.js";
 import { readOutstandingGate2HumanUat } from "./milestone-gate2-human-uat-domain-operation.js";
 import { MILESTONE_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
 import { readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
@@ -20,6 +22,14 @@ import {
   type MilestoneCompletionHierarchyResult,
 } from "./db/writers/milestone-lifecycle.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+// GREEN-05/D-05: captureMilestoneCloseoutResiduals(...) is called exactly
+// once below, strictly AFTER executeDomainOperation returns (never inside
+// its callback) and never throws — see the call site's own comment for why.
+import {
+  captureMilestoneCloseoutResiduals,
+  type MilestoneCloseoutResidualItem,
+  type MilestoneCloseoutResidualCapture,
+} from "./milestone-closeout-residual-capture.js";
 import {
   closeQualityGatesFromEvidence,
   inspectQualityGatesFromEvidence,
@@ -39,6 +49,14 @@ export interface MilestoneCompletionCloseout {
   lessonsLearned: string[];
   followUps: string;
   deviations: string;
+  /**
+   * Deferred/residual items this closeout could not resolve (GREEN-05,
+   * D-05). Optional so every existing caller compiles unchanged and every
+   * already-written `milestone.completed` event stays readable. Captured
+   * into the durable tracker post-commit and surfaced as warnings on the
+   * receipt — never a reason to block the close.
+   */
+  residualItems?: MilestoneCloseoutResidualItem[];
 }
 
 export interface MilestoneCompletionAudit {
@@ -67,6 +85,11 @@ export interface MilestoneCompletionReceipt {
   waiverIds: string[];
   dispositionIds: string[];
   closeout: MilestoneCompletionCloseout;
+  /**
+   * Always present (GREEN-05, D-05) — empty arrays when nothing was
+   * captured, so callers never have to branch on presence.
+   */
+  residualCapture: MilestoneCloseoutResidualCapture;
   isCurrent: boolean;
 }
 
@@ -140,7 +163,23 @@ function normalizedCloseout(closeout: MilestoneCompletionCloseout): MilestoneCom
     lessonsLearned: normalizedList(closeout.lessonsLearned),
     followUps: closeout.followUps.trim(),
     deviations: closeout.deviations.trim(),
+    // GREEN-05/D-05: omit the key entirely when the caller never supplied
+    // one, rather than normalising to `[]` — the stored closeout (and thus
+    // the milestone.completed event payload) must stay byte-identical to
+    // today for every pre-existing caller. The call site below defaults to
+    // `[]` at read time instead.
+    ...(closeout.residualItems !== undefined ? { residualItems: closeout.residualItems } : {}),
   };
+}
+
+/** `.gsd/gsd.db` -> the project's basePath, mirroring paths.ts's own
+ * `dirname(dirname(<.gsd path>))` derivation. Used only to hand
+ * captureMilestoneCloseoutResiduals a basePath for its (post-commit,
+ * rare-path) markdown pane regeneration — never for reading/writing the
+ * database itself, which stays on the already-open global adapter. */
+function residualCaptureBasePath(): string {
+  const dbPath = getDbPath();
+  return dbPath ? dirname(dirname(dbPath)) : process.cwd();
 }
 
 function normalizedAudit(audit?: MilestoneCompletionAudit): StoredCompletionAudit {
@@ -578,6 +617,19 @@ export function completeMilestone(input: {
       };
     },
   );
+  // GREEN-05/D-05: the milestone has already committed above (or was
+  // already current, on a replay) — this step runs strictly outside
+  // executeDomainOperation's callback and NEVER throws for a captured
+  // item. createTrackerItem writes markdown panes to disk on success, and a
+  // rolled-back domain-operation transaction must never leave those panes
+  // describing rows that were never actually committed; a write failure
+  // here becomes a warning on the receipt, never a re-raised exception —
+  // re-raising would reintroduce the exact close-time halt D-05 removes.
+  const residualCapture = captureMilestoneCloseoutResiduals({
+    milestoneId,
+    items: closeout.residualItems ?? [],
+    basePath: residualCaptureBasePath(),
+  });
   const stored = storedCompletionPayload(operation.operationId, milestoneId);
   return {
     status: operation.status,
@@ -600,6 +652,7 @@ export function completeMilestone(input: {
     waiverIds: stored.waiverIds,
     dispositionIds: stored.dispositionIds,
     closeout: stored.closeout,
+    residualCapture,
     isCurrent: isCurrentMilestoneCompletionOperation(operation.operationId, milestoneId),
   };
 }
