@@ -1040,3 +1040,28 @@ test("Milestone completion's event payload carries the supplied residual items e
   const storedCloseout = storedEventPayload(result.operationId)["closeout"] as Record<string, unknown>;
   assert.deepEqual(storedCloseout["residualItems"], items);
 });
+
+// GREEN-05/D-05 never-halt guarantee, stated as a named regression: a
+// future refactor that reintroduces error propagation at the capture call
+// site (the exact mistake this requirement exists to prevent) must trip
+// this test.
+test("GREEN-05 never-halt guarantee: a forced residual-capture failure still yields a successful receipt with a completed milestone", async () => {
+  await prepareFixture();
+
+  const result = await completeMilestone(input("milestone-complete/residual/never-halt-guarantee", {
+    // Whitespace-only title forces createTrackerItem's own validation to
+    // fail — captureMilestoneCloseoutResiduals must record this as a
+    // warning and never rethrow, per the file-purpose header on
+    // milestone-closeout-residual-capture.ts.
+    residualItems: [{ title: "   " }],
+  }));
+
+  assert.equal(result.status, "committed");
+  assert.equal(result.residualCapture.warnings.length > 0, true);
+  assert.deepEqual(row(`
+    SELECT lifecycle.lifecycle_status AS canonical_status
+    FROM workflow_item_lifecycles lifecycle
+    WHERE lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = 'M001'
+      AND lifecycle.slice_id IS NULL AND lifecycle.task_id IS NULL
+  `), { canonical_status: "completed" });
+});
