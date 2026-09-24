@@ -12,6 +12,7 @@ import {
   type TrackerItemRefInput,
   type TrackerItemSeverity,
 } from "./db/writers/tracker-item.js";
+import { immediateTransaction } from "./db/engine.js";
 import { readTrackerItems } from "./tracker-projection.js";
 
 /** The ownership verdict -- the literal example the tracker tool's own parameter documentation already uses. */
@@ -67,37 +68,46 @@ export const OWNED_CONTROL_PLANE_INCIDENTS: readonly OwnedControlPlaneIncident[]
  * title is free text a later edit could drift. Mirrors
  * tracker-legacy-backlog-seed.ts: opens no database connection of its own
  * (the caller must already have one open) and writes no SQL of any kind --
- * createTrackerItem owns the transaction, the id assignment, and the pane
- * regeneration.
+ * createTrackerItem owns the id assignment and the pane regeneration.
+ *
+ * The existence check and every create are wrapped in one `BEGIN IMMEDIATE`
+ * transaction (db/writers/orphan-milestone-discard.ts's same
+ * check-then-act idiom) so the read and the write are atomic against a
+ * concurrent invocation (WR-01): `immediateTransaction` acquires SQLite's
+ * write lock up front, so a second concurrent call blocks until the first
+ * commits and then observes the now-migrated row instead of racing past a
+ * stale `alreadyMigrated === false` read.
  */
 export function migrateOwnedControlPlaneIncidents(basePath: string): { created: string[]; skipped: string[] } {
-  const existing = readTrackerItems();
-  const created: string[] = [];
-  const skipped: string[] = [];
+  return immediateTransaction(() => {
+    const existing = readTrackerItems();
+    const created: string[] = [];
+    const skipped: string[] = [];
 
-  for (const record of OWNED_CONTROL_PLANE_INCIDENTS) {
-    const alreadyMigrated = existing.some((item) =>
-      item.refs.some((ref) => ref.refKind === "control_plane_incident" && ref.refValue === record.incidentId)
-    );
-    if (alreadyMigrated) {
-      skipped.push(record.incidentId);
-      continue;
+    for (const record of OWNED_CONTROL_PLANE_INCIDENTS) {
+      const alreadyMigrated = existing.some((item) =>
+        item.refs.some((ref) => ref.refKind === "control_plane_incident" && ref.refValue === record.incidentId)
+      );
+      if (alreadyMigrated) {
+        skipped.push(record.incidentId);
+        continue;
+      }
+
+      const refs: TrackerItemRefInput[] = [{ refKind: "control_plane_incident", refValue: record.incidentId }];
+      const { trackId } = createTrackerItem(
+        {
+          type: "incident",
+          title: record.title,
+          severity: record.severity,
+          detail: record.detail,
+          dispositionTags: [Y_PI_GSD_OWNED_TAG, MIGRATED_FROM_CONTROL_PLANE_TAG],
+          refs,
+        },
+        basePath,
+      );
+      created.push(trackId);
     }
 
-    const refs: TrackerItemRefInput[] = [{ refKind: "control_plane_incident", refValue: record.incidentId }];
-    const { trackId } = createTrackerItem(
-      {
-        type: "incident",
-        title: record.title,
-        severity: record.severity,
-        detail: record.detail,
-        dispositionTags: [Y_PI_GSD_OWNED_TAG, MIGRATED_FROM_CONTROL_PLANE_TAG],
-        refs,
-      },
-      basePath,
-    );
-    created.push(trackId);
-  }
-
-  return { created, skipped };
+    return { created, skipped };
+  });
 }
