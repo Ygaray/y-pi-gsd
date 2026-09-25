@@ -147,11 +147,19 @@ describe("gsd-core command parity routing", () => {
   });
 
   test("implemented commands dispatch a prompt via pi.sendMessage", async () => {
+    // NOTE: `plan-review-convergence` is deliberately NOT in this list. Its Phase-20
+    // CONV-01 rewrite made it a host-side orchestration command: it resolves a
+    // concrete milestone, persists a durable `plan_review_cycles` cycle-1 row (which
+    // needs a real active-milestone FK), and only then dispatches the review turn —
+    // the reactive decide-and-redispatch driver reads that persisted row. With no
+    // active milestone in this mock env it correctly notifies and returns without
+    // dispatching, unlike its pure-dispatch siblings. Routing is still asserted by
+    // the "no 'Unknown' fallthrough" test above.
     const implemented = [
       "explore", "spike", "sketch",
       "map-codebase", "docs-update", "graphify", "stats", "progress", "health", "surface",
       "code-review", "review", "audit-milestone", "audit-uat", "audit-fix", "ui-review",
-      "secure-phase", "validate-phase", "verify-work", "plan-review-convergence",
+      "secure-phase", "validate-phase", "verify-work",
       "discuss-phase", "plan-phase", "execute-phase", "spec-phase", "mvp-phase",
       "ui-phase", "ai-integration-phase", "ultraplan-phase", "autonomous",
       "pause-work", "resume-work",
