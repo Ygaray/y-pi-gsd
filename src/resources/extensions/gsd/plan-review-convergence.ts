@@ -303,7 +303,11 @@ export async function checkPlanReviewConvergenceAdvance(
  */
 function isErroredOrAbortedTurn(event: AgentEndEvent): boolean {
   if (event.abortOrigin) return true;
-  const lastMsg = event.messages[event.messages.length - 1];
+  // WR-02: `.at(-1)` rather than `messages[messages.length - 1]` — functionally
+  // identical (both are `undefined` on an empty array, which the guard below
+  // already handles), but removes the off-by-one arithmetic that a future
+  // edit could break if copied elsewhere with a different offset.
+  const lastMsg = event.messages.at(-1);
   if (lastMsg && typeof lastMsg === "object" && "stopReason" in lastMsg) {
     const stopReason = (lastMsg as { stopReason?: unknown }).stopReason;
     return stopReason === "error" || stopReason === "aborted";
