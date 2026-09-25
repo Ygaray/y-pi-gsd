@@ -195,6 +195,18 @@ export async function checkPlanReviewConvergenceAdvance(
     // anything the LLM says. Consumes only the already-parsed `summary`/
     // `aggregate` objects (ASVS V5) — the raw artifact string is not
     // re-read or re-parsed here.
+    //
+    // WR-01: the dedup identity inside promotePlanReviewResidualHigh is
+    // `title::sortedRefs`, and the title embeds this exact cycle number and
+    // counts. That means a slice that cap-hits more than once across its
+    // lifetime (e.g. a deferred-to-phase-N residual gets addressed, execute
+    // proceeds, a later plan-review on the same slice cap-hits again at a
+    // new cycle) always promotes a NEW tracker row rather than updating an
+    // existing one — this is intentional (an append-only audit trail of
+    // every cap-hit), not a bug. findBlockingMustFixInExecuteItems and
+    // summarizeResidualHighForMilestone will therefore accumulate one row
+    // per cap-hit cycle for a repeatedly-cap-hitting slice, not one row per
+    // slice.
     const promotion = promotePlanReviewResidualHigh({
       milestoneId: milestone.id,
       sliceId,
