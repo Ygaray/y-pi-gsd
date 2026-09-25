@@ -329,6 +329,7 @@ function describeBlockedLaneHealth(summary: PlanReviewCycleSummary): string {
     // aggregatePlanReviewCycle only returns "blocked" for zero lanes or an
     // unhealthy lane, so this is unreachable in practice — a safe fallback
     // that still never fabricates a concern count.
+    /* c8 ignore next */
     return "a reviewer lane reported an unrecognized health state";
   }
   return unhealthy.map((lane) => `"${lane.lane}" (${lane.status})`).join(", ");
