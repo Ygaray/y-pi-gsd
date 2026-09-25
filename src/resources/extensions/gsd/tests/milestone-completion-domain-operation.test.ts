@@ -26,11 +26,18 @@ import {
   readDomainOperationFence,
   saveGateResult,
 } from "../gsd-db.ts";
+import { createTrackerItem, resolveTrackerItem } from "../db/writers/tracker-item.ts";
 import { proveMilestoneCloseout } from "../milestone-closeout-proof.ts";
 import type { MilestoneCloseoutResidualItem } from "../milestone-closeout-residual-capture.ts";
 import { registerGate2HumanUatPending } from "../milestone-gate2-human-uat-domain-operation.ts";
 import { completeMilestone } from "../milestone-lifecycle-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
+import {
+  deferredToPhaseDispositionTag,
+  milestoneScopeTag,
+  MUST_FIX_IN_EXECUTE_DISPOSITION_TAG,
+  PLAN_REVIEW_RESIDUAL_HIGH_TAG,
+} from "../plan-review-residual-disposition.ts";
 import {
   grantTaskWaiver,
   recordTaskRequirementDisposition,
@@ -1065,4 +1072,115 @@ test("GREEN-05 never-halt guarantee: a forced residual-capture failure still yie
     WHERE lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = 'M001'
       AND lifecycle.slice_id IS NULL AND lifecycle.task_id IS NULL
   `), { canonical_status: "completed" });
+});
+
+// ─── CONV-05: residualHighSummary — tracker-sourced run-end visibility ─────
+
+function seedResidualHigh(
+  basePath: string,
+  overrides: {
+    milestoneId?: string;
+    phase?: string;
+    disposition?: string;
+    title?: string;
+  } = {},
+): { trackId: string } {
+  const milestoneId = overrides.milestoneId ?? "M001";
+  const disposition = overrides.disposition ?? MUST_FIX_IN_EXECUTE_DISPOSITION_TAG;
+  const phase = overrides.phase ?? "S01";
+  return createTrackerItem(
+    {
+      type: "incident",
+      severity: "HIGH",
+      title: overrides.title ?? `Residual HIGH seeded for ${milestoneId}/${phase}/${disposition}`,
+      detail: "{}",
+      dispositionTags: [PLAN_REVIEW_RESIDUAL_HIGH_TAG, milestoneScopeTag(milestoneId), disposition],
+      refs: [{ refKind: "phase", refValue: phase }],
+    },
+    basePath,
+  );
+}
+
+test("completeMilestone's residualHighSummary counts every disposition and lists distinct phases in first-seen order", async () => {
+  const basePath = await prepareFixture();
+  seedResidualHigh(basePath, { phase: "S01", disposition: MUST_FIX_IN_EXECUTE_DISPOSITION_TAG, title: "S01 must-fix" });
+  seedResidualHigh(basePath, { phase: "S02", disposition: deferredToPhaseDispositionTag("22"), title: "S02 deferred" });
+
+  const result = await completeMilestone(input("milestone-complete/residual-high/two-phase"));
+
+  assert.deepEqual(result.residualHighSummary, { count: 2, phases: ["S01", "S02"] });
+});
+
+test("completeMilestone's residualHighSummary de-dups the phase list: two rows on one phase count as 2 rows, 1 phase", async () => {
+  const basePath = await prepareFixture();
+  seedResidualHigh(basePath, { phase: "S01", title: "S01 first" });
+  seedResidualHigh(basePath, { phase: "S01", title: "S01 second" });
+
+  const result = await completeMilestone(input("milestone-complete/residual-high/dedup-phase"));
+
+  assert.deepEqual(result.residualHighSummary, { count: 2, phases: ["S01"] });
+});
+
+test("completeMilestone's residualHighSummary excludes Phase 19 closeout-residual rows even at severity HIGH", async () => {
+  const basePath = await prepareFixture();
+  createTrackerItem(
+    {
+      type: "incident",
+      severity: "HIGH",
+      title: "Closeout residual, not a plan-review residual HIGH",
+      dispositionTags: [milestoneScopeTag("M001"), "milestone-closeout-residual"],
+      refs: [{ refKind: "phase", refValue: "S01" }],
+    },
+    basePath,
+  );
+
+  const result = await completeMilestone(input("milestone-complete/residual-high/exclude-closeout-class"));
+
+  assert.deepEqual(result.residualHighSummary, { count: 0, phases: [] });
+});
+
+test("completeMilestone's residualHighSummary excludes rows scoped to a different milestone", async () => {
+  const basePath = await prepareFixture();
+  seedResidualHigh(basePath, { milestoneId: "M999", phase: "S01", title: "Wrong milestone" });
+
+  const result = await completeMilestone(input("milestone-complete/residual-high/exclude-other-milestone"));
+
+  assert.deepEqual(result.residualHighSummary, { count: 0, phases: [] });
+});
+
+test("completeMilestone's residualHighSummary is {count:0, phases:[]} for a milestone with zero residual-HIGH rows", async () => {
+  await prepareFixture();
+
+  const result = await completeMilestone(input("milestone-complete/residual-high/empty"));
+
+  assert.deepEqual(result.residualHighSummary, { count: 0, phases: [] });
+});
+
+test("completeMilestone's residualHighSummary coexists with residualCapture without interference", async () => {
+  const basePath = await prepareFixture();
+  seedResidualHigh(basePath, { phase: "S01", title: "Coexistence residual HIGH" });
+
+  const result = await completeMilestone(input("milestone-complete/residual-high/coexistence", {
+    residualItems: [{ title: "Deferred item the operator never resolved", severity: "MEDIUM" }],
+  }));
+
+  assert.equal(result.status, "committed");
+  assert.equal(result.residualCapture.created.length, 1);
+  assert.equal(result.residualCapture.skipped.length, 0);
+  assert.equal(result.residualCapture.failures.length, 0);
+  assert.deepEqual(result.residualHighSummary, { count: 1, phases: ["S01"] });
+});
+
+test("completeMilestone recomputes residualHighSummary on each call rather than caching it: a resolution between two completions is reflected on the second", async () => {
+  const basePath = await prepareFixture();
+  const { trackId } = seedResidualHigh(basePath, { phase: "S01", title: "Resolved between two completions" });
+
+  const first = await completeMilestone(input("milestone-complete/residual-high/recompute-not-cache"));
+  assert.deepEqual(first.residualHighSummary, { count: 1, phases: ["S01"] });
+
+  resolveTrackerItem({ trackId, status: "resolved" }, basePath);
+
+  const second = await completeMilestone(input("milestone-complete/residual-high/recompute-not-cache"));
+  assert.equal(second.status, "replayed");
+  assert.deepEqual(second.residualHighSummary, { count: 0, phases: [] });
 });

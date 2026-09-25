@@ -92,6 +92,13 @@ export interface CompleteMilestoneResult {
   replayed?: boolean;
   current?: boolean;
   superseded?: boolean;
+  /**
+   * CONV-05: tracker-sourced residual-HIGH count and distinct phase list for
+   * this milestone. Optional here — only present when a canonical receipt
+   * exists (the legacy non-adopted path has no such receipt at all) —
+   * mirroring how `operationId`/`resultingRevision` already thread.
+   */
+  residualHighSummary?: { count: number; phases: string[] };
 }
 
 let projectionInterleaveForTest: (() => Promise<void>) | null = null;
@@ -472,6 +479,7 @@ export async function handleCompleteMilestone(
       resultingRevision: canonicalReceipt.resultingRevision,
       replayed: canonicalReceipt.status === "replayed",
       current,
+      residualHighSummary: canonicalReceipt.residualHighSummary,
       ...(superseded ? { superseded: true } : {}),
     } : {}),
   };

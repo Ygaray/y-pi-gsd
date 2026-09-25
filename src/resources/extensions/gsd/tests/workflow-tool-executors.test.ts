@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, readFileSync, existsSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { hostname, tmpdir } from "node:os";
@@ -10,16 +10,29 @@ import {
   openDatabase,
   closeDatabase,
   _getAdapter,
+  executeDomainOperation,
   getArtifact,
   getAssessment,
   getSlice,
   insertAssessment,
   insertGateRow,
   insertMilestone,
+  readDomainOperationFence,
   setSliceSummaryMd,
   upsertRequirement,
   getAllMilestones,
 } from "../gsd-db.ts";
+import type { DomainOperationContext } from "../db/domain-operation.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { createTrackerItem } from "../db/writers/tracker-item.ts";
+import {
+  deferredToPhaseDispositionTag,
+  milestoneScopeTag,
+  MUST_FIX_IN_EXECUTE_DISPOSITION_TAG,
+  PLAN_REVIEW_RESIDUAL_HIGH_TAG,
+} from "../plan-review-residual-disposition.ts";
+import { handleValidateMilestone, type ValidateMilestoneParams } from "../tools/validate-milestone.ts";
+import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
 import { getAutoWorker, markWorkerCrashed, markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease, refreshMilestoneLease, releaseMilestoneLease } from "../db/milestone-leases.ts";
@@ -3135,6 +3148,284 @@ test("executeCompleteMilestone surfaces stale readable status while a managed su
   assert.equal(result.details.stale, true);
   assert.match(String(result.content[0]?.text), /readable status update is pending repair/i);
   assert.doesNotMatch(String(result.content[0]?.text), /summary (?:written|available)/i);
+});
+
+// ─── CONV-05: run-end residual-HIGH suffix on executeCompleteMilestone's
+// genuine-completion message ────────────────────────────────────────────
+//
+// The four pre-existing fixtures above (2970/3011/3043/3087) all complete
+// through the LEGACY (non-adopted) path: seedMilestone/seedSlice write plain
+// rows with no workflow_item_lifecycles adoption, so isMilestoneLifecycleAdopted
+// is false, completeMilestone()'s canonical receipt never runs, and
+// result.residualHighSummary is always undefined regardless of what the
+// tracker holds. A genuine positive assertion on the suffix needs the
+// ADOPTED path (the one that actually produces a canonicalReceipt), so these
+// tests build a small adopted milestone via seedCompletedTaskAuthority (the
+// same real claim/settle/verify chain other adopted-path tests in this file
+// already use) plus a real validate_milestone call for authorization.
+
+function seedResidualHighForSuffix(
+  base: string,
+  milestoneId: string,
+  phase: string,
+  disposition: string,
+  title: string,
+): void {
+  createTrackerItem(
+    {
+      type: "incident",
+      severity: "HIGH",
+      title,
+      detail: "{}",
+      dispositionTags: [PLAN_REVIEW_RESIDUAL_HIGH_TAG, milestoneScopeTag(milestoneId), disposition],
+      refs: [{ refKind: "phase", refValue: phase }],
+    },
+    base,
+  );
+}
+
+async function makeAdoptedCompletableMilestone(
+  base: string,
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): Promise<void> {
+  mkdirSync(join(base, ".gsd", "milestones", milestoneId), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", milestoneId, `${milestoneId}-CONTEXT.md`), `# ${milestoneId}\n`);
+  writeFileSync(join(base, "source.ts"), "export const source = 'workflow-tool-executors residual-high fixture';\n");
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base });
+  execFileSync("git", ["add", "source.ts"], { cwd: base });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
+
+  seedMilestone(milestoneId, `Milestone ${milestoneId}`, "active");
+  seedSlice(milestoneId, sliceId, "complete");
+  seedCompletedTaskAuthority({
+    milestoneId,
+    sliceId,
+    taskId,
+    runId: "residual-high-suffix",
+  });
+
+  const validation: ValidateMilestoneParams = {
+    milestoneId,
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: `| ${sliceId} | delivered |`,
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+    verdictRationale: "All current database evidence passes.",
+  };
+  const validated = await inProjectDir(base, () => handleValidateMilestone(validation, base, {
+    invocation: internalExecutionInvocation(`test:validate/${milestoneId}`),
+    skipBrowserEvidenceGate: true,
+  }));
+  assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+}
+
+test("executeCompleteMilestone's genuine-completion message ends with the residual-HIGH suffix when the tracker holds 2 rows across 2 phases", async () => {
+  const base = makeTmpBase();
+  const milestoneId = "M010";
+  try {
+    openTestDb(base);
+    await makeAdoptedCompletableMilestone(base, milestoneId, "S10", "T10");
+    seedResidualHighForSuffix(base, milestoneId, "S01", MUST_FIX_IN_EXECUTE_DISPOSITION_TAG, "S01 must-fix residual");
+    seedResidualHighForSuffix(base, milestoneId, "S02", deferredToPhaseDispositionTag("22"), "S02 deferred residual");
+
+    const result = await inProjectDir(base, () => executeCompleteMilestone({
+      milestoneId,
+      title: `Milestone ${milestoneId}`,
+      oneLiner: "Completed milestone",
+      narrative: "Everything shipped.",
+      verificationPassed: true,
+    }, base));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(
+      result.content[0]!.text,
+      `Completed milestone ${milestoneId}. Summary written to ${result.details.summaryPath} — shipped with 2 residual HIGH across phases S01, S02.`,
+    );
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeCompleteMilestone's genuine-completion message renders the singular '1 residual HIGH' for one row", async () => {
+  const base = makeTmpBase();
+  const milestoneId = "M011";
+  try {
+    openTestDb(base);
+    await makeAdoptedCompletableMilestone(base, milestoneId, "S11", "T11");
+    seedResidualHighForSuffix(base, milestoneId, "S01", MUST_FIX_IN_EXECUTE_DISPOSITION_TAG, "S01 must-fix residual");
+
+    const result = await inProjectDir(base, () => executeCompleteMilestone({
+      milestoneId,
+      title: `Milestone ${milestoneId}`,
+      oneLiner: "Completed milestone",
+      narrative: "Everything shipped.",
+      verificationPassed: true,
+    }, base));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(
+      result.content[0]!.text,
+      `Completed milestone ${milestoneId}. Summary written to ${result.details.summaryPath} — shipped with 1 residual HIGH across phases S01.`,
+    );
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeCompleteMilestone's genuine-completion message is byte-identical to its pre-change form when there are zero residual-HIGH rows", async () => {
+  const base = makeTmpBase();
+  const milestoneId = "M012";
+  try {
+    openTestDb(base);
+    await makeAdoptedCompletableMilestone(base, milestoneId, "S12", "T12");
+
+    const result = await inProjectDir(base, () => executeCompleteMilestone({
+      milestoneId,
+      title: `Milestone ${milestoneId}`,
+      oneLiner: "Completed milestone",
+      narrative: "Everything shipped.",
+      verificationPassed: true,
+    }, base));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(
+      result.content[0]!.text,
+      `Completed milestone ${milestoneId}. Summary written to ${result.details.summaryPath}`,
+    );
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeCompleteMilestone's details object gains no key between the zero-residual and two-residual genuine-completion cases", async () => {
+  const zeroBase = makeTmpBase();
+  const twoBase = makeTmpBase();
+  const zeroMilestoneId = "M013";
+  const twoMilestoneId = "M014";
+  try {
+    openTestDb(zeroBase);
+    await makeAdoptedCompletableMilestone(zeroBase, zeroMilestoneId, "S13", "T13");
+    const zeroResult = await inProjectDir(zeroBase, () => executeCompleteMilestone({
+      milestoneId: zeroMilestoneId,
+      title: `Milestone ${zeroMilestoneId}`,
+      oneLiner: "Completed milestone",
+      narrative: "Everything shipped.",
+      verificationPassed: true,
+    }, zeroBase));
+    closeDatabase();
+
+    openTestDb(twoBase);
+    await makeAdoptedCompletableMilestone(twoBase, twoMilestoneId, "S14", "T14");
+    seedResidualHighForSuffix(twoBase, twoMilestoneId, "S01", MUST_FIX_IN_EXECUTE_DISPOSITION_TAG, "S01 must-fix residual");
+    seedResidualHighForSuffix(twoBase, twoMilestoneId, "S02", deferredToPhaseDispositionTag("22"), "S02 deferred residual");
+    const twoResult = await inProjectDir(twoBase, () => executeCompleteMilestone({
+      milestoneId: twoMilestoneId,
+      title: `Milestone ${twoMilestoneId}`,
+      oneLiner: "Completed milestone",
+      narrative: "Everything shipped.",
+      verificationPassed: true,
+    }, twoBase));
+
+    assert.equal(zeroResult.isError, undefined);
+    assert.equal(twoResult.isError, undefined);
+    assert.deepEqual(Object.keys(zeroResult.details).sort(), Object.keys(twoResult.details).sort());
+  } finally {
+    closeDatabase();
+    cleanup(zeroBase);
+    cleanup(twoBase);
+  }
+});
+
+test("executeCompleteMilestone's already-complete arm is unaffected by residual-HIGH rows seeded for the same milestone", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    seedMilestone("M003", "Milestone Three", "complete");
+    seedSlice("M003", "S03", "complete");
+    writeRoadmap(base, "M003", ["S03"]);
+    const milestoneDir = join(base, ".gsd", "milestones", "M003");
+    mkdirSync(milestoneDir, { recursive: true });
+    const summaryPath = join(milestoneDir, "M003-SUMMARY.md");
+    writeFileSync(summaryPath, "# Existing Summary\n");
+    seedResidualHighForSuffix(base, "M003", "S03", MUST_FIX_IN_EXECUTE_DISPOSITION_TAG, "M003 residual seeded for regression");
+
+    const result = await inProjectDir(base, () => executeCompleteMilestone({
+      milestoneId: "M003",
+      title: "Milestone Three",
+      oneLiner: "Completed milestone",
+      narrative: "Everything shipped.",
+      verificationPassed: true,
+    }, base));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.operation, "complete_milestone");
+    assert.equal(result.details.alreadyComplete, true);
+    assert.match(result.content[0]!.text, /already complete/);
+    assert.doesNotMatch(result.content[0]!.text, /Summary written to/);
+    assert.doesNotMatch(result.content[0]!.text, /residual HIGH/);
+    assert.equal(readFileSync(summaryPath, "utf-8"), "# Existing Summary\n");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeCompleteMilestone's stale arm is unaffected by residual-HIGH rows seeded for the same milestone", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openTestDb(base);
+  seedMilestone("M003", "Milestone Three");
+  seedSlice("M003", "S03", "complete");
+  _getAdapter()!.prepare(
+    "INSERT OR REPLACE INTO tasks (milestone_id, slice_id, id, title, status) VALUES (?, ?, ?, ?, ?)",
+  ).run("M003", "S03", "T03", "Task T03", "complete");
+  insertAssessment({
+    path: join(".gsd", "milestones", "M003", "M003-VALIDATION.md"),
+    milestoneId: "M003",
+    status: "pass",
+    scope: "milestone-validation",
+    fullContent: "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\nValidated.",
+  });
+  seedResidualHighForSuffix(base, "M003", "S03", MUST_FIX_IN_EXECUTE_DISPOSITION_TAG, "M003 residual seeded for stale-arm regression");
+  const summaryPath = targetMilestoneFile(base, "M003", "SUMMARY", "Milestone Three");
+  const summaryLogicalPath = relative(
+    join(normalizeRealPath(base), ".gsd"),
+    summaryPath,
+  ).replaceAll("\\", "/");
+  const obstructedWrites: string[] = [];
+  _setManagedProjectionWriteFaultForTest((logicalPath) => {
+    if (logicalPath !== summaryLogicalPath) return;
+    obstructedWrites.push(logicalPath);
+    throw new Error("simulated milestone summary projection failure");
+  });
+  t.after(() => _setManagedProjectionWriteFaultForTest(null));
+
+  const result = await inProjectDir(base, () => executeCompleteMilestone({
+    milestoneId: "M003",
+    title: "Milestone Three",
+    oneLiner: "Completed milestone",
+    narrative: "Everything shipped.",
+    verificationPassed: true,
+  }, base));
+
+  assert.equal(result.isError, undefined);
+  assert.ok(obstructedWrites.length > 0, "fixture must obstruct the milestone SUMMARY write itself");
+  assert.equal(result.details.stale, true);
+  assert.match(String(result.content[0]?.text), /readable status update is pending repair/i);
+  assert.doesNotMatch(String(result.content[0]?.text), /residual HIGH/);
 });
 
 test("executeReassessRoadmap writes assessment and updates roadmap projection", async () => {
