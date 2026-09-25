@@ -1889,13 +1889,20 @@ export async function executeCompleteMilestone(
       };
     }
     const historical = result.superseded || result.current === false;
+    // CONV-05: the run-end suffix rides on the genuine-completion arm only —
+    // a replay or a superseded receipt re-announcing the residual count
+    // would double-report an event that already happened.
+    const residualHighSuffix =
+      result.residualHighSummary && result.residualHighSummary.count > 0
+        ? ` — shipped with ${result.residualHighSummary.count} residual HIGH across phases ${result.residualHighSummary.phases.join(", ")}.`
+        : "";
     const message = historical
       ? `Milestone completion receipt for ${result.milestoneId} has been superseded; current state was not changed.`
       : result.stale
       ? `${result.alreadyComplete ? `Milestone ${result.milestoneId} is already complete.` : `Completed milestone ${result.milestoneId}.`} The readable status update is pending repair.`
       : result.alreadyComplete
         ? `Milestone ${result.milestoneId} is already complete. Summary available at ${result.summaryPath}`
-        : `Completed milestone ${result.milestoneId}. Summary written to ${result.summaryPath}`;
+        : `Completed milestone ${result.milestoneId}. Summary written to ${result.summaryPath}${residualHighSuffix}`;
     return {
       content: [{ type: "text", text: message }],
       details: {
