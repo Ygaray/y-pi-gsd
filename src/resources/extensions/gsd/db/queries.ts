@@ -1649,7 +1649,12 @@ export interface MilestoneUatCriteriaState extends AcceptanceCriteria {
 
 /**
  * A milestone's UAT/criteria state in ONE call (ROADMAP Phase 10 Success
- * Criterion 3 — the exact input Phase 13's Gate-2 ledger needs). SELECT-only:
+ * Criterion 3 — the reconciled milestone-level DECLARED-criteria accessor).
+ * NOTE: Phase 13's Gate-2 ledger does NOT consume this — it needs this run's
+ * per-criterion PARTIAL *verdicts*, which live in the SELF-UAT artifact and are
+ * read via `parseSelfUatCriteria`, not the milestone's declared criteria. This
+ * remains the milestone-level member of the reconciled slice/milestone/task
+ * accessor trio, available to consumers that need declared criteria. SELECT-only:
  * composes `getMilestone` and `getMilestoneSlices` inside one
  * `readTransaction` so the milestone's own criteria and the slice roll-up
  * describe the same database snapshot. Returns `null` when no milestone row
