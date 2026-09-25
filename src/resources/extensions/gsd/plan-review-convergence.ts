@@ -62,6 +62,10 @@ import {
   type PlanReviewCycleSummary,
 } from "./plan-review-cycle-summary.js";
 import { loadPrompt } from "./prompt-loader.js";
+import {
+  MUST_FIX_IN_EXECUTE_DISPOSITION_TAG,
+  promotePlanReviewResidualHigh,
+} from "./plan-review-residual-disposition.js";
 
 /**
  * Decide-and-redispatch branch for the plan-review-convergence loop. Returns
@@ -78,14 +82,15 @@ export async function checkPlanReviewConvergenceAdvance(
   basePath: string | undefined,
 ): Promise<boolean> {
   // `basePath` is part of this branch's stable signature (mirroring the
-  // other pre-gate checks in `handleAgentEnd`) but is not needed here: the
-  // DB row is the sole detection and decision authority (see module doc).
-  // `event` IS read below (CR-02), but only its turn-completion metadata
-  // (`abortOrigin`/`stopReason`) to detect a genuinely-erroring/aborted
-  // turn — never its message content, which stays off-limits for deciding
-  // the convergence verdict itself (D-02). `pi` IS used below too, for the
-  // reround branch's redispatch.
-  void basePath;
+  // other pre-gate checks in `handleAgentEnd`) and is now consumed by the
+  // CONV-03 promotion below (the `createTrackerItem` writer's markdown-pane
+  // regeneration needs a project root). The DB row remains the sole
+  // detection and decision authority (see module doc). `event` IS read below
+  // (CR-02), but only its turn-completion metadata (`abortOrigin`/
+  // `stopReason`) to detect a genuinely-erroring/aborted turn — never its
+  // message content, which stays off-limits for deciding the convergence
+  // verdict itself (D-02). `pi` IS used below too, for the reround branch's
+  // redispatch.
 
   const milestone = getActiveMilestoneFromDb();
   if (!milestone) return false;
@@ -177,6 +182,24 @@ export async function checkPlanReviewConvergenceAdvance(
       actionableCount: aggregate.actionableCount,
       laneStates: JSON.stringify(summary.lanes),
     });
+
+    // CONV-03: unconditional, non-throwing promotion of the residual HIGH
+    // into the durable tracker — never delayed, never conditional on
+    // anything the LLM says. Consumes only the already-parsed `summary`/
+    // `aggregate` objects (ASVS V5) — the raw artifact string is not
+    // re-read or re-parsed here.
+    const promotion = promotePlanReviewResidualHigh({
+      milestoneId: milestone.id,
+      sliceId,
+      cycle: openCycle.cycle,
+      highCount: aggregate.highCount,
+      actionableCount: aggregate.actionableCount,
+      laneStatesJson: JSON.stringify(summary.lanes),
+      artifactPath: openCycle.artifactPath,
+      disposition: MUST_FIX_IN_EXECUTE_DISPOSITION_TAG,
+      basePath,
+    });
+
     const reason =
       aggregate.verdict === "blocked"
         ? describeBlockedLaneHealth(summary)
@@ -188,6 +211,15 @@ export async function checkPlanReviewConvergenceAdvance(
         "no further replan will be dispatched.",
       "error",
     );
+
+    if (promotion.failure) {
+      ctx.ui.notify(
+        `Warning: residual-HIGH tracker promotion did not land (${promotion.failure}) — ` +
+          "the cap-hit escalation above still stands.",
+        "warning",
+      );
+    }
+
     return true;
   }
 

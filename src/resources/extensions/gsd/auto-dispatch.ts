@@ -58,6 +58,7 @@ import { logWarning, logError } from "./workflow-logger.js";
 import { dirname, join, sep } from "node:path";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
 import { isFlatPhaseMigrationInFlight } from "./flat-phase-migration.js";
+import { findBlockingMustFixInExecuteItems } from "./plan-review-residual-disposition.js";
 import { composeToolAffordanceReminder } from "./unit-context-composer.js";
 import {
   buildDiscussMilestonePrompt,
@@ -821,6 +822,27 @@ function readExecuteTaskTerminalAbort(
   return {
     action: "stop",
     reason: `Cannot dispatch execute-task ${milestoneId}/${sliceId}/${taskId}: canonical Task Attempt recovery already aborted (recoveryActionId: ${terminalAbort.recoveryActionId}). Resume it with /gsd recover ${terminalAbort.recoveryActionId}.`,
+    level: "error",
+  };
+}
+
+/**
+ * CONV-04's execute gate: block the whole slice's execute-task dispatch
+ * (both the normal path and the retry path) while an open
+ * `must-fix-in-execute` tracker item is still ref'd to this slice. Mirrors
+ * `readExecuteTaskTerminalAbort`'s shape exactly.
+ */
+function readMustFixInExecuteBlock(sliceId: string): Extract<DispatchAction, { action: "stop" }> | null {
+  if (!isDbAvailable()) return null;
+  const openBlockers = findBlockingMustFixInExecuteItems(sliceId);
+  if (openBlockers.length === 0) return null;
+  const ids = openBlockers.map((item) => item.id).join(", ");
+  return {
+    action: "stop",
+    reason:
+      `Cannot dispatch execute-task for phase ${sliceId}: ${openBlockers.length} must-fix-in-execute ` +
+      `tracker item(s) are still open (${ids}). Resolve via /gsd track close <id>, or change the ` +
+      "disposition tag via /gsd track update <id>, before execute proceeds.",
     level: "error",
   };
 }
@@ -1963,6 +1985,8 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (state.phase !== "executing") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
+      const mustFixBlock = readMustFixInExecuteBlock(sid);
+      if (mustFixBlock) return mustFixBlock;
       const sTitle = state.activeSlice!.title;
       const retryUnitId = session?.pendingVerificationRetry?.unitId;
       if (retryUnitId) {

@@ -11,7 +11,7 @@
 
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,6 +30,8 @@ import { handlePlanReviewConvergence } from "../commands-gsd-core.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { resolvePlanReviewMaxCycles } from "../preferences.ts";
 import { PLAN_REVIEW_MAX_CYCLES_BOUNDS } from "../preferences-validation.ts";
+import { DISPATCH_RULES, type DispatchContext } from "../auto-dispatch.ts";
+import { readTrackerItems } from "../tracker-projection.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -337,6 +339,81 @@ describe("checkPlanReviewConvergenceAdvance", () => {
     assert.ok(notice, "a cap-hit notice must be emitted");
     assert.ok(notice!.message.includes("1 HIGH"), "the notice must name the residual HIGH count");
     assert.ok(!/\bconverg/i.test(notice!.message), "a cap-hit notice must never contain convergence wording");
+  });
+
+  it("CONV-03/CONV-04: a residual HIGH promoted at cap-hit mechanically blocks executing → execute-task for its slice", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 2", "actionable: 0", ""].join("\n"));
+    // maxCycles: 1 means this single cycle is already at the cap even though
+    // the lane itself is healthy ("reviewed") — a cap-hit, not a blocked verdict.
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 1, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const event: AgentEndEvent = { messages: [] };
+    const handled = await checkPlanReviewConvergenceAdvance(pi, event, ctx, basePath);
+    assert.equal(handled, true);
+
+    // (a) exactly one correctly-tagged, correctly-referenced tracker row.
+    const items = readTrackerItems();
+    assert.equal(items.length, 1, "a cap-hit with a residual HIGH must promote exactly one tracker row");
+    const promoted = items[0]!;
+    assert.equal(promoted.type, "incident");
+    assert.equal(promoted.severity, "HIGH");
+    assert.deepEqual(
+      promoted.dispositionTags,
+      ["plan-review-residual-high", "milestone:M001", "must-fix-in-execute"],
+      "dispositionTags must be class marker, milestone scope, disposition — in that exact order",
+    );
+    assert.ok(
+      promoted.refs.some((ref) => ref.refKind === "phase" && ref.refValue === "S01"),
+      "the row must back-reference the phase (sliceId)",
+    );
+    assert.ok(
+      promoted.refs.some((ref) => ref.refKind === "reviews_md" && ref.refValue === artifactPath),
+      "the row must back-reference the cycle row's own artifactPath",
+    );
+
+    // (b) the same basePath/open DB, evaluated against a minimal executing
+    // DispatchContext, must return a stop naming the promoted TRACK- id —
+    // reached before any execute-task prompt is built (no task PLAN file
+    // exists on disk for T01).
+    const rule = DISPATCH_RULES.find((r) => r.name === "executing → execute-task");
+    assert.ok(rule, "the 'executing → execute-task' rule must exist in DISPATCH_RULES");
+
+    const dispatchCtx: DispatchContext = {
+      basePath,
+      mid: "M001",
+      midTitle: "Convergence test",
+      state: {
+        activeMilestone: { id: "M001", title: "Convergence test" },
+        activeSlice: { id: "S01", title: "Slice" },
+        activeTask: { id: "T01", title: "First Task" },
+        phase: "executing",
+        recentDecisions: [],
+        blockers: [],
+        nextAction: "",
+        registry: [],
+      },
+      prefs: undefined,
+    };
+    const result = await rule!.match(dispatchCtx);
+    assert.ok(result, "the rule must return a result, not fall through");
+    assert.equal(result!.action, "stop");
+    assert.equal((result as { level: string }).level, "error");
+    assert.ok(
+      (result as { reason: string }).reason.includes(promoted.id),
+      "the stop reason must name the actual promoted TRACK- id, not a hard-coded one",
+    );
+
+    assert.equal(
+      existsSync(join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-PLAN.md")),
+      false,
+      "the stop must be reached before any execute-task prompt/disk scaffold is built",
+    );
   });
 
   it("the row's cap wins over the resolver: a row cap of 2 stops the run even though preferences configure 9", async () => {
