@@ -1916,6 +1916,15 @@ export async function executeCompleteMilestone(
         ...(result.current !== undefined ? { current: result.current } : {}),
         ...(result.superseded ? { superseded: true } : {}),
         ...(result.stale ? { stale: true } : {}),
+        // IN-02: surface CONV-05's residual-HIGH count/phase list structurally
+        // too, not just baked into the human-readable message string, so a
+        // programmatic caller (dashboard, CI gate) can read it without
+        // parsing text. Included whenever the domain operation resolved one
+        // (every genuine-completion arm — zero-residual and non-zero alike),
+        // never conditioned on count > 0, so this key's PRESENCE never
+        // differs between the zero-residual and non-zero-residual cases
+        // (workflow-tool-executors.test.ts's "gains no key" parity check).
+        ...(result.residualHighSummary ? { residualHighSummary: result.residualHighSummary } : {}),
       },
     };
   } catch (err) {
