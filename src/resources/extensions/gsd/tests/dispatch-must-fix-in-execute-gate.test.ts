@@ -407,3 +407,160 @@ describe("CONV-04 execute gate: what blocks vs what does not", () => {
     assertDispatch(result);
   });
 });
+
+// ─── Task 2: retry path + deterministic, actionable stop reason ──────────
+
+describe("CONV-04 execute gate: retry path and stop-reason contract", () => {
+  it("blocks the retry path before the retry dispatch, not after it", async () => {
+    const basePath = makeBase();
+    createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Retry-path blocking item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    const ctx = makeCtx(basePath, {
+      state: makeState({ activeTask: { id: "T02", title: "Second Task" } }),
+      session: {
+        pendingVerificationRetry: {
+          unitId: "M001/S01/T01",
+          attempt: 2,
+          failureContext: "verification failed",
+        },
+      } as DispatchContext["session"],
+    });
+    const result = await resolveExecutingRule().match(ctx);
+    assertStop(result);
+  });
+
+  it("dispatches the retry unitId once the blocker is cleared — proving the fixture reached the retry branch", async () => {
+    const basePath = makeBase();
+    stageExecuteTaskScaffold(basePath, "M001", "S01", "T01");
+    writeTaskPlan(basePath, "M001", "S01", "T02");
+    const { trackId } = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Retry-path cleared item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    resolveTrackerItem({ trackId, status: "closed" }, basePath);
+
+    const ctx = makeCtx(basePath, {
+      state: makeState({ activeTask: { id: "T02", title: "Second Task" } }),
+      session: {
+        pendingVerificationRetry: {
+          unitId: "M001/S01/T01",
+          attempt: 2,
+          failureContext: "verification failed",
+        },
+      } as DispatchContext["session"],
+    });
+    const result = await resolveExecutingRule().match(ctx);
+    assertDispatch(result);
+    assert.equal((result as { unitId: string }).unitId, "M001/S01/T01");
+  });
+
+  it("the stop reason lists every blocking TRACK- id in creation order and is byte-identical across two evaluations", async () => {
+    const basePath = makeBase();
+    const first = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Ordering item 1",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    const second = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Ordering item 2",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    const third = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Ordering item 3",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+
+    // Read the actual ids back rather than hard-coding TRACK-NNN literals.
+    const expectedOrder = readTrackerItems()
+      .filter((row) => [first.trackId, second.trackId, third.trackId].includes(row.id))
+      .map((row) => row.id);
+    assert.deepEqual(expectedOrder, [first.trackId, second.trackId, third.trackId]);
+
+    const ctx = makeCtx(basePath);
+    const rule = resolveExecutingRule();
+    const evalOne = await rule.match(ctx);
+    assertStop(evalOne);
+    const evalTwo = await rule.match(ctx);
+    assertStop(evalTwo);
+
+    assert.equal(evalOne.reason, evalTwo.reason, "two consecutive evaluations against unchanged DB state must be byte-identical");
+
+    let lastIndex = -1;
+    for (const id of expectedOrder) {
+      const idx = evalOne.reason.indexOf(id);
+      assert.ok(idx >= 0, `reason must name blocking id ${id}: ${evalOne.reason}`);
+      assert.ok(idx > lastIndex, `blocking ids must appear in creation order in the reason: ${evalOne.reason}`);
+      lastIndex = idx;
+    }
+  });
+
+  it("the stop reason names the active slice id, the blocker count, and both clearing commands", async () => {
+    const basePath = makeBase();
+    createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Reason-content item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    const result = await resolveExecutingRule().match(makeCtx(basePath));
+    assertStop(result);
+    assert.ok(result.reason.includes("S01"), `reason must name the active slice id: ${result.reason}`);
+    assert.ok(result.reason.includes("1"), `reason must name the blocker count: ${result.reason}`);
+    assert.ok(result.reason.includes("/gsd track close"), `reason must name the close command: ${result.reason}`);
+    assert.ok(result.reason.includes("/gsd track update"), `reason must name the update command: ${result.reason}`);
+  });
+
+  it("the stop's level is exactly error, never warning or info", async () => {
+    const basePath = makeBase();
+    createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Level-check item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    const result = await resolveExecutingRule().match(makeCtx(basePath));
+    assertStop(result);
+    assert.equal(result.level, "error");
+    assert.notEqual(result.level, "warning");
+    assert.notEqual(result.level, "info");
+  });
+});
