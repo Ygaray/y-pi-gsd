@@ -167,12 +167,19 @@ export async function checkPlanReviewConvergenceAdvance(
   // stubbed lane, or no lane at all) ALWAYS escalates to cap-hit regardless
   // of the cycle count — a lane-health failure is not something another
   // replan round can fix, unlike outstanding HIGH/actionable concerns.
-  const priorCycles = countPlanReviewCyclesForTarget(milestone.id, sliceId);
+  // WR-03: `countPlanReviewCyclesForTarget` counts ALL cycle rows for this
+  // target, including the currently-open one being decided right now — i.e.
+  // this is "total cycles so far, including this one", not "cycles prior to
+  // this one". Named accordingly (a previous `priorCycles` name undersold
+  // this by one and invited a future maintainer to "fix" a non-existent
+  // off-by-one, or introduce a real one while refactoring under the wrong
+  // mental model).
+  const totalCyclesSoFar = countPlanReviewCyclesForTarget(milestone.id, sliceId);
   // Compared against the row's own persisted cap, never a fresh config-layer
   // lookup: a run must finish under the cap it began with, so an operator
   // editing preferences — or a concurrent run using a different override —
   // mid-flight cannot extend or truncate a run already in progress (CONV-02).
-  const capHit = aggregate.verdict === "blocked" || priorCycles >= openCycle.maxCycles;
+  const capHit = aggregate.verdict === "blocked" || totalCyclesSoFar >= openCycle.maxCycles;
 
   if (capHit) {
     updatePlanReviewCycleOutcome({
@@ -204,7 +211,7 @@ export async function checkPlanReviewConvergenceAdvance(
       aggregate.verdict === "blocked"
         ? describeBlockedLaneHealth(summary)
         : `${aggregate.highCount} HIGH / ${aggregate.actionableCount} actionable concern(s) remain unresolved ` +
-          `after ${priorCycles} cycle(s) (max ${openCycle.maxCycles})`;
+          `after ${totalCyclesSoFar} cycle(s) (max ${openCycle.maxCycles})`;
     // Escalation wording only — never phrase this as convergence (T-20-07).
     ctx.ui.notify(
       `Plan-review cap-hit at cycle ${openCycle.cycle}: ${reason} — stopping with outstanding concerns, ` +
