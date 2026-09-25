@@ -186,9 +186,13 @@ export function findBlockingMustFixInExecuteItems(sliceId: string): TrackerItemR
 
 /**
  * CONV-05's aggregation predicate: every tracker row carrying BOTH the class
- * marker and the milestone scope tag, reduced to a count plus the
- * de-duplicated, first-seen-order list of `phase` ref values across those
- * rows. Returns `{count:0, phases:[]}` when the DB is unavailable.
+ * marker and the milestone scope tag AND still outstanding (not `resolved`,
+ * `closed`, or `wont-fix` — mirroring `findBlockingMustFixInExecuteItems`'s
+ * own status exclusion), reduced to a count plus the de-duplicated,
+ * first-seen-order list of `phase` ref values across those rows. A row that
+ * has been resolved between two completion attempts is no longer "residual"
+ * and must not inflate a later run's count (CONV-05's recompute-not-cache
+ * truth). Returns `{count:0, phases:[]}` when the DB is unavailable.
  */
 export function summarizeResidualHighForMilestone(
   milestoneId: string,
@@ -198,7 +202,10 @@ export function summarizeResidualHighForMilestone(
   return readTrackerItems()
     .filter(
       (item) =>
-        item.dispositionTags.includes(PLAN_REVIEW_RESIDUAL_HIGH_TAG)
+        item.status !== "resolved"
+        && item.status !== "closed"
+        && item.status !== "wont-fix"
+        && item.dispositionTags.includes(PLAN_REVIEW_RESIDUAL_HIGH_TAG)
         && item.dispositionTags.includes(scopeTag),
     )
     .reduce(

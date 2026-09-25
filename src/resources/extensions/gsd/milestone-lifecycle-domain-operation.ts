@@ -22,6 +22,7 @@ import {
   type MilestoneCompletionHierarchyResult,
 } from "./db/writers/milestone-lifecycle.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { summarizeResidualHighForMilestone } from "./plan-review-residual-disposition.js";
 // GREEN-05/D-05: captureMilestoneCloseoutResiduals(...) is called exactly
 // once below, strictly AFTER executeDomainOperation returns (never inside
 // its callback) and never throws — see the call site's own comment for why.
@@ -90,6 +91,15 @@ export interface MilestoneCompletionReceipt {
    * captured, so callers never have to branch on presence.
    */
   residualCapture: MilestoneCloseoutResidualCapture;
+  /**
+   * CONV-05: tracker-sourced count and distinct phase list of every
+   * plan-review residual-HIGH item scoped to this milestone, across all
+   * three dispositions (must-fix-in-execute/rescope-requirement/
+   * deferred-to-phase-N) — run-end visibility is about what shipped, not
+   * about what gated. Always present; `{count:0, phases:[]}` when nothing
+   * matches. Computed post-commit, read-only, never cached.
+   */
+  residualHighSummary: { count: number; phases: string[] };
   isCurrent: boolean;
 }
 
@@ -630,6 +640,13 @@ export function completeMilestone(input: {
     items: closeout.residualItems ?? [],
     basePath: residualCaptureBasePath(),
   });
+  // CONV-05: read-only, in-memory reduce over the already-open tracker table
+  // — no write, so nothing here can fail in a way that needs a try/catch.
+  // summarizeResidualHighForMilestone returns the zero value when no
+  // database is readable. Runs AFTER captureMilestoneCloseoutResiduals and
+  // is unaffected by it: the closeout capture writes a different class
+  // marker (`milestone-closeout-residual`), never the plan-review one.
+  const residualHighSummary = summarizeResidualHighForMilestone(milestoneId);
   const stored = storedCompletionPayload(operation.operationId, milestoneId);
   return {
     status: operation.status,
@@ -653,6 +670,7 @@ export function completeMilestone(input: {
     dispositionIds: stored.dispositionIds,
     closeout: stored.closeout,
     residualCapture,
+    residualHighSummary,
     isCurrent: isCurrentMilestoneCompletionOperation(operation.operationId, milestoneId),
   };
 }
