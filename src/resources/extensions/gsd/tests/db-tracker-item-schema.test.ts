@@ -82,8 +82,8 @@ test("schema: tracker_items + track_item_refs + triggers exist at v55 on fresh i
     "trg_tracker_items_transition",
   ]);
 
-  assert.equal(Number(db.prepare("PRAGMA user_version").get()?.["user_version"] ?? 0), 55);
-  assert.equal(SCHEMA_VERSION, 55);
+  assert.equal(Number(db.prepare("PRAGMA user_version").get()?.["user_version"] ?? 0), 56);
+  assert.equal(SCHEMA_VERSION, 56);
   void basePath;
 });
 
