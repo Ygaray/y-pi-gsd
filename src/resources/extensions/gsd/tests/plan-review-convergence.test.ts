@@ -32,6 +32,7 @@ import { resolvePlanReviewMaxCycles } from "../preferences.ts";
 import { PLAN_REVIEW_MAX_CYCLES_BOUNDS } from "../preferences-validation.ts";
 import { DISPATCH_RULES, type DispatchContext } from "../auto-dispatch.ts";
 import { readTrackerItems } from "../tracker-projection.ts";
+import { createTrackerItem } from "../db/writers/tracker-item.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -589,6 +590,124 @@ describe("checkPlanReviewConvergenceAdvance", () => {
 
     const notice = ctx.notifications.find((n) => n.message.includes("cap-hit"));
     assert.ok(notice?.message.includes("no reviewer lane produced a review"));
+
+    // CONV-03 boundary: a zero-lane blocked cap-hit has highCount 0 — the
+    // escalation still fires, but nothing is promoted.
+    assert.equal(readTrackerItems().length, 0, "a zero-HIGH cap-hit must create zero tracker rows");
+  });
+
+  it("CONV-03: a stubbed-lane blocked cap-hit carrying a residual HIGH still promotes exactly one tracker row", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    // A stubbed lane always yields verdict "blocked" regardless of its own
+    // reported HIGH count (aggregatePlanReviewCycle checks lane health
+    // before count) — this fixture carries high:2 to prove the promotion
+    // still fires off the aggregated count on the blocked path, not only
+    // the reround-exhausted path.
+    writeArtifact(artifactPath, ["### 1. gemini", "status: stubbed", "high: 2", "actionable: 1", ""].join("\n"));
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 3, artifactPath });
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const handled = await checkPlanReviewConvergenceAdvance(pi, { messages: [] }, ctx, basePath);
+    assert.equal(handled, true);
+
+    const items = readTrackerItems();
+    assert.equal(items.length, 1, "a blocked cap-hit with a residual HIGH must promote exactly one tracker row");
+    assert.deepEqual(items[0]!.dispositionTags, [
+      "plan-review-residual-high",
+      "milestone:M001",
+      "must-fix-in-execute",
+    ]);
+  });
+
+  it("CONV-03 (skip is not a failure): a promotion that dedups to an existing identity adds no second row and no warning notice", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 1", "actionable: 0", ""].join("\n"));
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "S01", cycle: 1, maxCycles: 1, artifactPath });
+
+    // Pre-create, via the real writer, a row carrying the exact
+    // normalized-title-plus-sorted-ref identity the upcoming promotion will
+    // compute — a genuine dedup skip, not a synthetic crash.
+    createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title:
+          "Plan-review residual HIGH (cycle 1): 1 HIGH / 0 actionable concern(s) unresolved at cap",
+        detail: JSON.stringify([{ lane: "claude", status: "reviewed", high: 1, actionable: 0 }]),
+        dispositionTags: ["plan-review-residual-high", "milestone:M001", "must-fix-in-execute"],
+        refs: [
+          { refKind: "phase", refValue: "S01" },
+          { refKind: "reviews_md", refValue: artifactPath },
+        ],
+      },
+      basePath,
+    );
+    assert.equal(readTrackerItems().length, 1, "sanity: the pre-created row exists before the driver runs");
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const handled = await checkPlanReviewConvergenceAdvance(pi, { messages: [] }, ctx, basePath);
+    assert.equal(handled, true, "checkPlanReviewConvergenceAdvance must still return true on a promotion skip");
+
+    assert.equal(readTrackerItems().length, 1, "a dedup skip must add no second row");
+    const escalation = ctx.notifications.find((n) => n.message.includes("cap-hit"));
+    assert.ok(escalation, "the pre-existing cap-hit escalation notice must still be emitted");
+    assert.ok(
+      escalation!.message.includes("1 HIGH / 0 actionable concern(s) remain unresolved"),
+      "the escalation notice must keep its original Phase 20 wording",
+    );
+    assert.equal(
+      ctx.notifications.some((n) => n.level === "warning"),
+      false,
+      "a dedup skip is not a failure — no warning notification may be added",
+    );
+  });
+
+  it("CONV-03 (failure emits a warning): a genuine promotion validation rejection still leaves the escalation notice intact and adds a warning after it", async () => {
+    const basePath = makeBase();
+    const artifactDir = join(basePath, ".gsd", "plan-review");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "c1.md");
+    writeArtifact(artifactPath, ["### 1. claude", "status: reviewed", "high: 1", "actionable: 0", ""].join("\n"));
+    // A whitespace-only sliceId makes the promotion's `phase` ref value
+    // blank, which validateCreateTrackerItemInput refuses ("ref value is
+    // required") — a genuine, unstubbed rejection. savePlanReviewCycle
+    // itself carries no sliceId validation, so this fixture is acceptable
+    // input at the DB layer even though it is nonsensical at the product
+    // layer.
+    savePlanReviewCycle({ milestoneId: "M001", sliceId: "   ", cycle: 1, maxCycles: 1, artifactPath });
+    assert.equal(
+      getOpenPlanReviewCycleForMilestone("M001")?.sliceId,
+      "   ",
+      "sanity: the row really was opened with a whitespace-only sliceId",
+    );
+
+    const pi = createMockPi();
+    const ctx = createMockCtx();
+    const handled = await checkPlanReviewConvergenceAdvance(pi, { messages: [] }, ctx, basePath);
+    assert.equal(handled, true, "checkPlanReviewConvergenceAdvance must still return true on a promotion failure");
+
+    assert.equal(readTrackerItems().length, 0, "a rejected promotion must create no row");
+    const notifications = ctx.notifications;
+    const escalationIndex = notifications.findIndex((n) => n.message.includes("cap-hit"));
+    assert.ok(escalationIndex >= 0, "the pre-existing cap-hit escalation notice must still be emitted");
+    const warningIndex = notifications.findIndex((n) => n.level === "warning");
+    assert.ok(warningIndex >= 0, "a promotion failure must emit an additional warning notification");
+    assert.ok(
+      warningIndex > escalationIndex,
+      "the warning notification must appear AFTER the existing escalation notice",
+    );
+    assert.ok(
+      notifications[warningIndex]!.message.includes("tracker promotion did not land"),
+      "the warning must name the promotion failure",
+    );
   });
 
   it("drives a full multi-cycle sequence: cycle 1 rerounds once, cycle 2 hits the cap and dispatches nothing", async () => {
