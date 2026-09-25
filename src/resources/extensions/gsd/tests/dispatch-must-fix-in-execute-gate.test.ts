@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DISPATCH_RULES, type DispatchContext, type DispatchRule } from "../auto-dispatch.ts";
+import { DISPATCH_RULES, resolveDispatch, type DispatchContext, type DispatchRule } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
 import {
   MUST_FIX_IN_EXECUTE_DISPOSITION_TAG,
@@ -26,7 +26,7 @@ import {
   deferredToPhaseDispositionTag,
 } from "../plan-review-residual-disposition.ts";
 import { createTrackerItem, resolveTrackerItem, updateTrackerItem } from "../db/writers/tracker-item.ts";
-import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { readTrackerItems } from "../tracker-projection.ts";
 
 const tempDirs = new Set<string>();
@@ -94,6 +94,50 @@ function stageExecuteTaskScaffold(basePath: string, mid = "M001", sid = "S01", t
   writeMilestoneFile(basePath, mid, "CONTEXT", "# Context\n");
   writeSliceFile(basePath, mid, sid, "PLAN", "# Plan\n");
   writeTaskPlan(basePath, mid, sid, tid);
+}
+
+/**
+ * Stages 3 independent (non-overlapping IO) tasks so `resolveDispatch`'s
+ * real "executing → reactive-execute (parallel dispatch)" rule finds enough
+ * ready tasks to activate (default-on threshold is 3, per
+ * auto-dispatch.ts's `minReadyTasksForReactive`). Mirrors the fixture in
+ * reactive-executor.test.ts's "reactive dispatch requires enabled config and
+ * multiple ready tasks" case.
+ */
+function stageReactiveReadyTasks(basePath: string, mid = "M001", sid = "S01"): void {
+  const sliceDir = join(basePath, ".gsd", "milestones", mid, "slices", sid);
+  const tasksDir = join(sliceDir, "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+  writeFileSync(
+    join(sliceDir, `${sid}-PLAN.md`),
+    [
+      `# ${sid}: Test Slice`,
+      "",
+      "## Tasks",
+      "",
+      "- [ ] **T01: First**",
+      "- [ ] **T02: Second**",
+      "- [ ] **T03: Third**",
+      "",
+    ].join("\n"),
+  );
+  for (const tid of ["T01", "T02", "T03"]) {
+    insertTask({ milestoneId: mid, sliceId: sid, id: tid, title: tid, status: "pending" });
+    writeFileSync(
+      join(tasksDir, `${tid}-PLAN.md`),
+      [
+        `# ${tid}`,
+        "",
+        "## Inputs",
+        "",
+        `- \`src/${tid}.input\``,
+        "",
+        "## Expected Output",
+        "",
+        `- \`src/${tid}.output\``,
+      ].join("\n"),
+    );
+  }
 }
 
 function makeState(overrides: Partial<GSDState> = {}): GSDState {
@@ -562,5 +606,110 @@ describe("CONV-04 execute gate: retry path and stop-reason contract", () => {
     assert.equal(result.level, "error");
     assert.notEqual(result.level, "warning");
     assert.notEqual(result.level, "info");
+  });
+});
+
+// ─── CR-01 fix: the reactive/parallel dispatch path must also gate ───────
+//
+// Before this fix, `readMustFixInExecuteBlock` was wired into only the
+// "executing → execute-task" rule. The "executing → reactive-execute
+// (parallel dispatch)" rule — enabled by default once 3+ tasks are ready,
+// and evaluated *before* "executing → execute-task" in DISPATCH_RULES — could
+// dispatch real task-execution work for a slice with an open
+// must-fix-in-execute tracker item, completely bypassing the gate. These
+// cases drive `resolveDispatch` end-to-end (real rule order, real reactive
+// graph derivation) rather than resolving a single rule directly, so the
+// bypass would be caught the same way it manifests in production.
+
+describe("CONV-04 execute gate: reactive/parallel dispatch path (CR-01)", () => {
+  it("blocks the default-on reactive-execute path when a must-fix-in-execute item is open, even with 3+ ready tasks", async () => {
+    const basePath = makeBase();
+    createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Reactive-path blocking item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    stageReactiveReadyTasks(basePath);
+
+    const ctx = makeCtx(basePath, { prefs: {} as DispatchContext["prefs"] });
+    const result = await resolveDispatch(ctx);
+    assertStop(result);
+    assert.equal(result.level, "error");
+    assert.ok(
+      result.reason.includes("must-fix-in-execute"),
+      `reason must name the blocking disposition: ${result.reason}`,
+    );
+  });
+
+  it("blocks the explicitly-opted-in reactive-execute path (enabled: true, threshold 2) when a must-fix-in-execute item is open", async () => {
+    const basePath = makeBase();
+    createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Reactive-path blocking item (opt-in)",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    stageReactiveReadyTasks(basePath);
+
+    const ctx = makeCtx(basePath, {
+      prefs: { reactive_execution: { enabled: true, max_parallel: 3 } } as DispatchContext["prefs"],
+    });
+    const result = await resolveDispatch(ctx);
+    assertStop(result);
+  });
+
+  it("dispatches reactive-execute (not a stop) once the blocker is released, proving the fixture reaches the reactive path", async () => {
+    const basePath = makeBase();
+    const { trackId } = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Reactive-path released item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    stageReactiveReadyTasks(basePath);
+    resolveTrackerItem({ trackId, status: "resolved" }, basePath);
+
+    const ctx = makeCtx(basePath, { prefs: {} as DispatchContext["prefs"] });
+    const result = await resolveDispatch(ctx);
+    assert.equal(result.action, "dispatch", `expected a dispatch, got ${JSON.stringify(result)}`);
+    assert.equal((result as { unitType: string }).unitType, "reactive-execute");
+  });
+
+  it("re-blocks the reactive-execute path once a resolved item is reopened via updateTrackerItem", async () => {
+    const basePath = makeBase();
+    const { trackId } = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Reactive-path reopen item",
+        dispositionTags: [MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    stageReactiveReadyTasks(basePath);
+    resolveTrackerItem({ trackId, status: "closed" }, basePath);
+
+    const ctx = makeCtx(basePath, { prefs: {} as DispatchContext["prefs"] });
+    const released = await resolveDispatch(ctx);
+    assert.equal(released.action, "dispatch");
+    assert.equal((released as { unitType: string }).unitType, "reactive-execute");
+
+    updateTrackerItem({ trackId, status: "open" }, basePath);
+    const reopened = await resolveDispatch(ctx);
+    assertStop(reopened);
   });
 });

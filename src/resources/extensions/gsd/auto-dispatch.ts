@@ -827,10 +827,11 @@ function readExecuteTaskTerminalAbort(
 }
 
 /**
- * CONV-04's execute gate: block the whole slice's execute-task dispatch
- * (both the normal path and the retry path) while an open
- * `must-fix-in-execute` tracker item is still ref'd to this slice. Mirrors
- * `readExecuteTaskTerminalAbort`'s shape exactly.
+ * CONV-04's execute gate: block the whole slice's task-execution dispatch
+ * — the "executing → execute-task" rule (both its normal path and its retry
+ * path) and the "executing → reactive-execute (parallel dispatch)" rule —
+ * while an open `must-fix-in-execute` tracker item is still ref'd to this
+ * slice. Mirrors `readExecuteTaskTerminalAbort`'s shape exactly.
  */
 function readMustFixInExecuteBlock(sliceId: string): Extract<DispatchAction, { action: "stop" }> | null {
   if (!isDbAvailable()) return null;
@@ -1699,6 +1700,15 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (reactiveConfig?.enabled === false) return null;
 
       const sid = state.activeSlice.id;
+      // CONV-04 (CR-01): this rule dispatches real task-execution work
+      // (`reactive-execute`) and is evaluated *before* "executing →
+      // execute-task" in DISPATCH_RULES, so it must consult the same
+      // must-fix-in-execute gate — otherwise a slice with an open blocker
+      // could have its tasks executed via the reactive/parallel path
+      // whenever the ready-task threshold is met, bypassing the gate
+      // entirely.
+      const mustFixBlock = readMustFixInExecuteBlock(sid);
+      if (mustFixBlock) return mustFixBlock;
       const sTitle = state.activeSlice.title;
       if (resolveSliceFile(basePath, mid, sid, "REACTIVE-BLOCKER")) return null;
       const maxParallel = reactiveConfig?.max_parallel ?? 2;
