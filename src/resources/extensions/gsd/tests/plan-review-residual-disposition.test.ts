@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
+import { createTrackerItem, resolveTrackerItem } from "../db/writers/tracker-item.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { readTrackerItems } from "../tracker-projection.ts";
 import {
@@ -311,6 +312,25 @@ describe("summarizeResidualHighForMilestone", () => {
   it("returns {count:0, phases:[]} when the database is unavailable", () => {
     makeBase();
     closeDatabase();
+    assert.deepEqual(summarizeResidualHighForMilestone("M001"), { count: 0, phases: [] });
+  });
+
+  it("excludes a resolved row from the count: 'residual' means still outstanding", () => {
+    const basePath = makeBase();
+    const { trackId } = createTrackerItem(
+      {
+        type: "incident",
+        severity: "HIGH",
+        title: "Will be resolved before summarizing",
+        dispositionTags: [PLAN_REVIEW_RESIDUAL_HIGH_TAG, milestoneScopeTag("M001"), MUST_FIX_IN_EXECUTE_DISPOSITION_TAG],
+        refs: [{ refKind: "phase", refValue: "S01" }],
+      },
+      basePath,
+    );
+    assert.deepEqual(summarizeResidualHighForMilestone("M001"), { count: 1, phases: ["S01"] });
+
+    resolveTrackerItem({ trackId, status: "resolved" }, basePath);
+
     assert.deepEqual(summarizeResidualHighForMilestone("M001"), { count: 0, phases: [] });
   });
 });
