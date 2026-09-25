@@ -110,6 +110,7 @@ const PREF_SAMPLE_VALUES: Record<string, unknown> = {
   context_mode: { enabled: true },
   copilot_catalog: { refresh_on_session_start: "if_stale", notify_on_changes: true, stale_after_ms: 3_600_000 },
   planning_depth: "deep",
+  plan_review: { max_cycles: 3 },
   claude_code_mcp: { per_model: { "claude-haiku": { allowed_servers: ["gsd-workflow"] } } },
   workspace: {
     mode: "parent",
