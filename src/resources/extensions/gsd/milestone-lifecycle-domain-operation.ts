@@ -642,10 +642,10 @@ export function completeMilestone(input: {
   });
   // CONV-05: read-only, in-memory reduce over the already-open tracker table
   // — no write, so nothing here can fail in a way that needs a try/catch.
-  // summarizeResidualHighForMilestone returns the zero value when no
-  // database is readable. Runs AFTER captureMilestoneCloseoutResiduals and
-  // is unaffected by it: the closeout capture writes a different class
-  // marker (`milestone-closeout-residual`), never the plan-review one.
+  // The helper below returns the zero value when no database is readable.
+  // Runs AFTER captureMilestoneCloseoutResiduals and is unaffected by it: the
+  // closeout capture writes a different class marker
+  // (`milestone-closeout-residual`), never the plan-review one.
   const residualHighSummary = summarizeResidualHighForMilestone(milestoneId);
   const stored = storedCompletionPayload(operation.operationId, milestoneId);
   return {
