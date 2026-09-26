@@ -733,7 +733,7 @@ export class ToolExecutionComponent extends Container {
 	 * This triggers diff computation for edit tool.
 	 */
 	setArgsComplete(): void {
-		if (this.toolName === "write") {
+		if (this.normalizedToolName === "write") {
 			const rawPath = str(this.args?.file_path ?? this.args?.path);
 			const fileContent = str(this.args?.content);
 			if (rawPath !== null && fileContent !== null) {
