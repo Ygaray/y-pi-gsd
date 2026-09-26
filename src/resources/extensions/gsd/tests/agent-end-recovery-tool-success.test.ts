@@ -12,6 +12,11 @@ import {
   recordTurnToolOutcome,
   resetTurnToolOutcome,
 } from "../auto-tool-tracking.ts";
+import {
+  _shouldOverrideAbortedPauseAfterToolSuccess,
+  handleAgentEnd,
+} from "../bootstrap/agent-end-recovery.ts";
+import { _resetPendingResolve, _setCurrentResolve } from "../auto/resolve.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
 
@@ -136,4 +141,169 @@ test("tool_execution_end records failure unconditionally while autoSession is IN
   await emitToolExecutionEnd({ toolName: "gsd_validate_milestone", result: "boom", isError: true });
 
   assert.equal(getLastTurnToolOutcome(), false);
+});
+
+// ─── Task 2: the override predicate + the aborted-pause recovery branch ────
+
+function makeAbortedEvent(content: unknown[], extra: Record<string, unknown> = {}) {
+  return {
+    messages: [{
+      stopReason: "aborted",
+      content,
+      ...extra,
+    }],
+  };
+}
+
+function minimalPauseCtx(notifications?: Array<{ message: string; level: string }>): any {
+  return {
+    ui: {
+      notify: (message: string, level: string) => notifications?.push({ message, level }),
+      setStatus: () => undefined,
+      setWidget: () => undefined,
+    },
+  };
+}
+
+test.afterEach(() => {
+  autoSession.reset();
+  _resetPendingResolve();
+  resetTurnToolOutcome();
+});
+
+// ── Predicate: _shouldOverrideAbortedPauseAfterToolSuccess ─────────────────
+
+test("_shouldOverrideAbortedPauseAfterToolSuccess: last-call success + no pending -> true", () => {
+  assert.equal(
+    _shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome: true, hasPendingToolCall: false }),
+    true,
+  );
+});
+
+test("_shouldOverrideAbortedPauseAfterToolSuccess: last-call error + no pending -> false", () => {
+  assert.equal(
+    _shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome: false, hasPendingToolCall: false }),
+    false,
+  );
+});
+
+test("_shouldOverrideAbortedPauseAfterToolSuccess: zero tool calls (null) + no pending -> false", () => {
+  assert.equal(
+    _shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome: null, hasPendingToolCall: false }),
+    false,
+    "zero tool calls this turn is not success",
+  );
+});
+
+test("_shouldOverrideAbortedPauseAfterToolSuccess: last-call success + pending tool call -> false", () => {
+  assert.equal(
+    _shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome: true, hasPendingToolCall: true }),
+    false,
+    "the model was still calling tools",
+  );
+});
+
+// ── Recovery level: handleAgentEnd's aborted branch ─────────────────────────
+
+test("aborted + non-empty content + tracker true + no pending tool call resolves as done (no pause)", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(true);
+  const results: unknown[] = [];
+  const notifications: Array<{ message: string; level: string }> = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([{ type: "text", text: "Implemented and verified the task." }]);
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx(notifications));
+
+  assert.deepEqual(results, [{ status: "completed", event }]);
+  assert.ok(
+    notifications.some((n) => n.level === "info"),
+    "an info notice must explain the treated-as-done override",
+  );
+});
+
+test("aborted + populated errorMessage + tracker true + no pending tool call resolves as done (reported bug shape)", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(true);
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([], { errorMessage: "stream cut off after tool success" });
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.deepEqual(results, [{ status: "completed", event }]);
+});
+
+test("aborted + non-empty content + tracker false still pauses (unchanged)", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(false);
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([{ type: "text", text: "Implemented and verified the task." }]);
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.equal(results.length, 1);
+  assert.equal((results[0] as any).status, "cancelled");
+  assert.equal((results[0] as any).errorContext?.category, "aborted");
+});
+
+test("aborted + non-empty content + tracker null (zero tool calls) still pauses, distinct from tracker false", async () => {
+  autoSession.active = true;
+  // resetTurnToolOutcome() already ran in the previous afterEach; tracker is null.
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([{ type: "text", text: "Implemented and verified the task." }]);
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.equal(results.length, 1);
+  assert.equal((results[0] as any).status, "cancelled");
+});
+
+test("aborted + tracker true BUT pending tool call in trailing message still pauses", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(true);
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([{ type: "toolCall", id: "x", name: "web_search", arguments: {} }]);
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.equal(results.length, 1);
+  assert.equal((results[0] as any).status, "cancelled", "the model was still calling tools -- must still pause");
+});
+
+// ── Regression: pre-existing branches keep their exact precedence ──────────
+
+test("regression: aborted + EMPTY content + no errorMessage still resolves via the pre-existing empty-content branch, regardless of tracker", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(false); // tracker says failure -- must not matter for this branch
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([]);
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.deepEqual(results, [{ status: "completed", event }]);
+});
+
+test("regression: isAutoCompletionStopInProgress() short-circuits before the new guard, regardless of tracker", async () => {
+  autoSession.active = true;
+  autoSession.completionStopInProgress = true;
+  recordTurnToolOutcome(false); // tracker says failure -- must not matter, this branch wins first
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent([{ type: "text", text: "some content" }]);
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.deepEqual(results, [{ status: "completed", event }]);
 });
