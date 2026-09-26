@@ -245,33 +245,40 @@ describe("TUI padding mechanism discrimination (phase 25)", () => {
 		await terminal.waitForRender();
 
 		const viewportAfterShort = terminal.getViewport();
-		const leadingBlankRows = viewportAfterShort.findIndex((line) => line.trim() !== "");
-		const hasLeadingBlanks = leadingBlankRows > 0;
+		// Post-25-02-fix reality: the short frame is TOP-anchored now (see the C3
+		// probe below), so any padding this discrimination question cares about
+		// sits AFTER the content, not before it — re-point the same "does this
+		// padding require an active overlay?" question at the trailing rows.
+		const lastNonBlankRow = viewportAfterShort.reduce(
+			(acc, line, i) => (line.trim() !== "" ? i : acc),
+			-1,
+		);
+		const hasTrailingBlanks = lastNonBlankRow !== -1 && lastNonBlankRow < viewportAfterShort.length - 1;
 
 		// No overlay-opening call is made anywhere in this test file — the TUI's
 		// overlay stack is empty for this entire sequence, by construction.
-		if (hasLeadingBlanks) {
-			// Leading blanks appeared with an empty overlay stack: compositeOverlays
+		if (hasTrailingBlanks) {
+			// Trailing blanks appeared with an empty overlay stack: compositeOverlays
 			// (gated on overlayStack.length > 0, tui.ts:1237) cannot be the mechanism
 			// for this path. C1 is REFUTED for this path.
 			assert.ok(
-				hasLeadingBlanks,
-				`C1 REFUTED: ${leadingBlankRows} leading blank row(s) appeared in the viewport with overlayStack empty: ${JSON.stringify(viewportAfterShort)}`,
+				hasTrailingBlanks,
+				`C1 REFUTED: trailing blank row(s) after row ${lastNonBlankRow} appeared in the viewport with overlayStack empty: ${JSON.stringify(viewportAfterShort)}`,
 			);
 		} else {
-			// No leading blanks appeared on this path with no overlay active.
+			// No trailing blanks appeared on this path with no overlay active.
 			// C1 is NOT-REACHED-BY-THIS-PATH (neither confirmed nor refuted here).
 			assert.strictEqual(
-				leadingBlankRows,
-				-1,
-				`C1 NOT-REACHED-BY-THIS-PATH: no leading blank rows in viewport: ${JSON.stringify(viewportAfterShort)}`,
+				lastNonBlankRow,
+				viewportAfterShort.length - 1,
+				`C1 NOT-REACHED-BY-THIS-PATH: no trailing blank rows in viewport: ${JSON.stringify(viewportAfterShort)}`,
 			);
 		}
 
 		tui.stop();
 	});
 
-	it("C3 probe: a short frame is bottom-anchored in the viewport", async () => {
+	it("C3 probe: a short frame is top-anchored in the viewport (post-25-02-fix)", async () => {
 		const terminal = new VirtualTerminal(80, 12);
 		const tui = new TUI(terminal);
 		const turn = new TurnComponent();
@@ -302,9 +309,15 @@ describe("TUI padding mechanism discrimination (phase 25)", () => {
 			topAnchored || bottomAnchored,
 			`short frame landed in neither a top-anchored nor a clean bottom-anchored arrangement: ${JSON.stringify(viewport)}`,
 		);
+		// Plan 25-02 fixed the convicted branch (tui.ts:1294-1300) to top-anchor a
+		// clear-repaint whose content fits inside the viewport, so the padding rows
+		// land AFTER the content (never committed to scrollback on a later grow)
+		// instead of before it. This assertion flipped from bottomAnchored to
+		// topAnchored as the direct, intended consequence of that fix — see
+		// 25-02-SUMMARY.md.
 		assert.ok(
-			bottomAnchored,
-			`C3 probe: expected bottom-anchoring (blanks above, content at the last 3 rows), got: ${JSON.stringify(viewport)} (fullRedraws delta across the short turn: ${fullRedrawDelta})`,
+			topAnchored,
+			`C3 probe (post-25-02-fix): expected top-anchoring (content at the first 3 rows, blanks below), got: ${JSON.stringify(viewport)} (fullRedraws delta across the short turn: ${fullRedrawDelta})`,
 		);
 
 		tui.stop();
@@ -343,16 +356,17 @@ describe("TUI padding mechanism discrimination (phase 25)", () => {
 		// height) is checked before clearOnShrink and fires unconditionally for
 		// this shrink shape, so clearOnShrink cannot change the outcome here. The
 		// SUMMARY records this measured number against the C3 probe's — an
-		// identical number exonerates C2 for this path; a materially different
-		// number would implicate it instead.
+		// identical number exonerates C2 for this path (both before AND after the
+		// 25-02 fix: pre-fix both showed the same >2 bottom-anchor leak, post-fix
+		// both show the same <=2 fixed number, since it's one shared branch).
 		assert.strictEqual(
 			fullRedrawDelta,
 			1,
 			`expected exactly one full redraw across the short turn with clearOnShrink enabled, got ${fullRedrawDelta}`,
 		);
 		assert.ok(
-			longest > 2,
-			`C2 probe: expected the same bottom-anchor padding signature as the C3 probe (longest blank run > 2), got ${longest} (fullRedraws delta: ${fullRedrawDelta})`,
+			longest <= 2,
+			`C2 probe (post-25-02-fix): expected the same fixed top-anchor signature as the C3 probe (longest blank run <= 2), got ${longest} (fullRedraws delta: ${fullRedrawDelta})`,
 		);
 
 		tui.stop();

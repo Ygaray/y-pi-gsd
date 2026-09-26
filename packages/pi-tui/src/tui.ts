@@ -1258,7 +1258,14 @@ export class TUI extends Container {
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = hardwareCursorRow ?? this.cursorRow;
 			if (maxLines === "set") {
-				this.maxLinesRendered = newLines.length;
+				// Floor at `height`: a "set" commit whose content fits inside the
+				// viewport (the fixedHeightAnchor case in `fullRender`) must not let
+				// maxLinesRendered/previousViewportTop drop below what the top-anchored
+				// screen write actually occupies, or the next growth's scroll would
+				// re-derive a negative viewportTop and treat the on-screen filler rows
+				// as unaccounted content again. When content already exceeds height
+				// (the tall-shrink-realign caller) this floor is a no-op.
+				this.maxLinesRendered = Math.max(newLines.length, height);
 			} else if (maxLines === "grow") {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
 			}
@@ -1292,7 +1299,22 @@ export class TUI extends Container {
 			// (now-deleted) prior placement via its stable id.
 			buffer += this.deleteKittyImages(this.previousKittyImageIds);
 			const firstLine = clear && newLines.length > height ? newLines.length - height : 0;
-			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
+			// A full clear-repaint whose content fits entirely inside the viewport
+			// (clear === true, newLines.length <= height) anchors to the TOP of the
+			// screen rather than the bottom. Bottom-anchoring this case left the rows
+			// above the short content as screen-only blanks the commit bookkeeping
+			// never accounted for (maxLinesRendered/previousViewportTop tracked only
+			// the real content length, not the filler) — the next frame's growth
+			// then scrolled those unaccounted blanks into real scrollback one row at
+			// a time via the "bottom-anchored short block shrunk" branch above
+			// (measured in 25-01-SUMMARY.md as a longest blank run of 9). Top-
+			// anchoring plus the matching maxLinesRendered floor in `commitFrame`'s
+			// "set" mode below keeps viewportTop at 0 for this frame, so the padding
+			// never has to leak into scrollback on the following grow.
+			const fixedHeightAnchor = clear && newLines.length <= height;
+			const startRow = fixedHeightAnchor
+				? 1
+				: Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
 				buffer += `\x1b[2J\x1b[${startRow};1H`;
 			} else if (startRow > 1) {
