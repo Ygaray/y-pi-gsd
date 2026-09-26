@@ -1422,12 +1422,13 @@ export function registerHooks(
       await handleAgentEnd(pi, event, ctx);
     } finally {
       activateDeferredApprovalGate(agentEndBasePath);
+      const approvalGateBlocking = isApprovalGateBlocking(agentEndBasePath);
       const destructiveConfirmationBlocking = isDestructiveConfirmationBlocking(agentEndBasePath);
       clearDeferredDestructiveConfirmationPause(agentEndBasePath);
       await maybePauseAutoForApprovalGate(
         ctx,
         pi,
-        isApprovalGateBlocking(agentEndBasePath),
+        approvalGateBlocking,
         "Depth confirmation is waiting for your answer — pausing auto-mode.",
       );
       await maybePauseAutoForApprovalGate(
@@ -1438,7 +1439,11 @@ export function registerHooks(
       );
       try {
         const { signalTurnEnd } = await import("./turn-completion-signal.js");
-        await signalTurnEnd(event, ctx);
+        // SIGNAL-02 (Task 3): lastToolCallSucceeded is intentionally left
+        // unset here — Plan 23-02 owns that generic tool-outcome tracker and
+        // threads it in; unset classifies extension/programmatic aborts as
+        // "cancelled" (the conservative direction, never a false success).
+        await signalTurnEnd(event, ctx, { approvalGateBlocking, destructiveConfirmationBlocking });
       } catch (err) {
         safetyLogWarning(
           "bootstrap",

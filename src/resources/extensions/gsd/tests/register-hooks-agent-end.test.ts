@@ -129,7 +129,7 @@ function makeDepsDouble(): TurnCompletionSignalDeps & {
 test("signalTurnEnd (interactive, clean end): bell + turn-complete store entry + one StopEvent(completed)", async () => {
   const deps = makeDepsDouble();
   const ctx: any = { hasPendingMessages: () => false };
-  await signalTurnEnd({ messages: [], willRetry: false }, ctx, deps);
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
 
   assert.equal(deps.bellCalls.length, 1);
   assert.deepEqual(deps.bellCalls, ["attention"]);
@@ -153,7 +153,7 @@ test("signalTurnEnd (auto-active): zero bells, zero turn-complete entries, still
   const deps = makeDepsDouble();
   (deps as any).autoActiveFlag = true;
   const ctx: any = { hasPendingMessages: () => false };
-  await signalTurnEnd({ messages: [], willRetry: false }, ctx, deps);
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
 
   assert.equal(deps.bellCalls.length, 0);
   assert.equal(deps.notifyCalls.length, 0);
@@ -165,7 +165,7 @@ test("signalTurnEnd (auto-active): zero bells, zero turn-complete entries, still
 test("signalTurnEnd (willRetry: true): emits nothing", async () => {
   const deps = makeDepsDouble();
   const ctx: any = { hasPendingMessages: () => false };
-  await signalTurnEnd({ messages: [], willRetry: true }, ctx, deps);
+  await signalTurnEnd({ messages: [], willRetry: true }, ctx, {}, deps);
 
   assert.equal(deps.bellCalls.length, 0);
   assert.equal(deps.notifyCalls.length, 0);
@@ -182,6 +182,7 @@ test("signalTurnEnd (pending tool call in last message): no interactive signal, 
       willRetry: false,
     } as any,
     ctx,
+    {},
     deps,
   );
 

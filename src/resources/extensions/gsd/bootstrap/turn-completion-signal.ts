@@ -18,6 +18,13 @@ export const TURN_COMPLETE_NOTIFICATION_KIND = "turn-complete";
 
 export type TurnEndStopReason = "completed" | "cancelled" | "error" | "blocked";
 
+export interface TurnEndClassificationInput {
+  abortOrigin?: AgentAbortOrigin | string;
+  approvalGateBlocking?: boolean;
+  destructiveConfirmationBlocking?: boolean;
+  lastToolCallSucceeded?: boolean | null;
+}
+
 /** Seam for tests; production callers use the defaults. */
 export interface TurnCompletionSignalDeps {
   autoActive(): boolean;
@@ -75,23 +82,68 @@ export function shouldFireInteractiveCompletionSignal(args: {
   return !args.autoActive && !args.willRetry && !args.hasPendingMessages && !args.hasPendingToolCall;
 }
 
+/**
+ * Folds the abortOrigin × blocking-flag × tool-outcome vocabularies down to
+ * the four StopEvent.reason literals. Locked mapping table (Task 2 decision,
+ * option-a — "RESEARCH's seeded table, mechanically exhaustive"): blocking
+ * flags win over every abortOrigin arm (a turn halted waiting on a human
+ * answer is blocked, whatever aborted it); absent abortOrigin is a clean
+ * completion; user/timeout both collapse to cancelled (mirrors the existing
+ * category:"timeout"/isTransient:true treatment at
+ * agent-end-recovery.ts:617-624); error maps to error; extension/programmatic
+ * classify by whether the turn's last tool call succeeded (strict `=== true`
+ * — null/false both stay conservative, i.e. cancelled, never a false
+ * success); an unrecognized abortOrigin never silently reports completed —
+ * it warns (naming the raw value) and returns error, and a compile-time
+ * `never` assertion makes a newly-added AgentAbortOrigin member a
+ * typecheck:extensions failure rather than a silent runtime fallthrough.
+ */
+export function mapTurnEndToStopReason(
+  input: TurnEndClassificationInput,
+  onUnrecognized?: (message: string) => void,
+): TurnEndStopReason {
+  if (input.approvalGateBlocking || input.destructiveConfirmationBlocking) return "blocked";
+
+  if (input.abortOrigin === undefined) return "completed";
+
+  const origin = input.abortOrigin as AgentAbortOrigin;
+  switch (origin) {
+    case "user":
+      return "cancelled";
+    case "timeout":
+      return "cancelled";
+    case "error":
+      return "error";
+    case "extension":
+    case "programmatic":
+      return input.lastToolCallSucceeded === true ? "completed" : "cancelled";
+    default: {
+      const _exhaustive: never = origin;
+      const warn = onUnrecognized ?? ((m: string) => logWarning("bootstrap", m));
+      warn(`mapTurnEndToStopReason: unrecognized abortOrigin ${JSON.stringify(_exhaustive)}`);
+      return "error";
+    }
+  }
+}
+
 // ─── Orchestrator ───────────────────────────────────────────────────────────
 
 /**
  * Single call site for the agent_end handler: fires the interactive
  * completion signal (bell + notification-store entry + idle notification)
  * when the gate is satisfied, then unconditionally (auto and interactive
- * alike) dispatches a StopEvent. Ordering within one tick is an acceptance
- * criterion: bell -> store append -> emitStop.
- *
- * Tracer note: `reason` is hard-coded to `"completed"` here. Task 3 replaces
- * this with `mapTurnEndToStopReason(...)` once the reason-mapping table is
- * locked — the call site, the emitter, and the payload shape are all final;
- * only the classification is a stub.
+ * alike) dispatches a StopEvent classified by `mapTurnEndToStopReason`.
+ * Ordering within one tick is an acceptance criterion: bell -> store append
+ * -> emitStop.
  */
 export async function signalTurnEnd(
   event: Pick<AgentEndEvent, "messages" | "willRetry" | "abortOrigin">,
   ctx: ExtensionContext,
+  signal: {
+    approvalGateBlocking?: boolean;
+    destructiveConfirmationBlocking?: boolean;
+    lastToolCallSucceeded?: boolean | null;
+  } = {},
   deps: TurnCompletionSignalDeps = defaultTurnCompletionSignalDeps,
 ): Promise<void> {
   if (event.willRetry) return;
@@ -133,8 +185,14 @@ export async function signalTurnEnd(
       await deps.emitNotification("idle", "Turn complete — waiting for you.");
     }
 
+    const reason = mapTurnEndToStopReason({
+      abortOrigin: event.abortOrigin,
+      approvalGateBlocking: signal.approvalGateBlocking,
+      destructiveConfirmationBlocking: signal.destructiveConfirmationBlocking,
+      lastToolCallSucceeded: signal.lastToolCallSucceeded,
+    });
     await deps.emitStop({
-      reason: "completed",
+      reason,
       ...(event.abortOrigin ? { abortOrigin: event.abortOrigin } : {}),
     });
   } catch (err) {
