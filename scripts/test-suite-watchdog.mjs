@@ -60,6 +60,22 @@ const stallCapMs = Number(getArg('--stall-cap-ms', String(DEFAULTS.stallCapMs)))
 const hardCapMs = Number(getArg('--hard-cap-ms', String(DEFAULTS.hardCapMs)));
 const thresholds = { stallCapMs, hardCapMs };
 
+// WR-03: a malformed flag value (typo, empty string, non-numeric) would otherwise silently
+// become NaN — every `>=` comparison against NaN in classifyLiveness is always false, so a
+// NaN cap silently disables that cap entirely (same failure mode as CR-01, different
+// trigger) instead of failing loudly at startup, which is the fail-loud convention this
+// file otherwise follows.
+for (const [name, value] of [
+  ['--poll-ms', pollMs],
+  ['--stall-cap-ms', stallCapMs],
+  ['--hard-cap-ms', hardCapMs],
+]) {
+  if (!Number.isFinite(value) || value <= 0) {
+    process.stderr.write(`Invalid ${name}: must be a positive number\n`);
+    process.exit(2);
+  }
+}
+
 mkdirSync(dirname(verdictPath), { recursive: true });
 mkdirSync(dirname(logPath), { recursive: true });
 
