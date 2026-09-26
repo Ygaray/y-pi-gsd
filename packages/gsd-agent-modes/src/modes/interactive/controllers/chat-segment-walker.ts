@@ -79,7 +79,7 @@ export function scanNewContentBlocks(
 					new ToolExecutionComponent(
 						content.name,
 						content.arguments,
-						{ showImages: host.settingsManager.getShowImages() },
+						{ showImages: host.settingsManager.getShowImages(), source: "content" },
 						host.getRegisteredToolDefinition(content.name),
 						host.ui,
 					),
@@ -96,7 +96,7 @@ export function scanNewContentBlocks(
 					new ToolExecutionComponent(
 						content.name,
 						content.input ?? {},
-						{ showImages: host.settingsManager.getShowImages() },
+						{ showImages: host.settingsManager.getShowImages(), source: "content" },
 						undefined,
 						host.ui,
 					),
@@ -398,7 +398,7 @@ export function rebuildSegmentsOnMessageEnd(
 				component = new ToolExecutionComponent(
 					finalBlock.name,
 					finalBlock.arguments,
-					{ showImages: host.settingsManager.getShowImages() },
+					{ showImages: host.settingsManager.getShowImages(), source: "content" },
 					host.getRegisteredToolDefinition(finalBlock.name),
 					host.ui,
 				);
@@ -409,7 +409,7 @@ export function rebuildSegmentsOnMessageEnd(
 				component = new ToolExecutionComponent(
 					finalBlock.name,
 					finalBlock.input ?? {},
-					{ showImages: host.settingsManager.getShowImages() },
+					{ showImages: host.settingsManager.getShowImages(), source: "content" },
 					undefined,
 					host.ui,
 				);

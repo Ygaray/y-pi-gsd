@@ -175,6 +175,7 @@ function deriveToolDescriptor(
 	toolDefinition: ToolDefinition | undefined,
 	compactTarget: string | undefined,
 	source?: string,
+	toolCallId?: string,
 ): string {
 	const label = toolDefinition?.label;
 	if (label && label.trim().length > 0) return label;
@@ -190,7 +191,7 @@ function deriveToolDescriptor(
 	// labeled without a usable name. Record the anomaly (D-02) once, with no
 	// argument/result payload, then resolve the best remaining signal.
 	const hasCompactTarget = !!compactTarget && compactTarget.trim().length > 0;
-	pushUnnamedToolEvent(source, undefined, !!toolDefinition, hasCompactTarget);
+	pushUnnamedToolEvent(source, toolCallId, !!toolDefinition, hasCompactTarget);
 
 	if (hasCompactTarget) return compactTarget as string;
 	if (source && source.trim().length > 0) return source;
@@ -440,6 +441,11 @@ function normalizeComparableArgs(toolName: string, args: unknown): unknown {
 
 export interface ToolExecutionOptions {
 	showImages?: boolean; // default: true (only used if terminal supports images)
+	// Registration source ("standalone" / "content"), same string used by
+	// registerPendingToolComponent. Threaded through to deriveToolDescriptor's
+	// D-02 anomaly capture at render time (WR-03) so an unnamed-tool row can
+	// still be traced back to its emitter.
+	source?: string;
 }
 
 type WriteHighlightCache = {
@@ -463,6 +469,8 @@ export class ToolExecutionComponent extends Container {
 	private expanded = false;
 	private explicitlyCollapsed = false;
 	private showImages: boolean;
+	// Registration source ("standalone" / "content"), for D-02 anomaly tracing (WR-03).
+	private readonly source?: string;
 	private isPartial = true;
 	private toolDefinition?: ToolDefinition;
 	private ui: TUI;
@@ -549,6 +557,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolName = toolName;
 		this.args = args;
 		this.showImages = options.showImages ?? true;
+		this.source = options.source;
 		this.toolDefinition = toolDefinition;
 		this.ui = ui;
 		this.cwd = cwd;
@@ -965,7 +974,8 @@ export class ToolExecutionComponent extends Container {
 		// and the two render branches below share one call, rather than each
 		// calling the getter separately as before.
 		const compactTarget = this.getCompactTarget();
-		const frameLabel = deriveToolDescriptor(this.toolName, this.toolDefinition, compactTarget);
+		const toolCallId = typeof this.args?.id === "string" ? this.args.id : undefined;
+		const frameLabel = deriveToolDescriptor(this.toolName, this.toolDefinition, compactTarget, this.source, toolCallId);
 		const recommendedTone: StatusTone =
 			frameTone === "pending" ? "running" : frameTone === "error" ? "error" : "success";
 

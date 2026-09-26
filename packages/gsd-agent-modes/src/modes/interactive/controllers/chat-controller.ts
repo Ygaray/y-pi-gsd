@@ -404,7 +404,7 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 					new ToolExecutionComponent(
 						displayToolName,
 						event.args,
-						{ showImages: host.settingsManager.getShowImages() },
+						{ showImages: host.settingsManager.getShowImages(), source: "standalone" },
 						host.getRegisteredToolDefinition(event.toolName),
 						host.ui,
 					),
