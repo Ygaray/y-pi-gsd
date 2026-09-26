@@ -382,8 +382,17 @@ export function rebuildSegmentsOnMessageEnd(
 	for (const seg of rs.renderedSegments) {
 		host.chatContainer.removeChild(seg.component);
 		if (seg.kind === "tool") {
-			const priorBlocks = host.streamingMessage.content;
-			const priorBlock = priorBlocks[seg.contentIndex] as any;
+			// Defense-in-depth no-op (IN-01): `finalBlocks` (captured above from
+			// host.streamingMessage.content, never reassigned in between) IS this
+			// same array — there is no separate "prior" snapshot to recover here.
+			// This backfill is guarded by `!toolComponentsById.has(...)`, and
+			// toolComponentsById is pre-seeded from host.pendingTools, which (per
+			// this file's own invariant that tool components are never removed
+			// from pendingTools mid-turn) already contains every live tool id, so
+			// this branch is unlikely to ever add anything new. Kept as a safety
+			// net rather than removed outright, in case that invariant is ever
+			// violated by a future change.
+			const priorBlock = finalBlocks[seg.contentIndex] as any;
 			if (priorBlock?.id && !toolComponentsById.has(priorBlock.id)) {
 				toolComponentsById.set(priorBlock.id, seg.component);
 			}
