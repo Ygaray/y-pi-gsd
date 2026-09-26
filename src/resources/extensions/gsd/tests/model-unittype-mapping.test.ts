@@ -17,7 +17,10 @@ import { classifyUnitPhase } from "../metrics.ts";
 import { resolveDefaultSessionModel, resolveModelWithFallbacksForUnit } from "../preferences-models.ts";
 import { KNOWN_UNIT_LABELS } from "../preferences-types.ts";
 
-function withModelPreferences<T>(fn: () => T): T {
+function withModelPreferences<T>(
+  fn: (home: string) => T,
+  opts?: { chdirToHome?: boolean },
+): T {
   const oldHome = process.env.GSD_HOME;
   // Group A isolation (22-03): resolution also consults the agent-dir settings.json
   // (getAgentDir(), via GSD_CODING_AGENT_DIR) and a project-scope .gsd/PREFERENCES.md
@@ -27,10 +30,17 @@ function withModelPreferences<T>(fn: () => T): T {
   const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
   const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-model-map-"));
+  // CR-02: `chdirToHome` defaults to true (unchanged behavior for every existing
+  // call site). The "Group A isolation guard" test below passes `false` so it can
+  // keep `cwd` pinned at its decoy directory for the whole call and instead prove
+  // isolation via the explicit `basePath` parameter every production call site
+  // (auto-start.ts / auto.ts) actually uses -- `fn` receives `home` so it can
+  // thread that basePath through itself.
+  const chdirToHome = opts?.chdirToHome ?? true;
   try {
     process.env.GSD_HOME = home;
     process.env.GSD_CODING_AGENT_DIR = home;
-    process.chdir(home);
+    if (chdirToHome) process.chdir(home);
     writeFileSync(join(home, "preferences.md"), [
       "---",
       "models:",
@@ -46,7 +56,7 @@ function withModelPreferences<T>(fn: () => T): T {
       "---",
       "",
     ].join("\n"));
-    return fn();
+    return fn(home);
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
@@ -71,6 +81,17 @@ test("discuss unit types route to the discuss model bucket", () => {
 // `models` block past the injected values (this is the dormant seam behind the v4 19-06
 // Group A reds, which returned this box's real claude-code/claude-sonnet-5 pin). This guard
 // simulates that contamination in a temp sandbox and proves resolution stays hermetic.
+//
+// CR-02: `withModelPreferences` used to unconditionally `chdir(home)` before invoking
+// `fn`, so by the time `resolveModelWithFallbacksForUnit` ran, `cwd` was already `home`
+// -- the decoy directory (set as cwd just above) was never actually live at call time,
+// and this assertion passed trivially regardless of whether the ambient-cwd leak it
+// claims to guard against was present. Fixed by keeping `cwd` pinned at `decoy` for the
+// whole test (`chdirToHome: false`) and instead proving isolation the way every real
+// call site does it: pass the resolved `home` in as an explicit `basePath`. Verified
+// empirically (scratchpad probe) that with `cwd` left at `decoy` and NO explicit
+// `basePath`, this exact call leaks `"leaked-from-cwd"` -- so this guard can now
+// actually go red if a future change stops threading `basePath` through.
 test("discuss unit resolution is hermetic against an ambient-cwd project .gsd/PREFERENCES.md (Group A isolation guard)", () => {
   const oldCwd = process.cwd();
   const decoy = mkdtempSync(join(tmpdir(), "gsd-decoy-project-"));
@@ -84,9 +105,16 @@ test("discuss unit resolution is hermetic against an ambient-cwd project .gsd/PR
   ].join("\n"));
   try {
     process.chdir(decoy);
-    withModelPreferences(() => {
-      assert.equal(resolveModelWithFallbacksForUnit("discuss-milestone")?.primary, "discuss-model");
-    });
+    withModelPreferences(
+      (home) => {
+        assert.equal(process.cwd(), decoy, "cwd must still be the decoy at assertion time");
+        assert.equal(
+          resolveModelWithFallbacksForUnit("discuss-milestone", home)?.primary,
+          "discuss-model",
+        );
+      },
+      { chdirToHome: false },
+    );
   } finally {
     process.chdir(oldCwd);
     rmSync(decoy, { recursive: true, force: true });

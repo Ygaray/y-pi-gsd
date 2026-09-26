@@ -708,10 +708,20 @@ test("loadEffectiveGSDPreferences: balanced tier resolution is hermetic against 
     process.env.GSD_HOME = home;
     process.env.GSD_CODING_AGENT_DIR = home;
     writeFileSync(join(home, "PREFERENCES.md"), "---\ntoken_profile: balanced\n---\n");
+    // cwd stays at `decoy` for the whole test (no second chdir) — the decoy's
+    // conflicting `.gsd/PREFERENCES.md` is genuinely live at call time below.
+    // CR-02: an earlier version of this test also did `process.chdir(home)`
+    // here, which meant `process.cwd()` was already `home` by the time the
+    // function under test ran and the decoy was never actually read — the
+    // assertions passed trivially regardless of whether ambient-cwd leakage
+    // was fixed. Verified empirically (scratchpad probe) that with cwd left
+    // at `decoy` and no explicit `basePath`, resolution DOES leak
+    // "leaked-from-cwd" into `models.planning`/`models.execution` — proving
+    // this guard can actually go red. The real isolation mechanism (matching
+    // how every production call site in auto-start.ts/auto.ts invokes this
+    // function) is passing an explicit `basePath`, not relying on `cwd`;
+    // that is what this test now exercises.
     process.chdir(decoy);
-    // Pin project-scope resolution to the clean home: even with the decoy sitting in
-    // the process's prior cwd, chdir'ing to the (empty-of-.gsd) home closes the seam.
-    process.chdir(home);
     const { loadEffectiveGSDPreferencesWithRegistry } = await import("../preferences.ts");
     const registry = {
       getAvailable: () => [
@@ -719,7 +729,7 @@ test("loadEffectiveGSDPreferences: balanced tier resolution is hermetic against 
         { provider: "openai-codex", id: "gpt-4o-mini" },
       ],
     };
-    const loaded = loadEffectiveGSDPreferencesWithRegistry(registry, undefined, "openai-codex");
+    const loaded = loadEffectiveGSDPreferencesWithRegistry(registry, home, "openai-codex");
     const models = loaded?.preferences.models as Record<string, string> | undefined;
     assert.equal(models?.planning, "gpt-4o");
     assert.equal(models?.execution, "gpt-4o");
