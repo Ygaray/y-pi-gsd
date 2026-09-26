@@ -53,6 +53,17 @@ const DEDUP_MAX_ENTRIES = 2000;
 let _basePath: string | null = null;
 let _lineCount = 0;  // Hint for rotation — not authoritative for public API
 let _suppressCount = 0;
+// In-memory, module-private — this is a SINGLE-PROCESS dedup guarantee only.
+// `.gsd/notifications.jsonl` itself is a cross-process resource (see
+// `_withLock` below), but this map is never persisted or shared. When
+// `slice_parallel` is enabled, each eligible slice runs as its own OS
+// process (`slice-parallel-orchestrator.ts` spawns a child process per
+// slice) writing to the same notifications file — two parallel-slice
+// workers that independently hit the same `kind:scope` event within the
+// same DEDUP_WINDOW_MS will each treat their own first occurrence as novel
+// and both persist/forward it. The 30s dedup window collapses noise within
+// one process; it does not collapse duplicate events raised independently
+// by concurrent slice_parallel worker processes.
 let _recentMessageTimestamps = new Map<string, number>();
 const _changeListeners = new Set<() => void>();
 
