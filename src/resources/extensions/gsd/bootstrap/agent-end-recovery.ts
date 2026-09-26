@@ -36,6 +36,8 @@ import { isTaskExecutionReadyForHostVerification } from "../auto/task-execution-
 import { resolveModelId } from "../auto-model-selection.js";
 import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
+import { getLastTurnToolOutcome } from "../auto-tool-tracking.js";
+import { hasPendingToolCallInLastMessage } from "./turn-completion-signal.js";
 import { scheduleFallbackContinuation } from "./fallback-continuation.js";
 import { clearGuidedUnitContext, getGuidedUnitContext, type GuidedUnitContext } from "../guided-unit-context.js";
 import { checkPlanReviewConvergenceAdvance } from "../plan-review-convergence.js";
@@ -110,6 +112,21 @@ export function _buildAbortedPauseContext(lastMsg: { errorMessage?: unknown }): 
     category: "aborted",
     isTransient: true,
   };
+}
+
+/**
+ * SIGNAL-03: true only when the turn's last recorded tool call succeeded
+ * (strict `=== true` — `null`, meaning zero tool calls this turn, is NOT
+ * success) AND there is no unanswered tool call pending in the trailing
+ * message (the model was actually done calling tools). Both conditions must
+ * hold before an aborted trailing message is allowed to bypass
+ * `_buildAbortedPauseContext`'s pause (RESEARCH Pitfall 4).
+ */
+export function _shouldOverrideAbortedPauseAfterToolSuccess(args: {
+  lastToolOutcome: boolean | null;
+  hasPendingToolCall: boolean;
+}): boolean {
+  return args.lastToolOutcome === true && !args.hasPendingToolCall;
 }
 
 export function isUserInitiatedAbortMessage(message: string | undefined | null): boolean {
@@ -668,6 +685,31 @@ export async function handleAgentEnd(
         const message = err instanceof Error ? err.message : String(err);
         ctx.ui.notify(`Auto-mode error after empty-content abort: ${message}. Stopping auto-mode.`, "error");
         try { await pauseAuto(ctx, pi); } catch (e) { logWarning("bootstrap", `pauseAuto failed after empty-content abort: ${(e as Error).message}`); }
+      }
+      return;
+    }
+
+    // SIGNAL-03: the trailing message's own abort is not proof the operation
+    // failed — if the last tool call this turn already succeeded and the
+    // model was not left waiting on a pending tool call, the abort is just a
+    // cut-off summary. Resolve as done instead of forcing the unconditional
+    // "Operation aborted" pause below (RESEARCH Pitfall 4: last-call success
+    // is not "the whole turn succeeded", so this stays scoped to exactly that
+    // narrow case).
+    const hasPendingToolCall = hasPendingToolCallInLastMessage(event.messages ?? []);
+    const lastToolOutcome = getLastTurnToolOutcome();
+    if (_shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome, hasPendingToolCall })) {
+      try {
+        ctx.ui.notify(
+          "Trailing message was cut off after the operation completed — treating this turn as done.",
+          "info",
+        );
+        resetRetryState(retryState);
+        resolveAgentEnd(event);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`Auto-mode error after tool-success abort override: ${message}. Stopping auto-mode.`, "error");
+        try { await pauseAuto(ctx, pi); } catch (e) { logWarning("bootstrap", `pauseAuto failed after tool-success abort override: ${(e as Error).message}`); }
       }
       return;
     }

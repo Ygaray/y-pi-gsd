@@ -1447,11 +1447,14 @@ export function registerHooks(
       );
       try {
         const { signalTurnEnd } = await import("./turn-completion-signal.js");
-        // SIGNAL-02 (Task 3): lastToolCallSucceeded is intentionally left
-        // unset here — Plan 23-02 owns that generic tool-outcome tracker and
-        // threads it in; unset classifies extension/programmatic aborts as
-        // "cancelled" (the conservative direction, never a false success).
-        await signalTurnEnd(event, ctx, { approvalGateBlocking, destructiveConfirmationBlocking });
+        // SIGNAL-03 (Plan 23-02): thread the generic per-turn tool-outcome
+        // tracker into the classifier's extension/programmatic arms, closing
+        // the gap 23-01 deliberately left unset.
+        await signalTurnEnd(event, ctx, {
+          approvalGateBlocking,
+          destructiveConfirmationBlocking,
+          lastToolCallSucceeded: getLastTurnToolOutcome(),
+        });
       } catch (err) {
         safetyLogWarning(
           "bootstrap",
