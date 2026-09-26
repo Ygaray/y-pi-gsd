@@ -19,9 +19,18 @@ import { KNOWN_UNIT_LABELS } from "../preferences-types.ts";
 
 function withModelPreferences<T>(fn: () => T): T {
   const oldHome = process.env.GSD_HOME;
+  // Group A isolation (22-03): resolution also consults the agent-dir settings.json
+  // (getAgentDir(), via GSD_CODING_AGENT_DIR) and a project-scope .gsd/PREFERENCES.md
+  // relative to process.cwd(). Pin BOTH to the clean temp home alongside GSD_HOME so
+  // this box's real ~/.gsd/agent/settings.json pin and any ambient-cwd project prefs
+  // cannot bleed past the models this helper writes.
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-model-map-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "preferences.md"), [
       "---",
       "models:",
@@ -41,6 +50,9 @@ function withModelPreferences<T>(fn: () => T): T {
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
   }
 }
