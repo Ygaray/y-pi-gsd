@@ -10,6 +10,7 @@ import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { signalTurnEnd, type TurnCompletionSignalDeps } from "../bootstrap/turn-completion-signal.ts";
 import { setHookEmitter, clearHookEmitter } from "../hook-emitter.ts";
 import { initNotificationStore, readNotifications, _resetNotificationStore } from "../notification-store.ts";
+import { recordTurnToolOutcome, resetTurnToolOutcome } from "../auto-tool-tracking.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
 
@@ -241,6 +242,70 @@ test("register-hooks agent_end handler: auto-active turn emits StopEvent but no 
 
   const entries = readNotifications(base, { kind: "turn-complete" });
   assert.equal(entries.length, 0, "auto-mode must not double-fire the interactive turn-complete entry");
+});
+
+test("register-hooks agent_end handler (CR-01): active->paused mid-handler still emits zero bell/turn-complete/idle signals", async (t) => {
+  // Regression for CR-01: register-hooks.ts's agent_end handler always calls
+  // signalTurnEnd in a finally block AFTER handleAgentEnd has run to
+  // completion. A genuinely aborted turn (non-empty trailing content, no
+  // errorMessage, last tool call NOT successful) drives handleAgentEnd's
+  // `stopReason === "aborted"` branch straight into `pauseAuto(...)`, which
+  // synchronously flips autoSession.active to false BEFORE signalTurnEnd
+  // runs. Before the fix, signalTurnEnd re-read that already-mutated state
+  // and (mis)treated a turn that WAS auto-active for its whole duration as
+  // interactive — firing the "Turn complete — waiting for you."
+  // bell/notification-store entry/idle notification on top of pauseAuto's
+  // own, correctly-worded pause notice.
+  autoSession.reset();
+  autoSession.active = true;
+  resetTurnToolOutcome();
+  // last tool call did NOT succeed -> the SIGNAL-03 tool-success override
+  // (_shouldOverrideAbortedPauseAfterToolSuccess) does not fire, so the
+  // aborted branch falls through to the unconditional pauseAuto(...) call.
+  recordTurnToolOutcome(false);
+  _resetNotificationStore();
+  clearHookEmitter();
+  const base = makeRuntimeBase();
+  initNotificationStore(base);
+  t.after(() => {
+    autoSession.reset();
+    resetTurnToolOutcome();
+    _resetNotificationStore();
+    clearHookEmitter();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const { emitAgentEnd, piEvents } = makeHookHarness();
+
+  await emitAgentEnd({
+    messages: [{
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Ran into a problem mid-turn." }],
+    }],
+    willRetry: false,
+  });
+
+  assert.equal(
+    autoSession.active,
+    false,
+    "pauseAuto must have run inside handleAgentEnd and flipped active to false",
+  );
+
+  const entries = readNotifications(base, { kind: "turn-complete" });
+  assert.equal(
+    entries.length,
+    0,
+    "a turn that WAS auto-active when it started must never fire the interactive turn-complete entry, even after pauseAuto flips active->false mid-handler",
+  );
+
+  const idleNotifications = piEvents.filter(
+    (e) => e.type === "notification" && e.kind === "idle",
+  );
+  assert.equal(
+    idleNotifications.length,
+    0,
+    "the idle/waiting-for-you notification must not fire alongside pauseAuto's own pause notice",
+  );
 });
 
 test("register-hooks agent_end handler: willRetry true emits zero StopEvents", async (t) => {

@@ -143,14 +143,31 @@ export async function signalTurnEnd(
     approvalGateBlocking?: boolean;
     destructiveConfirmationBlocking?: boolean;
     lastToolCallSucceeded?: boolean | null;
+    /**
+     * CR-01: snapshot of `isAutoActive()` taken by the caller *before*
+     * `handleAgentEnd` (and the finally block's own
+     * `maybePauseAutoForApprovalGate` calls) had a chance to run. Every
+     * `pauseAuto()` call site flips `autoSession.active` to `false`
+     * synchronously, so a live re-read here would misclassify a turn that
+     * *was* auto-mode-active for its whole duration as interactive, firing
+     * the interactive "turn complete" bell/notification on top of the pause
+     * notice `pauseAuto` already sent. When omitted (e.g. existing unit
+     * tests exercising this function in isolation), falls back to a live
+     * `deps.autoActive()` read.
+     */
+    autoActiveAtTurnStart?: boolean;
   } = {},
   deps: TurnCompletionSignalDeps = defaultTurnCompletionSignalDeps,
 ): Promise<void> {
   if (event.willRetry) return;
 
-  // Read synchronously, before any await, so this cannot race a concurrent
+  // Prefer the caller's pre-handler snapshot (CR-01) over a live read: by
+  // the time this function runs, `handleAgentEnd` may have already paused
+  // auto-mode in response to an error, which would make a live
+  // `deps.autoActive()` read observe already-mutated state. Read
+  // synchronously, before any await, so this cannot race a concurrent
   // stopAuto() bell (Pitfall 2).
-  const autoActive = deps.autoActive();
+  const autoActive = signal.autoActiveAtTurnStart ?? deps.autoActive();
 
   try {
     let hasPendingMessages = false;

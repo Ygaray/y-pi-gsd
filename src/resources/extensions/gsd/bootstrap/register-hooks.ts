@@ -1405,6 +1405,14 @@ export function registerHooks(
   });
 
   pi.on("agent_end", async (event, ctx: ExtensionContext) => {
+    // CR-01: snapshot BEFORE handleAgentEnd runs (and before the finally
+    // block's own maybePauseAutoForApprovalGate calls) — every pauseAuto()
+    // call site inside handleAgentEnd's error/pause branches synchronously
+    // flips autoSession.active to false, so a post-handler read would
+    // misclassify a turn that WAS auto-mode-active for its whole duration
+    // as interactive, firing the "turn complete" bell/notification on top
+    // of pauseAuto's own pause notice.
+    const wasAutoActiveAtTurnStart = isAutoActive();
     approvalQuestionAbortInFlight = false;
     recordRetryableTurnAbort(event);
     resetToolCallLoopGuard();
@@ -1454,6 +1462,7 @@ export function registerHooks(
           approvalGateBlocking,
           destructiveConfirmationBlocking,
           lastToolCallSucceeded: getLastTurnToolOutcome(),
+          autoActiveAtTurnStart: wasAutoActiveAtTurnStart,
         });
       } catch (err) {
         safetyLogWarning(
