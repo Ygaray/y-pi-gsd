@@ -306,3 +306,133 @@ test("a tool row keeps its position across a suppressed repeat", async () => {
 		);
 	}
 });
+
+// ── Task 2: streaming segment-identity contracts (TUI-01, component half) ──
+
+test("a growing text run reuses its component across deltas", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host = makeMinimalHost(chatContainer, rs);
+
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+	await handleAgentEvent(host, messageUpdate([{ type: "text", text: "Hel" }]));
+	const compAfter1 = chatContainer.children.length === 1 ? chatContainer.children[0] : undefined;
+
+	await handleAgentEvent(host, messageUpdate([{ type: "text", text: "Hello wor" }]));
+	const compAfter2 = chatContainer.children.length === 1 ? chatContainer.children[0] : undefined;
+
+	await handleAgentEvent(host, messageUpdate([{ type: "text", text: "Hello world!" }]));
+	const compAfter3 = chatContainer.children.length === 1 ? chatContainer.children[0] : undefined;
+
+	assert.equal(chatContainer.children.length, 1, "a single growing text run must stay a single component");
+	assert.ok(compAfter1 && compAfter2 && compAfter3, "sanity: a component existed at every step");
+	assert.equal(compAfter2, compAfter1, "growth must update the SAME component, not mint a second one");
+	assert.equal(compAfter3, compAfter1, "growth must update the SAME component across all three deltas");
+});
+
+test("a text run interleaved with a thinking block keeps stable segment keys", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host: any = makeMinimalHost(chatContainer, rs);
+	host.hideThinkingBlock = false; // thinking must be visible to form its own segment boundary
+
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+
+	await handleAgentEvent(host, messageUpdate([{ type: "text", text: "Investigating." }]));
+	const keysStep1 = rs.renderedSegments
+		.filter((s: any) => s.kind === "text-run")
+		.map((s: any) => `${s.contentType}:${s.startIndex}`);
+
+	await handleAgentEvent(
+		host,
+		messageUpdate([
+			{ type: "text", text: "Investigating." },
+			{ type: "thinking", thinking: "Let me check the file." },
+		]),
+	);
+	const keysStep2 = rs.renderedSegments
+		.filter((s: any) => s.kind === "text-run")
+		.map((s: any) => `${s.contentType}:${s.startIndex}`);
+
+	await handleAgentEvent(
+		host,
+		messageUpdate([
+			{ type: "text", text: "Investigating." },
+			{ type: "thinking", thinking: "Let me check the file." },
+			{ type: "text", text: "Found it." },
+		]),
+	);
+	const keysStep3 = rs.renderedSegments
+		.filter((s: any) => s.kind === "text-run")
+		.map((s: any) => `${s.contentType}:${s.startIndex}`);
+
+	// Every key present at an earlier step must still be present, unmoved,
+	// at every later step — growth, never removal-and-reindex.
+	for (const key of keysStep1) assert.ok(keysStep2.includes(key), `key ${key} must survive step 2`);
+	for (const key of keysStep2) assert.ok(keysStep3.includes(key), `key ${key} must survive step 3`);
+	assert.ok(keysStep3.length >= keysStep1.length, "the key set must only grow across the interleaved stream");
+});
+
+test("exactly adjacent segments stay distinct", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host: any = makeMinimalHost(chatContainer, rs);
+	host.hideThinkingBlock = false;
+
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+
+	// Two different contentTypes ("text" then "thinking") at consecutive
+	// content-block indices — the boundary this test pins is that they never
+	// merge into one run and never collide on the (contentType, startIndex)
+	// identity key, even though the second segment starts exactly where the
+	// first one's block range ends.
+	await handleAgentEvent(
+		host,
+		messageUpdate([
+			{ type: "text", text: "First." },
+			{ type: "thinking", thinking: "Second." },
+		]),
+	);
+
+	const textRuns = rs.renderedSegments.filter((s: any) => s.kind === "text-run") as any[];
+	assert.equal(textRuns.length, 2, "two distinct contentTypes at adjacent indices must produce two segments");
+	assert.notEqual(
+		textRuns[0].component,
+		textRuns[1].component,
+		"the two adjacent segments must have distinct components",
+	);
+	assert.equal(textRuns[0].contentType, "text");
+	assert.equal(textRuns[1].contentType, "thinking");
+});
+
+test("renderedSegments order matches chatContainer order", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host = makeMinimalHost(chatContainer, rs);
+
+	await streamTwoTextRunsWithTool(host);
+
+	const componentOrder = rs.renderedSegments.map((seg) => seg.component);
+	let cursor = -1;
+	for (const comp of componentOrder) {
+		const idx = chatContainer.children.indexOf(comp as any);
+		assert.ok(
+			idx > cursor,
+			"each rendered segment's component must appear later in chatContainer than the previous one",
+		);
+		cursor = idx;
+	}
+});
+
+test("an empty assistant message creates no component", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host = makeMinimalHost(chatContainer, rs);
+
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+	await assert.doesNotReject(async () => {
+		await handleAgentEvent(host, messageEnd([]));
+	});
+
+	assert.equal(chatContainer.children.length, 0, "an empty message must create no component");
+});
