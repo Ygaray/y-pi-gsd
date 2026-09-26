@@ -748,14 +748,18 @@ export class ToolExecutionComponent extends Container {
 	 * This runs async and updates display when done.
 	 */
 	private maybeComputeEditDiff(): void {
-		if (this.toolName !== "edit") return;
+		if (this.normalizedToolName !== "edit") return;
 
-		const path = this.args?.path;
-		const oldText = this.args?.oldText;
-		const newText = this.args?.newText;
+		// Accept both this component's own naming (path/oldText/newText) and
+		// Claude Code's Cursor-style edit payload (file_path/old_string/new_string) —
+		// this.args is never normalized in place, only transiently inside
+		// normalizeComparableArgs for comparison (see WR-02).
+		const path = str(this.args?.path ?? this.args?.file_path);
+		const oldText = str(this.args?.oldText ?? this.args?.old_string);
+		const newText = str(this.args?.newText ?? this.args?.new_string);
 
 		// Need all three params to compute diff
-		if (!path || oldText === undefined || newText === undefined) return;
+		if (!path || oldText === null || newText === null) return;
 
 		// Create a key to track which args this computation is for
 		const argsKey = JSON.stringify({ path, oldText, newText });
