@@ -8,7 +8,7 @@ from the two files historically mistaken for hangs. It closes INC-2026-08-26-02.
 
 The unit suite is defined by `test:unit:compiled`'s explicit glob list in `package.json`, plus
 `test:live-workflow:unit`'s glob. Anything not named by one of these globs is out of scope for "the
-unit suite is green" — most notably everything under `tests/integration/` subdirectories, which is
+unit suite is green" — most notably everything under any `**/tests/integration/` subdirectory, which is
 covered by `test:integration` instead (a separate, unrelated gate).
 
 `test:unit:compiled` runs against **compiled** `dist-test/` output (see `test:compile`) and globs
@@ -69,24 +69,75 @@ covers, plus the real fault-injection path.
 
 ## 3. Skip inventory
 
-A fresh scan (`grep -rn 'skip: true\|test\.skip\|it\.skip\|describe\.skip\|todo: true'` across every
+Re-verified 2026-09-26 during Phase 22 (Green Harness): a fresh scan (`grep -rn 'skip: true\|test\.skip\|it\.skip\|describe\.skip\|todo: true'` across every
 directory named in Scope above, including `tests/live-workflow/*.unit.test.ts`) found exactly **one**
-in-scope skip and one adjacent-but-out-of-scope skip. No `test.skip`, `it.skip`, `describe.skip`, or
+in-scope skip and one adjacent-but-out-of-scope skip — the same two hits documented below, at the
+same line numbers, with no drift. No `test.skip`, `it.skip`, `describe.skip`, or
 `{ todo: true }` forms exist anywhere in scope — both hits use the `{ skip: true }` options-object
 form.
 
 | File | Line | Test name | Reason | Un-skip condition |
 |---|---|---|---|---|
-| `src/resources/extensions/gsd/tests/markdown-renderer.test.ts` | 582 | `renderPlanFromDb creates parse-compatible slice plan + task plan files` | Skipped 2026-06-23 (commit `51c42bfcf`, "skip stale-render tests during flat-phase transition") as one of a batch of 9 stale-render/renderer tests disabled while `detectStaleRenders` was temporarily hardcoded to return `[]`. The test body has since been rewritten in place for the flat-phase model (asserts zero per-task plan files, reads the stored plan artifact directly instead of per-task files — see lines 640-664), but the `{ skip: true }` marker was never removed alongside that rewrite. | `detectStaleRenders` was reactivated via projection-drift detection in commit `1990a8b4` (2026-09-14, "Re-enable ADR-045 stale-render detection via projection drift"). Run this file standalone with `{ skip: true }` removed; if the flat-phase-rewritten body passes, delete the marker. **Flagged as needing owner confirmation** — this documentation pass verified the body reads as flat-phase-correct by inspection but did not remove the marker or re-run the test, per this plan's prohibition on touching skip state. |
-| `src/resources/extensions/gsd/tests/integration/integration-proof.test.ts` | 434 | `recovery: DB loss → migrateFromMarkdown restores state, stale render detection` | **Out of unit-suite scope** — lives under `tests/integration/`, excluded by `test:unit:compiled`'s non-recursive glob (see Scope). Documented here so it is not mistaken for a gap in this inventory. Skipped 2026-06-23 (commit `a336f878c`, "Keep the stale-render integration test skipped, consistent with the full disable above") for the same root cause as the row above: `detectStaleRenders` was hardcoded to return `[]` because the per-project layout gate (`isLegacyMilestonesLayout`) was unreliable — `git-service.ts` creates `milestones/<mid>/` dirs for integration-branch metadata even in flat-phase projects, which was triggering a reconciliation failure loop. | Same reactivation as the row above (`1990a8b4`, 2026-09-14) may have resolved the underlying cause. Run this file standalone with `{ skip: true }` removed and confirm the R010 (DB-loss recovery)/R013 (stale-render detection) scenario passes under the reactivated implementation. Not gating for GREEN-06 since it is out of scope, but **flagged as needing owner confirmation** since the disabling condition may no longer hold. |
+| `src/resources/extensions/gsd/tests/markdown-renderer.test.ts` | 582 | `renderPlanFromDb creates parse-compatible slice plan + task plan files` | Skipped 2026-06-23 (commit `51c42bfcf`, "skip stale-render tests during flat-phase transition") as one of a batch of 9 stale-render/renderer tests disabled while `detectStaleRenders` was temporarily hardcoded to return `[]`. The test body has since been rewritten in place for the flat-phase model (asserts zero per-task plan files, reads the stored plan artifact directly instead of per-task files — see lines 640-664), but the `{ skip: true }` marker was never removed alongside that rewrite. | `detectStaleRenders` was reactivated via projection-drift detection in commit `1990a8b4` (2026-09-14, "Re-enable ADR-045 stale-render detection via projection drift"). Run this file standalone with `{ skip: true }` removed; if the flat-phase-rewritten body passes, delete the marker. **Flagged as needing owner confirmation** — this documentation pass verified the body reads as flat-phase-correct by inspection but did not remove the marker or re-run the test, per this plan's prohibition on touching skip state. **Phase 22 re-verified this marker in place at line 582 (unchanged) and deliberately did not un-skip it — D-04's bar is zero failures, not fewer skips, and un-skipping risks reintroducing the stale-render defect this skip guards.** |
+| `src/resources/extensions/gsd/tests/integration/integration-proof.test.ts` | 434 | `recovery: DB loss → migrateFromMarkdown restores state, stale render detection` | **Out of unit-suite scope** — lives under a `**/tests/integration/` subdirectory, excluded by `test:unit:compiled`'s non-recursive glob (see Scope). Documented here so it is not mistaken for a gap in this inventory. Skipped 2026-06-23 (commit `a336f878c`, "Keep the stale-render integration test skipped, consistent with the full disable above") for the same root cause as the row above: `detectStaleRenders` was hardcoded to return `[]` because the per-project layout gate (`isLegacyMilestonesLayout`) was unreliable — `git-service.ts` creates `milestones/<mid>/` dirs for integration-branch metadata even in flat-phase projects, which was triggering a reconciliation failure loop. | Same reactivation as the row above (`1990a8b4`, 2026-09-14) may have resolved the underlying cause. Run this file standalone with `{ skip: true }` removed and confirm the R010 (DB-loss recovery)/R013 (stale-render detection) scenario passes under the reactivated implementation. Not gating for GREEN-06 since it is out of scope, but **flagged as needing owner confirmation** since the disabling condition may no longer hold. **Phase 22 re-verified this marker in place at line 434 (unchanged) and deliberately did not un-skip it — same D-04 rationale as the row above.** |
 
-## 4. Phase 19 delta
+## 4. Phase 19 delta and Phase 22 disposition (dated history)
 
 **Skips before Phase 19: 2. Skips after Phase 19: 2.** Equal — Phase 19 added zero new skips to the
 unit-suite scope (or to its out-of-scope adjacent file). Both rows above pre-date this phase by three
 months (2026-06-23); Phase 19's plans (19-01 through 19-05) touched none of the files or lines
 carrying a skip marker, confirmed by the fresh scan finding the same two hits documented here and
 nothing else.
+
+**2026-09-24 gate run (historical baseline):** the first complete, non-killed full `pnpm run
+test:unit:native` run in this project since Phase 11 reported **16086 passed, 9 failed, 17
+skipped** (exit 1). All 9 failures were in files untouched by Phase 19 — a stale
+`TERMINAL_STATUS_SQL` literal (`status-guards.test.ts:138`), the `model-router.test.ts` /
+`model-unittype-mapping.test.ts` preference-resolution group (Group A, 6 tests), and
+`session-lock-acquire-detect-roundtrip.test.ts` (Group B, 2 tests). See
+`.planning/phases/19-green-harness/19-06-SUMMARY.md` for the original per-test breakdown. This
+paragraph is retained as dated history; it does not describe the suite's current state.
+
+**Phase 22 (Green Harness) disposition — each of the 9 is closed, none by suppression:**
+
+- **The stale `TERMINAL_STATUS_SQL` literal was already fixed on HEAD** by Phase 19 commit
+  `5e12aa19` ("fix(19): update stale TERMINAL_STATUS_SQL assertion + doc for Phase 15 ship/archive
+  statuses") — it was never open work for Phase 22. The assertion at `status-guards.test.ts:138`
+  agrees exactly with the eight-entry `RAW_CLOSED_STATUSES` array
+  (`status-guards.ts:37-39`) and its `TERMINAL_STATUS_SQL` derivation (`db/sql-constants.ts:73`);
+  re-verified 2026-09-26 (`git merge-base --is-ancestor 5e12aa19 HEAD` succeeds; the compiled
+  single-file run of `status-guards.test.js` reports 23 passed, 0 failed). Phase 22's only
+  remaining work here was this documentation refresh (D-01).
+- **Group B (session-lock roundtrip, 2 tests)** was a genuine host-load timing flake: a hardcoded
+  `10_000`ms spawned-child readiness deadline in `acquireLockInChildProcess`
+  (`session-lock-acquire-detect-roundtrip.test.ts`) was too tight for a contended host. Fixed by
+  hoisting it into a named, commented `CHILD_DEADLINE_MS = 30_000` constant (matching the identical
+  problem class already solved by `legacy-import-live-restore-fault.test.ts`'s Phase 19
+  `CHILD_DEADLINE_MS` precedent) plus a `ROUNDTRIP_TEST_TIMEOUT_MS = 120_000` node:test runner
+  `{ timeout }` on all three enclosing tests. Proved clean across three consecutive standalone runs
+  (52,842 ms / 36,705 ms / 31,149 ms, each 3 passed / 0 failed) plus one run under 8 deliberately
+  spawned competing busy processes on an already-contended host (`loadavg` 16-20 on 8 cores — well
+  above this phase's own recorded 7.49 baseline), still 3 passed / 0 failed. See
+  `.planning/phases/22-green-harness/22-02-SUMMARY.md`.
+- **Group A (`model-router.test.ts` ×5, `model-unittype-mapping.test.ts` ×1)** was not a timing
+  flake: standalone it passed 130/130, and the confirmed reachable mechanism was **project-scope
+  preference resolution relative to `process.cwd()`** — the six tests overrode
+  `process.env.GSD_HOME` but not the process's working directory, so an on-disk project
+  `.gsd/PREFERENCES.md` in the ambient cwd could in principle override the injected/test-written
+  values (dormant on this repo's own worktree, but the real seam behind the host-state-dependent
+  2026-09-24 reds). All three planning-time leak candidates
+  (settings.json bypassing `gsdHome()`, an `effectivePreferencesCache` key collision, and a
+  compiled-vs-source staleness) were ruled out by live diagnostic. The operator selected
+  **Option B — test-isolation**: the six tests plus two new hermeticity guard tests now pin
+  `GSD_CODING_AGENT_DIR` and `process.chdir()` to a clean temporary home alongside `GSD_HOME`, so
+  resolution reads only the injected registry. **No shipped-code change** — `preferences.ts` and
+  `preferences-models.ts` have empty working-tree diffs. Confirmed green both standalone (149
+  passed, 0 failed) and at full-suite process-fan-out scale (0 Group A failures in the fan-out run
+  described below). See `.planning/phases/22-green-harness/22-03-SUMMARY.md`.
+
+**No red above was closed by a retry wrapper, a new skip, a glob change, or a weakened assertion** —
+D-02 forbids blanket retry-wrapping and this phase's prohibitions forbid the rest. Each of the 9
+2026-09-24 failures has a named, evidence-sourced disposition.
 
 ## 5. Runtime expectations
 
@@ -130,17 +181,103 @@ The run **terminated on its own and emitted a summary** — the first complete, 
 run in this project since Phase 11. That closes the "mistaken for a hang / dead-park" behaviour
 (INC-2026-09-20-01) independent of the pass/fail tally.
 
-**This run was NOT green.** It reported **16086 passed, 9 failed, 17 skipped** (exit 1). All 9
-failures are in files untouched by Phase 19 (model-router / model-unittype-mapping preference
-resolution, session-lock acquire/detect roundtrip, and a stale `TERMINAL_STATUS_SQL` literal) — they
-are pre-existing reds that this first complete run surfaced, not regressions from 19-01..19-05. See
-`.planning/phases/19-green-harness/19-06-SUMMARY.md` for the per-test breakdown and disposition.
-GREEN-06 (a green full suite) is therefore **not yet closed**; the terminating-run and skip-inventory
-halves are done, the zero-failure half is not.
+**2026-09-24 gate run (historical baseline, NOT green):** **16086 passed, 9 failed, 17 skipped**
+(exit 1). See §4 above for the per-failure disposition — all 9 are now closed as of Phase 22.
 
-The **17 reported skipped** exceeds the 1 in-scope literal skip tabulated above, because `node:test`
-also counts runtime/conditional skips the static grep cannot see (OS-conditional cases such as
+<!-- TASK3-SC4-RESULT-PLACEHOLDER: Task 3 replaces this comment with both SC4 repetitions'
+     passed/failed/skipped tallies and observed host loadavg. -->
+
+**Skip-count reconciliation:** the literal, grep-based inventory in §3 finds exactly 1 in-scope
+`{ skip: true }` marker. Any reported skip count above 1 is `node:test` also counting
+runtime/conditional skips the static grep cannot see (OS-conditional cases such as
 `migrate-safety-audit.test.ts`'s Windows-only test skipped on Linux, and any computed
 `{ skip: <expr> }`). This is the known limit of a grep-based inventory that 19-06-PLAN's "Flagged
-assumptions" section anticipated; the delta between 17 and the literal count is runtime-conditional
-skips, not undocumented deliberate quarantines.
+assumptions" section anticipated; the delta between the reported count and the literal count is
+runtime-conditional skips, not undocumented deliberate quarantines. §3's literal inventory and this
+runtime-observed count are kept as two distinguishable categories (SC3) — see §6's SC4 section below
+for this phase's own reconciled numbers.
+
+## 6. The liveness watchdog and the SC4 chunked double-run procedure
+
+`scripts/test-suite-watchdog.mjs` (pure decision core in `scripts/lib/test-suite-watchdog-core.mjs`)
+is a zero-dependency Node CLI that supervises any long-running child command, samples its liveness on
+a bounded cadence, and declares a genuine stall instead of leaving a nested orchestrator to mistake
+real work for a hang — this closes GREEN-01's dead-park gap (INC-2026-09-20-01) for the case where
+the suite is run as one long foreground command.
+
+**Supervised entry point:** `pnpm run test:unit:native:watched` runs the unmodified
+`test:unit:native` chain wrapped by the watchdog. Use this instead of a bare
+`pnpm run test:unit:native` whenever the invocation might otherwise be mistaken for a hang.
+
+**Direct invocation:**
+
+```bash
+node scripts/test-suite-watchdog.mjs [options] -- <command> [args...]
+```
+
+**Flags:** `--verdict <path>` (verdict JSON output, default `.gsd/watchdog/verdict.json`),
+`--log <path>` (combined stdout+stderr tee, default `.gsd/watchdog/run.log`), `--label <str>`
+(echoed into the verdict), `--poll-ms <ms>` (sampling cadence, default 5000), `--stall-cap-ms <ms>`
+(quiet-time cap before a stalled tree is killed, default 420000 = 7 min), `--hard-cap-ms <ms>`
+(absolute wall-clock cap regardless of liveness, default 2700000 = 45 min).
+
+**Exit-code contract:** on a normal (non-killed) exit the wrapper always propagates the supervised
+child's own real exit code — a red child never surfaces as a green wrapper (the exact 19-06
+wrapper-exit-code-masking fragility this watchdog exists to prevent). Two distinct non-zero codes are
+reserved and never reused for an ordinary child failure: **87** = the watchdog itself killed the tree
+after declaring it stalled (quiet past `--stall-cap-ms` with no live descendant), **88** = the
+watchdog killed the tree after hitting `--hard-cap-ms` regardless of liveness.
+
+**Verdict JSON:** written atomically to `--verdict`'s path on every terminal outcome. The field a
+caller should read to decide whether the run completed normally is `stalled` (boolean — `true` for
+either kill reason above, `false` otherwise); `verdict` (`"progressing" | "quiet-but-live" |
+"stalled" | "hard-cap" | "exited"`) and `exitCode` (the real, unmasked child exit code) are the two
+fields to read next to distinguish a clean pass from a clean failure from a kill.
+
+**Cap sizing:** `stallCapMs` (420000 ms / 7 min) clears §5's measured
+`legacy-import-live-restore-fault.test.ts` quiet window (263,528 ms / 263.5 s) with roughly 1.6x
+headroom; `hardCapMs` (2700000 ms / 45 min) is roughly 2.8x §5's measured full-chain wall clock
+(953 s / 15 m 53 s). Both are sized against the measured durations in §5, not a quiet CI box — see
+§5 for the durations themselves; this section does not restate them.
+
+**The stall decision is §5's CPU-vs-output diagnostic rule, implemented in code.**
+`classifyLiveness()` in `scripts/lib/test-suite-watchdog-core.mjs` is that rule (sustained CPU or
+growing output resets the quiet timer; only quiet-AND-childless past the cap is a stall) — see §5
+above for the rule and its rationale; it has exactly one home and is not restated here.
+
+**The SC4 chunked double-run procedure.** Verifying GREEN-01's fix by re-running the full
+`test:unit:native` chain twice, back to back, as one long foreground command is the exact invocation
+shape that causes the dead-park GREEN-01 exists to fix (RESEARCH.md Pitfall 4) — using it to verify
+its own fix would be circular. Each of the two independent repetitions instead runs chunked, under
+the watchdog:
+
+1. **Enumerate the chunk set mechanically.** Parse the quoted glob arguments out of `package.json`'s
+   `test:unit:compiled` script value at run time — this is the same list `test:unit:compiled` itself
+   consumes, so the chunked run cannot silently cover less than the monolithic one.
+2. **Phase A — native prep** (once per repetition, in this order — `test:compile`'s stale-artifact
+   prune must run before the mirror or the mirrored addon is deleted, per §2 above): source the
+   Rust/cargo environment, then `pnpm run build:native:test`, then `pnpm run test:compile`, then
+   `pnpm run native:addon:mirror`.
+3. **Phase B — the chunked compiled suite.** For each parsed glob, invoke the watchdog wrapping a
+   single-glob run with `GSD_NATIVE_PREFER_LOCAL=1` set:
+   ```bash
+   node scripts/test-suite-watchdog.mjs \
+     --verdict .gsd/watchdog/sc4-r<REP>-<NN>.json --log .gsd/watchdog/sc4-r<REP>-<NN>.log \
+     -- node --import ./scripts/dist-test-resolve.mjs --experimental-test-isolation=process \
+        --test-reporter=./scripts/test-reporter-compact.mjs --test "<that one glob>"
+   ```
+   (`GSD_NATIVE_PREFER_LOCAL=1` set in the environment.) The compact reporter flag is kept on every
+   chunk — a chunk run without it would make its failures unfalsifiable.
+4. **Phase C — the live-workflow phase**, watchdog-wrapped: `pnpm run test:live-workflow:unit`.
+5. **Aggregate per repetition:** read every chunk's and Phase C's verdict JSON `exitCode` and log
+   tally line; sum passed/failed/skipped. A repetition is green only when every verdict shows
+   `stalled: false`, every exit code is 0, and the summed failure count is 0.
+6. **Run a second, independent repetition** against the same recorded HEAD with no intervening
+   source edit, then compare: both summed failure counts must be 0, and both summed skip counts must
+   agree (a moving skip count is a host-state-dependent finding, recorded rather than smoothed over).
+
+Both repetitions' results for this phase:
+
+<!-- TASK3-SC4-RESULT-PLACEHOLDER: Task 3 replaces this comment with the parsed glob count, both
+     repetitions' summed passed/failed/skipped triples, the per-chunk-coverage confirmation, and the
+     skip-count reconciliation against §3's literal inventory. -->
