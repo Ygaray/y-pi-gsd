@@ -39,8 +39,14 @@ export interface NotificationEntry {
 const MAX_ENTRIES = 500;
 const FILENAME = "notifications.jsonl";
 const LOCKFILE = "notifications.lock";
-const DEDUP_WINDOW_MS = 30_000;
+export const DEDUP_WINDOW_MS = 30_000;
 const DEDUP_PRUNE_THRESHOLD = 200;
+// Hard ceiling on the dedup map's entry count (T-24-01). The existing
+// DEDUP_PRUNE_THRESHOLD prune only removes EXPIRED keys — a burst of
+// thousands of distinct LIVE kind:scope keys inside one window (plan 24-03
+// threads milestone/unit ids into scope) would otherwise grow the map
+// unbounded. Enforced as oldest-first eviction after the expired-key prune.
+const DEDUP_MAX_ENTRIES = 2000;
 
 // ─── Module State ───────────────────────────────────────────────────────
 
@@ -74,9 +80,9 @@ export function appendNotification(
   severity: NotifySeverity,
   source: NotificationSource = "notify",
   meta?: NotificationMeta,
-): void {
-  if (!_basePath) return;
-  if (_suppressCount > 0) return;
+): boolean {
+  if (!_basePath) return false;
+  if (_suppressCount > 0) return false;
   const persistedMessage = message.length > 500 ? message.slice(0, 500) + "…" : message;
   // Structured identity (kind + scope) keys dedup when present, so a rephrased
   // message of the same event still dedups; otherwise fall back to the prose.
@@ -84,11 +90,24 @@ export function appendNotification(
   const dedupKey = `${_basePath}:${severity}:${source}:${identity}`;
   const now = Date.now();
   const lastSeen = _recentMessageTimestamps.get(dedupKey);
-  if (lastSeen !== undefined && now - lastSeen < DEDUP_WINDOW_MS) return;
+  if (lastSeen !== undefined && now - lastSeen < DEDUP_WINDOW_MS) return false;
   _recentMessageTimestamps.set(dedupKey, now);
   if (_recentMessageTimestamps.size > DEDUP_PRUNE_THRESHOLD) {
     for (const [key, ts] of _recentMessageTimestamps) {
       if (now - ts > DEDUP_WINDOW_MS) _recentMessageTimestamps.delete(key);
+    }
+  }
+  // Hard ceiling (T-24-01): even after pruning expired keys, a burst of
+  // distinct LIVE keys inside one window can still exceed the bound. Evict
+  // oldest-inserted first — Map iteration order is insertion order — so
+  // recency-based suppression keeps working under pressure.
+  if (_recentMessageTimestamps.size > DEDUP_MAX_ENTRIES) {
+    const excess = _recentMessageTimestamps.size - DEDUP_MAX_ENTRIES;
+    const iterator = _recentMessageTimestamps.keys();
+    for (let i = 0; i < excess; i++) {
+      const oldestKey = iterator.next().value;
+      if (oldestKey === undefined) break;
+      _recentMessageTimestamps.delete(oldestKey);
     }
   }
 
@@ -115,8 +134,10 @@ export function appendNotification(
     }
     _emitChange();
   } catch {
-    // Non-fatal — never let persistence break the caller
+    // Non-fatal — never let persistence break the caller. The caller's
+    // contract here is "this was not a dedup collapse", which still holds.
   }
+  return true;
 }
 
 /**
@@ -220,6 +241,17 @@ export function unsuppressPersistence(): void {
 }
 
 /**
+ * Report whether persistence is currently suppressed (ref-count > 0).
+ * The interceptor uses this to distinguish "this call's non-persistence was
+ * a deliberate administrative suppression" (still show the toast — that is
+ * the entire point of suppressPersistence, e.g. notifyDeduped's internal
+ * double-write guard) from a genuine dedup collapse (suppress the toast).
+ */
+export function isPersistenceSuppressed(): boolean {
+  return _suppressCount > 0;
+}
+
+/**
  * Subscribe to notification-store mutations (append, mark-read, clear).
  * Returns an unsubscribe function.
  */
@@ -241,6 +273,15 @@ export function _resetNotificationStore(): void {
   _suppressCount = 0;
   _recentMessageTimestamps = new Map();
   _changeListeners.clear();
+}
+
+/**
+ * Read-only accessor reporting the current size of the dedup timestamp map.
+ * Test-only — lets tests assert the DEDUP_MAX_ENTRIES ceiling (T-24-01)
+ * without reaching into module-private state.
+ */
+export function _dedupKeyCount(): number {
+  return _recentMessageTimestamps.size;
 }
 
 // ─── Internal ───────────────────────────────────────────────────────────
