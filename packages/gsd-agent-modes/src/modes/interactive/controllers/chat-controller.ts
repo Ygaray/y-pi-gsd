@@ -7,7 +7,7 @@ import type { InteractiveModeEvent, InteractiveModeStateHost } from "../interact
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { AssistantMessageComponent } from "../components/assistant-message.js";
 import { reconcileChatTurnConnections } from "../components/chat-turn-connect.js";
-import { ToolExecutionComponent } from "../components/tool-execution.js";
+import { coerceToolNameForDisplay, ToolExecutionComponent } from "../components/tool-execution.js";
 import { appKey } from "../components/keybinding-hints.js";
 import { markFirstVisibleAssistantOutput, markTuiLatency } from "./chat-controller-latency.js";
 import {
@@ -387,15 +387,22 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 		break;
 
 		case "tool_execution_start": {
+			// Coerce BEFORE registration/construction so a `standalone`-source
+			// background/parallel-subagent event with an empty/whitespace name
+			// (D-02) can never mint an unlabeled row. Registry lookup below still
+			// reads the RAW event.toolName — a descriptor is not a registry key,
+			// and looking one up would either always miss or, worse, collide with
+			// a real tool that happened to share the descriptor text.
+			const displayToolName = coerceToolNameForDisplay(event.toolName);
 			const { component, created } = registerPendingToolComponent(
 				host,
 				event.toolCallId,
-				event.toolName,
+				displayToolName,
 				event.args,
 				"standalone",
 				() =>
 					new ToolExecutionComponent(
-						event.toolName,
+						displayToolName,
 						event.args,
 						{ showImages: host.settingsManager.getShowImages() },
 						host.getRegisteredToolDefinition(event.toolName),
