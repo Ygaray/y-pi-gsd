@@ -427,7 +427,15 @@ function stableJsonStringify(value: unknown): string {
 
 function normalizeComparableArgs(toolName: string, args: unknown): unknown {
 	if (!args || typeof args !== "object" || Array.isArray(args)) return args;
-	return normalizeToolArguments(toolName, { ...(args as Record<string, unknown>) });
+	// Deep-clone before normalizing: normalizeToolArguments (via
+	// normalizeEditArguments -> normalizeEditEntry) mutates nested entry
+	// objects (e.g. args.edits[i]) IN PLACE. A shallow `{ ...args }` spread
+	// only copies top-level keys, so the `edits` array (and its entries)
+	// would still be the same object references as the caller's live args —
+	// matchesInvocation is documented as a pure comparator and must never
+	// rewrite the component's own stored arguments as a side effect (WR-02).
+	const clone = structuredClone(args as Record<string, unknown>);
+	return normalizeToolArguments(toolName, clone);
 }
 
 export interface ToolExecutionOptions {
