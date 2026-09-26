@@ -250,7 +250,10 @@ function sampleTick() {
     psFailures += 1;
     return;
   }
-  const cpuMsDelta = tree.cpuMsTotal - prevCpuMsTotal;
+  // Clamp at 0: a CPU-heavy descendant that exits between two samples drops its
+  // accumulated seconds out of the running total, which can otherwise manufacture a
+  // negative delta indistinguishable from "truly no CPU used" (WR-01).
+  const cpuMsDelta = Math.max(0, tree.cpuMsTotal - prevCpuMsTotal);
   const outputBytesDelta = outputBytes - prevOutputBytes;
   const sample = {
     cpuMsDelta,
