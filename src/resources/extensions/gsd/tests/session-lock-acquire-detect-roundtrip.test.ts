@@ -43,6 +43,26 @@ import {
   readSessionLockData,
 } from "../session-lock.ts";
 
+// This bounds how long a real spawned OS child (`process.execPath --import
+// resolve-ts.mjs --experimental-strip-types` on the
+// `session-lock-acquire-hold-worker.ts` fixture) may take to print
+// `LOCK_ACQUIRED` under host load. The value matches the identical-problem
+// constant already shipped at `legacy-import-live-restore-fault.test.ts:56`
+// (Phase 19, same question -- "how long can a spawned child take to report
+// readiness under host load"). The prior value here was a third of this,
+// which is what made the two reds in the 2026-09-24 full-suite gate run
+// (19-06) time out on a contended 8-core box while the same tests passed
+// standalone.
+const CHILD_DEADLINE_MS = 30_000;
+// The node:test runner-level bound backing the manual promise race inside
+// `acquireLockInChildProcess`. Sized to comfortably exceed two sequential
+// CHILD_DEADLINE_MS budgets (the `(c)` case spawns two children) plus real
+// database open, milestone insert, and lock-detection work, so that when a
+// child genuinely never reports readiness the named child-deadline error
+// surfaces first with a diagnosable message instead of the runner killing
+// the test opaquely.
+const ROUNDTRIP_TEST_TIMEOUT_MS = 120_000;
+
 const workerPath = join(
   process.cwd(),
   "src/resources/extensions/gsd/tests/fixtures/session-lock-acquire-hold-worker.ts",
@@ -107,8 +127,8 @@ async function acquireLockInChildProcess(
     let stderr = "";
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`worker did not report LOCK_ACQUIRED within 10s. stdout=${stdout} stderr=${stderr}`));
-    }, 10_000);
+      reject(new Error(`worker did not report LOCK_ACQUIRED within ${CHILD_DEADLINE_MS}ms. stdout=${stdout} stderr=${stderr}`));
+    }, CHILD_DEADLINE_MS);
     child.stdout!.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       if (stdout.includes("LOCK_ACQUIRED")) {
@@ -150,7 +170,7 @@ afterEach(() => {
   tempDirs.clear();
 });
 
-test("(a) a genuinely live lock from the REAL acquireSessionLock is detected, not treated as absent", async () => {
+test("(a) a genuinely live lock from the REAL acquireSessionLock is detected, not treated as absent", { timeout: ROUNDTRIP_TEST_TIMEOUT_MS }, async () => {
   const base = makeBase("M-RT-A");
   insertRunningRow("M-RT-A", "run-rt-a");
 
@@ -174,7 +194,7 @@ test("(a) a genuinely live lock from the REAL acquireSessionLock is detected, no
   }
 });
 
-test("(a2) once the real lock owner is genuinely dead, detection reports stale-lock-dead-owner (not active)", async () => {
+test("(a2) once the real lock owner is genuinely dead, detection reports stale-lock-dead-owner (not active)", { timeout: ROUNDTRIP_TEST_TIMEOUT_MS }, async () => {
   const base = makeBase("M-RT-A2");
   insertRunningRow("M-RT-A2", "run-rt-a2");
 
@@ -187,7 +207,7 @@ test("(a2) once the real lock owner is genuinely dead, detection reports stale-l
   assert.equal(detection.pid, held.pid);
 });
 
-test("(c) GSD_PARALLEL_WORKER mode: two milestones' real acquisitions isolate into separate lock files, never falling back to the generic file", async () => {
+test("(c) GSD_PARALLEL_WORKER mode: two milestones' real acquisitions isolate into separate lock files, never falling back to the generic file", { timeout: ROUNDTRIP_TEST_TIMEOUT_MS }, async () => {
   const base = makeBase("M-RT-PARA");
   insertMilestone({ id: "M-RT-PARB", title: "Round-trip lock test B", status: "active" });
   insertRunningRow("M-RT-PARA", "run-rt-para");
