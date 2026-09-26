@@ -201,8 +201,13 @@ function killChildTree(reason, sample) {
     process.kill(-child.pid, 'SIGKILL');
   } catch (err) {
     if (err?.code !== 'ESRCH') {
-      // Group signal failed for a reason other than "already gone" — fall back to a direct
-      // signal on the tracked handle itself.
+      // Group signal failed for a reason other than "already gone" — log it before falling
+      // back to a direct signal on the tracked handle itself (WR-02: this branch used to be
+      // an empty comment-only body, indistinguishable from the ESRCH case it's meant to
+      // differentiate from).
+      const unexpectedErrLine = `[watchdog] group kill failed unexpectedly: ${err?.code ?? err}\n`;
+      appendFileSync(logPath, unexpectedErrLine);
+      process.stderr.write(unexpectedErrLine);
     }
     try {
       child.kill('SIGKILL');
