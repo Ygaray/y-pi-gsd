@@ -217,23 +217,41 @@ function killChildTree(reason, sample) {
 function sampleTick() {
   const now = Date.now();
   const elapsedSinceLast = now - lastSampleAt;
+  const totalMsElapsed = now - startedAt;
+  lastSampleAt = now;
+
+  // Hard cap is checked FIRST and unconditionally, before the `ps`-dependent sampling below,
+  // so a persistently failing sampler (missing `ps` binary, non-POSIX host, permission issue,
+  // or a momentarily-invisible root pid) can never suppress it — this is the absolute
+  // wall-clock ceiling the docs promise "regardless of liveness" (CR-01 / GREEN-01 /
+  // INC-2026-09-20-01).
+  if (totalMsElapsed >= thresholds.hardCapMs) {
+    killChildTree('hard-cap', {
+      cpuMsDelta: 0,
+      outputBytesDelta: 0,
+      descendantCount: 0,
+      quietMsElapsed,
+      totalMsElapsed,
+    });
+    return;
+  }
+
   const psResult = spawnSync('ps', ['-eo', 'pid=,ppid=,cputime='], {
     encoding: 'utf8',
     timeout: 5000,
   });
   const rows = psResult.status === 0 && psResult.stdout ? parsePsRows(psResult.stdout) : [];
   const tree = rows.length > 0 ? walkDescendants(rows, child.pid) : null;
-  lastSampleAt = now;
   if (!tree) {
     // Inconclusive sample (ps failed, or the root pid was momentarily absent from the
     // snapshot) — never advances the quiet timer, so a broken sampler cannot manufacture a
-    // stall verdict (T-22-05).
+    // stall verdict (T-22-05). The hard cap above still bounds the run regardless of how many
+    // consecutive samples are inconclusive (CR-01).
     psFailures += 1;
     return;
   }
   const cpuMsDelta = tree.cpuMsTotal - prevCpuMsTotal;
   const outputBytesDelta = outputBytes - prevOutputBytes;
-  const totalMsElapsed = now - startedAt;
   const sample = {
     cpuMsDelta,
     outputBytesDelta,
