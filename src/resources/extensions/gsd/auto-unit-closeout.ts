@@ -119,7 +119,7 @@ export function buildUnitCompletionNotice(unitType: string, unitId: string): str
 /** Seam for tests; production callers use the defaults. */
 export interface UnitCompletionNotificationDeps {
   append(message: string, severity: "success", source: "notify", meta: { kind: string; scope: string }): void;
-  emit(kind: "milestone_ready" | "idle", message: string, details?: Record<string, unknown>): Promise<void>;
+  emit(kind: "milestone_ready" | "idle" | "unit_complete", message: string, details?: Record<string, unknown>): Promise<void>;
   warn(message: string): void;
 }
 
@@ -149,7 +149,13 @@ export async function notifyUnitCompletion(
     const notice = buildUnitCompletionNotice(unitType, unitId);
     const scope = `${unitType}/${unitId}`;
     deps.append(notice, "success", "notify", { kind: UNIT_COMPLETE_NOTIFICATION_KIND, scope });
-    await deps.emit("idle", notice);
+    // WR-03: route through the dedicated "unit_complete" wire-level kind, not
+    // "idle" -- a per-unit completion during an active, still-running
+    // auto-mode loop is NOT the same event as the whole session going idle
+    // waiting on a human. Sharing "idle" made a multi-unit auto-mode run
+    // (the real BlackJackTrainer example had 37 units) fire the genuine
+    // needs-your-attention signal once per completed unit.
+    await deps.emit("unit_complete", notice);
   } catch (err) {
     deps.warn(
       `unit-completion notification failed for ${unitType}/${unitId}: ${err instanceof Error ? err.message : String(err)}`,

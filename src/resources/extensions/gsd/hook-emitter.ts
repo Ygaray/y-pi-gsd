@@ -31,7 +31,7 @@ export function clearHookEmitter(): void {
 // ─── Notification ──────────────────────────────────────────────────────────
 
 export async function emitNotification(
-  kind: "blocked" | "input_needed" | "milestone_ready" | "idle" | "error",
+  kind: "blocked" | "input_needed" | "milestone_ready" | "idle" | "error" | "unit_complete",
   message: string,
   details?: Record<string, unknown>,
 ): Promise<void> {

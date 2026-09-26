@@ -111,6 +111,18 @@ test("notifyUnitCompletion: also calls the extension-event emitter exactly once"
   assert.equal(deps.emitCalls.length, 1);
 });
 
+test("WR-03: notifyUnitCompletion emits kind 'unit_complete', NOT 'idle' -- must not be mistaken for the session-idle signal", async () => {
+  const deps = makeMockDeps();
+  await notifyUnitCompletion("execute-task", "M001/S01/T01", deps);
+
+  assert.equal(deps.emitCalls.length, 1);
+  assert.equal(
+    deps.emitCalls[0].kind,
+    "unit_complete",
+    "a per-unit completion during an active auto-mode loop must use its own wire-level kind, distinct from the genuine session-idle 'idle' signal",
+  );
+});
+
 test("notifyUnitCompletion: an injected append throw resolves without rejecting, and warns exactly once", async () => {
   const deps = makeMockDeps({
     append: () => {

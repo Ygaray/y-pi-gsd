@@ -39,7 +39,13 @@ export interface StopEvent {
 
 export interface NotificationEvent {
 	type: "notification";
-	kind: "blocked" | "input_needed" | "milestone_ready" | "idle" | "error";
+	// WR-03 (Phase 23 code review): "unit_complete" is its own kind, distinct
+	// from "idle" -- "one auto-mode unit finished, more work continues
+	// automatically" is semantically different from "the assistant is now
+	// idle and needs you". Collapsing both onto "idle" made a multi-unit
+	// auto-mode run (e.g. 37 units) fire the session's genuine
+	// needs-your-attention signal once per completed unit.
+	kind: "blocked" | "input_needed" | "milestone_ready" | "idle" | "error" | "unit_complete";
 	message: string;
 	details?: Record<string, unknown>;
 }
