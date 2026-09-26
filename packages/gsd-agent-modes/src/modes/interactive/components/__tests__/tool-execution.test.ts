@@ -5,7 +5,15 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import stripAnsi from "strip-ansi";
 import { isImageLine, resetCapabilitiesCache, setCapabilities, setCellDimensions } from "@gsd/pi-tui";
-import { ToolExecutionComponent, ToolPhaseSummaryComponent, type ToolExecutionPhase } from "../tool-execution.js";
+import {
+	_resetUnnamedToolEvents,
+	_unnamedToolEvents,
+	coerceToolNameForDisplay,
+	ToolExecutionComponent,
+	ToolPhaseSummaryComponent,
+	UNNAMED_TOOL_DESCRIPTOR,
+	type ToolExecutionPhase,
+} from "../tool-execution.js";
 import { setRailAnimationEnabled } from "../transcript-design.js";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { READ_TUI_EXPANDED_MAX_LINES } from "@gsd/pi-coding-agent/core/tools/read.js";
@@ -679,6 +687,106 @@ describe("ToolExecutionComponent", () => {
 		// Multi-line JSON dump for the complex payload
 		assert.match(rendered, /"payload"/);
 		assert.match(rendered, /"nested"/);
+	});
+});
+
+// Coverage for TUI-03/D-02: every tool row is labeled and self-describing, even
+// with no usable name — the render choke point (deriveToolDescriptor, via
+// ToolExecutionComponent.render()) and the controller ingestion helper
+// (coerceToolNameForDisplay) that pins the descriptor before construction.
+describe("ToolExecutionComponent unnamed-tool descriptor (TUI-03/D-02)", () => {
+	beforeEach(() => {
+		_resetUnnamedToolEvents();
+	});
+
+	test("empty tool name renders a descriptor, never the old unknown placeholder", () => {
+		const rendered = renderTool("", {});
+		assert.doesNotMatch(rendered, /UNKNOWN/);
+	});
+
+	test("collapsed empty tool name renders a descriptor, never the old unknown placeholder", () => {
+		const rendered = renderToolCollapsed("", {});
+		assert.doesNotMatch(rendered, /UNKNOWN/);
+	});
+
+	test("whitespace-only tool name resolves to the same descriptor as the empty name", () => {
+		const rendered = renderTool("   ", {});
+		assert.doesNotMatch(rendered, /UNKNOWN/);
+		assert.match(rendered, new RegExp(UNNAMED_TOOL_DESCRIPTOR.toUpperCase()));
+	});
+
+	test("gsd_-only tool name does not render the raw name text", () => {
+		// prettifyToolName("gsd_") returns the ORIGINAL name (its own distinct
+		// bug, tool-execution.ts:105-113) because the stripped remainder is
+		// empty — hasUsableToolName's gate must catch this case too, not just
+		// the plain-empty-string case.
+		const rendered = renderTool("gsd_", {});
+		assert.doesNotMatch(rendered, /gsd_/i);
+		assert.doesNotMatch(rendered, /UNKNOWN/);
+	});
+
+	test("registered definition label wins over every other signal for an unnamed tool", () => {
+		const rendered = renderTool("", {}, undefined, { label: "Complete Slice" });
+		assert.match(rendered, /COMPLETE SLICE/);
+	});
+
+	test("args-derived compact target appears when name and definition label are both absent", () => {
+		const rendered = renderTool("", { file_path: "src/app/page.tsx" });
+		assert.match(rendered, /src\/app\/page\.tsx/);
+	});
+
+	test("falls back to UNNAMED_TOOL_DESCRIPTOR when every other signal is absent", () => {
+		const rendered = renderTool("", {});
+		assert.match(rendered, new RegExp(UNNAMED_TOOL_DESCRIPTOR.toUpperCase()));
+		assert.doesNotMatch(rendered, /UNKNOWN/);
+	});
+
+	test("MCP-shaped name still wins through parseMcpToolName unchanged", () => {
+		const rendered = renderToolCollapsed("mcp__demo__do_thing", { ok: true });
+		assert.match(rendered, /DEMO·DO_THING/);
+	});
+
+	test("source assertion: the old trailing unknown-placeholder guard is gone", () => {
+		const sourceUrl = existsSync(new URL("../tool-execution.ts", import.meta.url))
+			? new URL("../tool-execution.ts", import.meta.url)
+			: new URL("../tool-execution.js", import.meta.url);
+		const source = readFileSync(sourceUrl, "utf8");
+		assert.doesNotMatch(source, /prettifyToolName\(this\.toolName, this\.toolDefinition\?\.label\) \|\|/);
+	});
+
+	test("caps the unnamed-tool anomaly capture at 50 entries", () => {
+		for (let i = 0; i < 60; i++) {
+			renderToolCollapsed("", {});
+		}
+		assert.equal(_unnamedToolEvents.length, 50);
+	});
+
+	test("coerceToolNameForDisplay normalizes every unusable-name variant to the descriptor, never throwing", () => {
+		assert.equal(coerceToolNameForDisplay(""), UNNAMED_TOOL_DESCRIPTOR);
+		assert.equal(coerceToolNameForDisplay("   "), UNNAMED_TOOL_DESCRIPTOR);
+		assert.equal(coerceToolNameForDisplay("gsd_"), UNNAMED_TOOL_DESCRIPTOR);
+		assert.equal(coerceToolNameForDisplay(undefined), UNNAMED_TOOL_DESCRIPTOR);
+		assert.equal(coerceToolNameForDisplay(null), UNNAMED_TOOL_DESCRIPTOR);
+	});
+
+	test("coerceToolNameForDisplay never rewrites a usable name", () => {
+		assert.equal(coerceToolNameForDisplay("gsd_validate_milestone"), "gsd_validate_milestone");
+	});
+
+	test("coerceToolNameForDisplay trims rather than rejecting a padded usable name", () => {
+		assert.equal(coerceToolNameForDisplay("  grep  "), "grep");
+	});
+
+	test("anomaly capture records exactly the four documented fields, no argument/result payload", () => {
+		renderToolCollapsed("", {});
+		assert.equal(_unnamedToolEvents.length, 1);
+		const [entry] = _unnamedToolEvents;
+		assert.deepEqual(
+			new Set(Object.keys(entry)),
+			new Set(["source", "toolCallId", "hadDefinition", "hadTarget"]),
+		);
+		assert.equal(entry.hadDefinition, false);
+		assert.equal(entry.hadTarget, false);
 	});
 });
 

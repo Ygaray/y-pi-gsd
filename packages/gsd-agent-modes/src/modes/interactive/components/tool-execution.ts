@@ -112,6 +112,103 @@ function prettifyToolName(name: string, label?: string): string {
 		.join(" ");
 }
 
+/**
+ * True when `name` is a usable, displayable tool name: a string whose
+ * trimmed form is non-empty and is not exactly the bare `gsd_` prefix — the
+ * one case `prettifyToolName`'s own "stripped remainder is empty" fallback
+ * returns the still-unusable original string instead of an empty one.
+ */
+export function hasUsableToolName(name: unknown): boolean {
+	if (typeof name !== "string") return false;
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return false;
+	if (trimmed === "gsd_") return false;
+	return true;
+}
+
+/** Last-resort label for a tool row whose name and every other signal are absent. */
+export const UNNAMED_TOOL_DESCRIPTOR = "background task";
+
+// Hard cap so a long autonomous run's unnamed-tool anomaly capture cannot grow
+// without bound (T-25-06).
+const MAX_UNNAMED_TOOL_EVENTS = 50;
+
+/**
+ * Evidence capture for D-02's emitter half: one entry per row rendered
+ * without a usable name, recording only enough metadata to identify the
+ * emitter from a live run — never argument or result payloads (T-25-05).
+ * Capped at MAX_UNNAMED_TOOL_EVENTS; further pushes are dropped.
+ */
+export const _unnamedToolEvents: Array<{
+	source?: string;
+	toolCallId?: string;
+	hadDefinition: boolean;
+	hadTarget: boolean;
+}> = [];
+
+/** Test-only reset for `_unnamedToolEvents`. */
+export function _resetUnnamedToolEvents(): void {
+	_unnamedToolEvents.length = 0;
+}
+
+function pushUnnamedToolEvent(
+	source: string | undefined,
+	toolCallId: string | undefined,
+	hadDefinition: boolean,
+	hadTarget: boolean,
+): void {
+	if (_unnamedToolEvents.length >= MAX_UNNAMED_TOOL_EVENTS) return;
+	_unnamedToolEvents.push({ source, toolCallId, hadDefinition, hadTarget });
+}
+
+/**
+ * Resolve a real, human-meaningful descriptor for a tool row in a fixed,
+ * tested order: the registered tool definition's label; the MCP server/tool
+ * pair; the prettified name (only when it is a usable name); the
+ * args-derived compact target; then the registration source. Only when
+ * every one of those is absent does the generic UNNAMED_TOOL_DESCRIPTOR
+ * apply. Total — never returns a placeholder like the removed `"unknown"`
+ * guard, and never throws.
+ */
+function deriveToolDescriptor(
+	name: string,
+	toolDefinition: ToolDefinition | undefined,
+	compactTarget: string | undefined,
+	source?: string,
+): string {
+	const label = toolDefinition?.label;
+	if (label && label.trim().length > 0) return label;
+
+	const parsed = parseMcpToolName(name);
+	if (parsed) return `${parsed.server}·${parsed.tool}`;
+
+	if (hasUsableToolName(name)) {
+		return prettifyToolName(name, toolDefinition?.label);
+	}
+
+	// Every signal ahead of the name itself is exhausted — this row is being
+	// labeled without a usable name. Record the anomaly (D-02) once, with no
+	// argument/result payload, then resolve the best remaining signal.
+	const hasCompactTarget = !!compactTarget && compactTarget.trim().length > 0;
+	pushUnnamedToolEvent(source, undefined, !!toolDefinition, hasCompactTarget);
+
+	if (hasCompactTarget) return compactTarget as string;
+	if (source && source.trim().length > 0) return source;
+	return UNNAMED_TOOL_DESCRIPTOR;
+}
+
+/**
+ * Coerce a raw, possibly-empty tool name to a displayable string BEFORE a
+ * component is constructed or registered with the rollup. Returns the
+ * trimmed name when usable, else UNNAMED_TOOL_DESCRIPTOR. Never throws on
+ * undefined/null. This is the controller-side ingestion half of D-02; the
+ * render-choke-point half is `deriveToolDescriptor` above.
+ */
+export function coerceToolNameForDisplay(name: unknown): string {
+	if (hasUsableToolName(name)) return (name as string).trim();
+	return UNNAMED_TOOL_DESCRIPTOR;
+}
+
 const COMPACT_ARG_VALUE_LIMIT = 60;
 const GENERIC_OUTPUT_PREVIEW_LINES = 10;
 const GENERIC_ARGS_JSON_PREVIEW_LINES = 10;
@@ -852,10 +949,11 @@ export class ToolExecutionComponent extends Container {
 		const elapsed = formatElapsed((this.endedAt ?? Date.now()) - this.startedAt);
 		const statusWord = this.isPartial || !this.result ? "running" : this.result.isError ? "failed" : "success";
 		const frameStatus = `${statusWord} · ${elapsed}`;
-		const parsed = parseMcpToolName(this.toolName);
-		const frameLabel = parsed
-			? `${parsed.server}·${parsed.tool}`
-			: prettifyToolName(this.toolName, this.toolDefinition?.label) || "unknown";
+		// Hoisted so deriveToolDescriptor's args-derived-target fallback (step 4)
+		// and the two render branches below share one call, rather than each
+		// calling the getter separately as before.
+		const compactTarget = this.getCompactTarget();
+		const frameLabel = deriveToolDescriptor(this.toolName, this.toolDefinition, compactTarget);
 		const recommendedTone: StatusTone =
 			frameTone === "pending" ? "running" : frameTone === "error" ? "error" : "success";
 
@@ -868,7 +966,6 @@ export class ToolExecutionComponent extends Container {
 		}
 		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
 		if (!this.showExpandedBody() && !this.result?.isError && !hasImages) {
-			const compactTarget = this.getCompactTarget();
 			return renderCompactToolStrip(frameLabel, compactTarget, frameWidth, {
 				status: frameStatus,
 				tone: recommendedTone,
@@ -890,7 +987,7 @@ export class ToolExecutionComponent extends Container {
 		}
 		return renderPlainToolMessage(lines, frameWidth, {
 			title: frameLabel,
-			target: this.getCompactTarget(),
+			target: compactTarget,
 			meta: rightParts.join(" · "),
 			tone: recommendedTone,
 		});
@@ -972,7 +1069,11 @@ export class ToolExecutionComponent extends Container {
 			if (!label) return glob || undefined;
 			return glob ? `${label} (${glob})` : label;
 		}
-		return undefined;
+		// Generic/unrecognized tool name: fall back to the already-derived path
+		// arg (if any) rather than nothing, so an unnamed row can still show
+		// what it is doing (TUI-03/D-02) — reuses `path`, computed above, and
+		// does not change any of the recognized-tool branches above it.
+		return path ? shortenPath(path) : undefined;
 	}
 
 	private updateDisplay(): void {
