@@ -2323,40 +2323,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         }
       }
 
-      if (
-        !triggerArtifactVerified &&
-        s.currentUnit.type === "validate-milestone" &&
-        (
-          agentEndMessagesIncludeSuccessfulToolResult(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesIncludeToolCall(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesMentionTool(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          hasRoadmapReassessmentArtifact(s.basePath, parseUnitId(s.currentUnit.id).milestone) ||
-          hasRoadmapReassessmentArtifact(s.canonicalProjectRoot, parseUnitId(s.currentUnit.id).milestone)
-        )
-      ) {
-        const { milestone: mid } = parseUnitId(s.currentUnit.id);
-        if (mid && (
-          agentEndMessagesIncludeSuccessfulToolResult(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesMentionTool(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          hasIncompleteMilestoneSlice(mid) ||
-          hasRoadmapReassessmentArtifact(s.basePath, mid) ||
-          hasRoadmapReassessmentArtifact(s.canonicalProjectRoot, mid)
-        )) {
-          triggerArtifactVerified = true;
-          invalidateAllCaches();
-          debugLog("postUnit", {
-            phase: "validate-milestone-reassessment-invalidated-validation",
-            unitType: s.currentUnit.type,
-            unitId: s.currentUnit.id,
-            milestoneId: mid,
-          });
-        }
-      }
-
       if (!triggerArtifactVerified && s.currentUnit.type === "research-project") {
         const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
         const outcome = finalizeProjectResearchTimeout(
