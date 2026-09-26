@@ -403,3 +403,164 @@ describe("TUI padding mechanism discrimination (phase 25)", () => {
 		tui.stop();
 	});
 });
+
+describe("TUI padding boundary cases (phase 25)", () => {
+	it("Case E: a short turn exactly the terminal height, and one line shorter, both commit no padding (adjacency)", async () => {
+		for (const middleLength of [12, 11]) {
+			const terminal = new VirtualTerminal(80, 12);
+			const tui = new TUI(terminal);
+			const turn = new TurnComponent();
+			tui.addChild(turn);
+			tui.start();
+
+			const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+			turn.setTurn(tallTurnOne);
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const middleTurn = Array.from(
+				{ length: middleLength },
+				(_, i) => `Middle turn (len ${middleLength}), line ${i}`,
+			);
+			turn.setTurn(middleTurn);
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const tallTurnTwo = Array.from({ length: 30 }, (_, i) => `Tall turn two, line ${i}`);
+			turn.setTurn(tallTurnTwo);
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const scrollback = terminal.getScrollBuffer();
+			const longest = longestBlankRun(scrollback);
+			assert.ok(
+				longest <= 2,
+				`middle turn length ${middleLength} (terminal height 12): longest blank run in scrollback is ${longest} (runs: ${JSON.stringify(countBlankRuns(scrollback))})`,
+			);
+
+			tui.stop();
+		}
+	});
+
+	it("Case F: an empty turn and a one-line turn commit no padding (empty)", async () => {
+		for (const middleLength of [0, 1]) {
+			const terminal = new VirtualTerminal(80, 12);
+			const tui = new TUI(terminal);
+			const turn = new TurnComponent();
+			tui.addChild(turn);
+			tui.start();
+
+			const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+			turn.setTurn(tallTurnOne);
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const middleTurn = middleLength === 0 ? [] : ["Sole line of the one-line turn"];
+			turn.setTurn(middleTurn);
+			// Exercises the Math.max(0, newLines.length - 1) / Math.max(1, ...)
+			// clamps in the repaint and commit paths for a zero-length and a
+			// one-line frame — no exception must escape either.
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const tallTurnTwo = Array.from({ length: 30 }, (_, i) => `Tall turn two, line ${i}`);
+			turn.setTurn(tallTurnTwo);
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const scrollback = terminal.getScrollBuffer();
+			const longest = longestBlankRun(scrollback);
+			assert.ok(
+				longest <= 2,
+				`middle turn length ${middleLength}: longest blank run in scrollback is ${longest} (runs: ${JSON.stringify(countBlankRuns(scrollback))})`,
+			);
+
+			tui.stop();
+		}
+	});
+
+	it("Case G: a blank row is not smuggled in as whitespace or a bare reset sequence (encoding)", async () => {
+		const terminal = new VirtualTerminal(80, 12);
+		const tui = new TUI(terminal);
+		const turn = new TurnComponent();
+		tui.addChild(turn);
+		tui.start();
+
+		const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+		turn.setTurn(tallTurnOne);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		// One line short of the terminal height — the Case E sub-case that
+		// actually exercises the padding branch (the ===height sub-case fills
+		// the screen with no filler rows at all).
+		const middleTurn = Array.from({ length: 11 }, (_, i) => `Middle turn (len 11), line ${i}`);
+		turn.setTurn(middleTurn);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const tallTurnTwo = Array.from({ length: 30 }, (_, i) => `Tall turn two, line ${i}`);
+		turn.setTurn(tallTurnTwo);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		// Blankness is judged on the emulator's own plain-text row content
+		// (translateToString(true), which getScrollBuffer()/getViewport() wrap
+		// and which trims trailing whitespace) — so a row equal to its own
+		// trim() carries no smuggled space or bare SGR-reset padding.
+		const nonTrimmedRows = scrollback
+			.map((line, index) => ({ line, index }))
+			.filter(({ line }) => line !== line.trim());
+		assert.strictEqual(
+			nonTrimmedRows.length,
+			0,
+			`found row(s) whose raw text differs from its own trim() — a smuggled whitespace-only blank: ${JSON.stringify(nonTrimmedRows)}`,
+		);
+
+		tui.stop();
+	});
+
+	it("Case H: a repaint reaches a fixed point (termination)", async () => {
+		const terminal = new VirtualTerminal(80, 12);
+		const tui = new TUI(terminal);
+		const turn = new TurnComponent();
+		tui.addChild(turn);
+		tui.start();
+
+		const tallTurn = Array.from({ length: 30 }, (_, i) => `Tall turn, line ${i}`);
+		turn.setTurn(tallTurn);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const shortTurn = ["Short turn line 1", "Short turn line 2", "Short turn line 3"];
+		turn.setTurn(shortTurn);
+		tui.requestRender();
+		await terminal.waitForRender();
+		const fullRedrawsAfterShortTurn = tui.fullRedraws;
+
+		// Two further renders with the component's lines UNCHANGED (no setTurn
+		// call in between) — a repaint condition that re-fires on an unchanged
+		// frame would spin the renderer (see <threat_model> T-25-08).
+		tui.requestRender();
+		await terminal.waitForRender();
+		const fullRedrawsAfterSecondRender = tui.fullRedraws;
+
+		tui.requestRender();
+		await terminal.waitForRender();
+		const fullRedrawsAfterThirdRender = tui.fullRedraws;
+
+		assert.strictEqual(
+			fullRedrawsAfterSecondRender,
+			fullRedrawsAfterShortTurn,
+			`a repaint with unchanged component output must not increment fullRedraws, went ${fullRedrawsAfterShortTurn} -> ${fullRedrawsAfterSecondRender}`,
+		);
+		assert.strictEqual(
+			fullRedrawsAfterThirdRender,
+			fullRedrawsAfterShortTurn,
+			`a second repaint with unchanged component output must not increment fullRedraws, went ${fullRedrawsAfterShortTurn} -> ${fullRedrawsAfterThirdRender}`,
+		);
+
+		tui.stop();
+	});
+});
