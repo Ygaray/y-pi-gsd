@@ -12,6 +12,8 @@ import { snapshotUnitMetrics } from "./metrics.js";
 import { saveActivityLog } from "./activity-log.js";
 import { logWarning } from "./workflow-logger.js";
 import { writeTurnGitTransaction } from "./uok/gitops.js";
+import { appendNotification } from "./notification-store.js";
+import { emitNotification } from "./hook-emitter.js";
 
 export interface CloseoutOptions {
   promptCharCount?: number;
@@ -93,6 +95,68 @@ export function isSuspiciousGhostCompletion(
   );
 }
 
+// ─── Per-unit completion notification (SIGNAL-04, notification half) ───────
+//
+// RESEARCH confirmed the real BlackJackTrainer M001 run's notifications.jsonl
+// carried 368 lines and ZERO unit-completion entries across 37 completed
+// units — the only completion-shaped notification anywhere in the auto loop
+// is the one-shot milestone-complete pair (auto/pre-dispatch.ts, auto/loop.ts),
+// fired once per milestone boundary, never per unit. This section closes that
+// gap with a single new call site inside closeoutAutoUnit below.
+
+export const UNIT_COMPLETE_NOTIFICATION_KIND = "unit-complete";
+
+/**
+ * Pure. Composes a per-unit completion notice from ONLY the two identifier
+ * arguments (T-23-13) — no session-transcript entry, no activity-log body,
+ * and no tool result can reach this string. An empty unitId falls back to a
+ * unitType-only notice so the result is never blank or malformed.
+ */
+export function buildUnitCompletionNotice(unitType: string, unitId: string): string {
+  return unitId.length > 0 ? `Unit complete: ${unitType} ${unitId}` : `Unit complete: ${unitType}`;
+}
+
+/** Seam for tests; production callers use the defaults. */
+export interface UnitCompletionNotificationDeps {
+  append(message: string, severity: "success", source: "notify", meta: { kind: string; scope: string }): void;
+  emit(kind: "milestone_ready" | "idle", message: string, details?: Record<string, unknown>): Promise<void>;
+  warn(message: string): void;
+}
+
+const defaultUnitCompletionNotificationDeps: UnitCompletionNotificationDeps = {
+  append: (message, severity, source, meta) => appendNotification(message, severity, source, meta),
+  emit: (kind, message, details) => emitNotification(kind, message, details),
+  warn: (message) => logWarning("engine", message),
+};
+
+/**
+ * Appends a per-unit `unit-complete` notification-store entry and dispatches
+ * an extension-level notification event for every completed unit. Routes
+ * ONLY through appendNotification/emitNotification (the two chokepoints
+ * Phase 24's NOISE throttle wraps) — never through the desktop-toast or
+ * terminal-bell helpers, which would be per-unit OS-toast noise on a
+ * multi-unit run. `scope` is per-unit (`${unitType}/${unitId}`) so back-to-
+ * back units cannot collapse into one entry via the store's kind:scope dedup
+ * key, while genuine duplicate closeouts of the same unit still collapse.
+ * Never throws — a notification failure can never block or fail a closeout.
+ */
+export async function notifyUnitCompletion(
+  unitType: string,
+  unitId: string,
+  deps: UnitCompletionNotificationDeps = defaultUnitCompletionNotificationDeps,
+): Promise<void> {
+  try {
+    const notice = buildUnitCompletionNotice(unitType, unitId);
+    const scope = `${unitType}/${unitId}`;
+    deps.append(notice, "success", "notify", { kind: UNIT_COMPLETE_NOTIFICATION_KIND, scope });
+    await deps.emit("idle", notice);
+  } catch (err) {
+    deps.warn(
+      `unit-completion notification failed for ${unitType}/${unitId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 /**
  * Snapshot metrics, save activity log, extract memories, and record the git
  * transaction for a completed auto-mode unit.
@@ -110,6 +174,15 @@ export async function closeoutAutoUnit(
     request.opts,
   );
   const activityFile = saveActivityLog(request.ctx, request.basePath, request.unitType, request.unitId);
+
+  try {
+    await notifyUnitCompletion(request.unitType, request.unitId);
+  } catch (err) {
+    logWarning(
+      "engine",
+      `unit-completion notification failed for ${request.unitType}/${request.unitId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   if (activityFile) {
     try {
