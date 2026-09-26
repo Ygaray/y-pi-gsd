@@ -1401,8 +1401,12 @@ export class ToolExecutionComponent extends Container {
 			let pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
 			if (offset !== undefined || limit !== undefined) {
 				const startLine = offset ?? 1;
-				const endLine = limit !== undefined ? startLine + limit - 1 : "";
-				pathDisplay += theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
+				const endLine = limit !== undefined ? startLine + limit - 1 : undefined;
+				// Dedup a single-line read (endLine === startLine) the same way the
+				// collapsed renderer's appendLineOrRange helper does, so both paths
+				// render the same logical read identically (WR-05).
+				const suffix = endLine !== undefined && endLine !== startLine ? `${startLine}-${endLine}` : `${startLine}`;
+				pathDisplay += theme.fg("warning", `:${suffix}`);
 			}
 
 			text = `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}`;
