@@ -181,14 +181,11 @@ export async function closeoutAutoUnit(
   );
   const activityFile = saveActivityLog(request.ctx, request.basePath, request.unitType, request.unitId);
 
-  try {
-    await notifyUnitCompletion(request.unitType, request.unitId);
-  } catch (err) {
-    logWarning(
-      "engine",
-      `unit-completion notification failed for ${request.unitType}/${request.unitId}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  // IN-01: notifyUnitCompletion already wraps its entire body in a try/catch
+  // and never rethrows (it only calls deps.warn internally) -- the
+  // non-fatal guarantee lives there, at the single owning layer, so this
+  // call site does not need (and must not duplicate) its own try/catch.
+  await notifyUnitCompletion(request.unitType, request.unitId);
 
   if (activityFile) {
     try {
