@@ -698,7 +698,21 @@ export async function handleAgentEnd(
     // narrow case).
     const hasPendingToolCall = hasPendingToolCallInLastMessage(event.messages ?? []);
     const lastToolOutcome = getLastTurnToolOutcome();
-    if (_shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome, hasPendingToolCall })) {
+    // WR-01: a genuine user-initiated abort (SDK-reported abortOrigin: "user",
+    // or an errorMessage matching the same user-abort phrasing the sibling
+    // `stopReason === "error"` branch below checks via
+    // isUserInitiatedAbortMessage) must always still pause, even when the
+    // last tool call happened to succeed and no tool call is pending. Without
+    // this guard the override below silently reinterprets the user's
+    // cancellation as a normal completion.
+    const isUserAbort =
+      event.abortOrigin === "user" ||
+      isUserInitiatedAbortMessage(
+        isObjectRecord(lastMsg) && "errorMessage" in lastMsg && lastMsg.errorMessage
+          ? String(lastMsg.errorMessage)
+          : undefined,
+      );
+    if (!isUserAbort && _shouldOverrideAbortedPauseAfterToolSuccess({ lastToolOutcome, hasPendingToolCall })) {
       try {
         ctx.ui.notify(
           "Trailing message was cut off after the operation completed — treating this turn as done.",

@@ -279,6 +279,51 @@ test("aborted + tracker true BUT pending tool call in trailing message still pau
   assert.equal((results[0] as any).status, "cancelled", "the model was still calling tools -- must still pause");
 });
 
+// ── WR-01: a genuine user-initiated abort must never be overridden ─────────
+
+test("WR-01: abortOrigin \"user\" still pauses even when the last tool call succeeded and nothing is pending", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(true);
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = {
+    ...makeAbortedEvent([{ type: "text", text: "Implemented and verified the task." }]),
+    abortOrigin: "user",
+  };
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.equal(results.length, 1);
+  assert.equal(
+    (results[0] as any).status,
+    "cancelled",
+    "a genuine user-initiated abort must still pause, even after a last-call tool success",
+  );
+  assert.equal((results[0] as any).errorContext?.category, "aborted");
+});
+
+test("WR-01: user-abort errorMessage phrasing (no abortOrigin) still pauses even when the last tool call succeeded", async () => {
+  autoSession.active = true;
+  recordTurnToolOutcome(true);
+  const results: unknown[] = [];
+  _setCurrentResolve((r) => results.push(r));
+
+  const event = makeAbortedEvent(
+    [{ type: "text", text: "Implemented and verified the task." }],
+    { errorMessage: "request aborted by user" },
+  );
+
+  await handleAgentEnd({} as any, event as any, minimalPauseCtx());
+
+  assert.equal(results.length, 1);
+  assert.equal(
+    (results[0] as any).status,
+    "cancelled",
+    "isUserInitiatedAbortMessage-matching errorMessage must still pause, mirroring the sibling stopReason=='error' branch",
+  );
+});
+
 // ── Regression: pre-existing branches keep their exact precedence ──────────
 
 test("regression: aborted + EMPTY content + no errorMessage still resolves via the pre-existing empty-content branch, regardless of tracker", async () => {
