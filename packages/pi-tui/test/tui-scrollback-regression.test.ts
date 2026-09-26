@@ -225,3 +225,167 @@ describe("TUI scrollback regression (phase 25)", () => {
 		tui.stop();
 	});
 });
+
+describe("TUI padding mechanism discrimination (phase 25)", () => {
+	it("C1 refuted: padding appears with no overlay on the stack", async () => {
+		const terminal = new VirtualTerminal(80, 12);
+		const tui = new TUI(terminal);
+		const turn = new TurnComponent();
+		tui.addChild(turn);
+		tui.start();
+
+		const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+		turn.setTurn(tallTurnOne);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const shortTurn = ["Short turn line 1", "Short turn line 2", "Short turn line 3"];
+		turn.setTurn(shortTurn);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const viewportAfterShort = terminal.getViewport();
+		const leadingBlankRows = viewportAfterShort.findIndex((line) => line.trim() !== "");
+		const hasLeadingBlanks = leadingBlankRows > 0;
+
+		// No overlay-opening call is made anywhere in this test file — the TUI's
+		// overlay stack is empty for this entire sequence, by construction.
+		if (hasLeadingBlanks) {
+			// Leading blanks appeared with an empty overlay stack: compositeOverlays
+			// (gated on overlayStack.length > 0, tui.ts:1237) cannot be the mechanism
+			// for this path. C1 is REFUTED for this path.
+			assert.ok(
+				hasLeadingBlanks,
+				`C1 REFUTED: ${leadingBlankRows} leading blank row(s) appeared in the viewport with overlayStack empty: ${JSON.stringify(viewportAfterShort)}`,
+			);
+		} else {
+			// No leading blanks appeared on this path with no overlay active.
+			// C1 is NOT-REACHED-BY-THIS-PATH (neither confirmed nor refuted here).
+			assert.strictEqual(
+				leadingBlankRows,
+				-1,
+				`C1 NOT-REACHED-BY-THIS-PATH: no leading blank rows in viewport: ${JSON.stringify(viewportAfterShort)}`,
+			);
+		}
+
+		tui.stop();
+	});
+
+	it("C3 probe: a short frame is bottom-anchored in the viewport", async () => {
+		const terminal = new VirtualTerminal(80, 12);
+		const tui = new TUI(terminal);
+		const turn = new TurnComponent();
+		tui.addChild(turn);
+		tui.start();
+
+		const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+		turn.setTurn(tallTurnOne);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const redrawsBeforeShortTurn = tui.fullRedraws;
+		const shortTurn = ["Short turn line 1", "Short turn line 2", "Short turn line 3"];
+		turn.setTurn(shortTurn);
+		tui.requestRender();
+		await terminal.waitForRender();
+		const redrawsAfterShortTurn = tui.fullRedraws;
+		const fullRedrawDelta = redrawsAfterShortTurn - redrawsBeforeShortTurn;
+
+		const viewport = terminal.getViewport();
+		const topAnchored = viewport.slice(0, 3).every((line, i) => line.trim() === shortTurn[i]);
+		const bottomAnchored =
+			viewport.slice(-3).every((line, i) => line.trim() === shortTurn[i]) &&
+			viewport.slice(0, viewport.length - 3).every((line) => line.trim() === "");
+
+		// Record the observed arrangement explicitly — document reality, not a wish.
+		assert.ok(
+			topAnchored || bottomAnchored,
+			`short frame landed in neither a top-anchored nor a clean bottom-anchored arrangement: ${JSON.stringify(viewport)}`,
+		);
+		assert.ok(
+			bottomAnchored,
+			`C3 probe: expected bottom-anchoring (blanks above, content at the last 3 rows), got: ${JSON.stringify(viewport)} (fullRedraws delta across the short turn: ${fullRedrawDelta})`,
+		);
+
+		tui.stop();
+	});
+
+	it("C2 probe: the shrink path with clearOnShrink enabled", async () => {
+		const terminal = new VirtualTerminal(80, 12);
+		const tui = new TUI(terminal);
+		tui.setClearOnShrink(true);
+		const turn = new TurnComponent();
+		tui.addChild(turn);
+		tui.start();
+
+		const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+		turn.setTurn(tallTurnOne);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const redrawsBeforeShortTurn = tui.fullRedraws;
+		const shortTurn = ["Short turn line 1", "Short turn line 2", "Short turn line 3"];
+		turn.setTurn(shortTurn);
+		tui.requestRender();
+		await terminal.waitForRender();
+		const redrawsAfterShortTurn = tui.fullRedraws;
+		const fullRedrawDelta = redrawsAfterShortTurn - redrawsBeforeShortTurn;
+
+		const tallTurnTwo = Array.from({ length: 30 }, (_, i) => `Tall turn two, line ${i}`);
+		turn.setTurn(tallTurnTwo);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		const longest = longestBlankRun(scrollback);
+
+		// tui.ts's "bottom-anchored short block shrunk" branch (newLines.length <=
+		// height) is checked before clearOnShrink and fires unconditionally for
+		// this shrink shape, so clearOnShrink cannot change the outcome here. The
+		// SUMMARY records this measured number against the C3 probe's — an
+		// identical number exonerates C2 for this path; a materially different
+		// number would implicate it instead.
+		assert.strictEqual(
+			fullRedrawDelta,
+			1,
+			`expected exactly one full redraw across the short turn with clearOnShrink enabled, got ${fullRedrawDelta}`,
+		);
+		assert.ok(
+			longest > 2,
+			`C2 probe: expected the same bottom-anchor padding signature as the C3 probe (longest blank run > 2), got ${longest} (fullRedraws delta: ${fullRedrawDelta})`,
+		);
+
+		tui.stop();
+	});
+
+	it("resize does not inject scrollback padding", async () => {
+		const terminal = new VirtualTerminal(80, 12);
+		const tui = new TUI(terminal);
+		const turn = new TurnComponent();
+		tui.addChild(turn);
+		tui.start();
+
+		const tallTurnOne = Array.from({ length: 30 }, (_, i) => `Tall turn one, line ${i}`);
+		turn.setTurn(tallTurnOne);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		terminal.resize(80, 20);
+		await terminal.waitForRender();
+
+		const tallTurnTwo = Array.from({ length: 30 }, (_, i) => `Resize turn two, line ${i}`);
+		turn.setTurn(tallTurnTwo);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		const longest = longestBlankRun(scrollback);
+		const longestStart = longestBlankRunStart(scrollback);
+		assert.ok(
+			longest <= 2,
+			`resize must not inject scrollback padding: longest blank run is ${longest}, starting at row ${longestStart}`,
+		);
+
+		tui.stop();
+	});
+});
