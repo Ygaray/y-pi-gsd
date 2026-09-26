@@ -1436,6 +1436,15 @@ export function registerHooks(
         destructiveConfirmationBlocking,
         "Destructive-command confirmation is waiting for your answer — pausing auto-mode.",
       );
+      try {
+        const { signalTurnEnd } = await import("./turn-completion-signal.js");
+        await signalTurnEnd(event, ctx);
+      } catch (err) {
+        safetyLogWarning(
+          "bootstrap",
+          `signalTurnEnd dynamic import/call failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   });
 

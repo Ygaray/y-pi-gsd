@@ -9,6 +9,7 @@
 
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import type {
+  AgentAbortOrigin,
   BeforeCommitEventResult,
   BeforePrEventResult,
   BeforePushEventResult,
@@ -36,6 +37,24 @@ export async function emitNotification(
 ): Promise<void> {
   if (!_pi) return;
   await _pi.emitExtensionEvent({ type: "notification", kind, message, details });
+}
+
+// ─── Stop ──────────────────────────────────────────────────────────────────
+
+/**
+ * Dispatches a StopEvent for a completed turn. Per threat T-23-01 this
+ * deliberately omits the optional message-bearing field StopEvent declares —
+ * no assistant content or tool-result text can reach a supervisor's log
+ * through this emitter.
+ */
+export async function emitStop(args: {
+  reason: "completed" | "cancelled" | "error" | "blocked";
+  sessionId?: string;
+  turnId?: string;
+  abortOrigin?: AgentAbortOrigin;
+}): Promise<void> {
+  if (!_pi) return;
+  await _pi.emitExtensionEvent({ type: "stop", ...args });
 }
 
 // ─── Git Lifecycle ─────────────────────────────────────────────────────────
