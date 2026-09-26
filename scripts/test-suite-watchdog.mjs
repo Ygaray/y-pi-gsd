@@ -47,6 +47,18 @@ if (sepIdx === -1 || rawArgs.slice(sepIdx + 1).length === 0) {
 const optionArgs = rawArgs.slice(0, sepIdx);
 const commandArgs = rawArgs.slice(sepIdx + 1);
 
+// WR-04: this watchdog unconditionally shells out to a POSIX `ps -eo`. There is no
+// fallback for hosts without `ps` (Windows, some minimal containers) — failing loudly here
+// is safer than folding straight into the generic "inconclusive sample" path (CR-01), which
+// would silently degrade to no stall detection at all instead of a clear "unsupported
+// platform" error at startup.
+if (process.platform === 'win32') {
+  process.stderr.write(
+    'test-suite-watchdog.mjs requires a POSIX ps(1); not supported on win32.\n',
+  );
+  process.exit(2);
+}
+
 function getArg(flag, defaultVal) {
   const idx = optionArgs.indexOf(flag);
   return idx !== -1 && optionArgs[idx + 1] !== undefined ? optionArgs[idx + 1] : defaultVal;

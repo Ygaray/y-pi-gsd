@@ -251,6 +251,12 @@ the suite is run as one long foreground command.
 node scripts/test-suite-watchdog.mjs [options] -- <command> [args...]
 ```
 
+**Platform constraint: POSIX only.** Liveness sampling shells out to `ps -eo pid=,ppid=,cputime=`;
+there is no Windows fallback. Invoking this script on `win32` fails fast (exit 2, clear stderr
+message) instead of silently degrading to no stall detection — `test:unit:native:watched` is not
+currently wired into the Windows CI job, but nothing else in the code prevented a developer from
+trying it there before this guard existed (WR-04).
+
 **Flags:** `--verdict <path>` (verdict JSON output, default `.gsd/watchdog/verdict.json`),
 `--log <path>` (combined stdout+stderr tee, default `.gsd/watchdog/run.log`), `--label <str>`
 (echoed into the verdict), `--poll-ms <ms>` (sampling cadence, default 5000), `--stall-cap-ms <ms>`
