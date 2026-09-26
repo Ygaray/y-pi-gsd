@@ -24,6 +24,7 @@ import { gsdRoot } from "../paths.js";
 import { atomicWriteSync } from "../atomic-write.js";
 import { logWarning } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
+import { notifyDeduped } from "../bootstrap/notify-interceptor.js";
 import {
   _resolveDispatchGuardBasePath,
   shouldRunPlanV2Gate,
@@ -36,6 +37,10 @@ import {
   shouldSkipTerminalMilestoneCloseout,
 } from "./closeout.js";
 import type { IterationContext, LoopState, PhaseResult, PreDispatchData } from "./types.js";
+
+/** NOISE-04: kind identity for the blocked-resume toast — collapses repeated
+ *  re-entries of the auto-loop while still blocked on the same milestone. */
+export const BLOCKED_RESUME_NOTIFICATION_KIND = "blocked-resume";
 
 type BlockerKind = "needs-remediation-dead-end" | "completed-milestone-reopened" | "other";
 
@@ -590,7 +595,10 @@ export async function runPreDispatch(
       // Hard-stop here was causing premature termination when slice dependencies
       // were temporarily unresolvable (e.g. after reassessment added new slices).
       await deps.pauseAuto(ctx, pi);
-      ctx.ui.notify(blockedResumeMessage, "warning");
+      notifyDeduped(ctx, blockedResumeMessage, "warning", {
+        kind: BLOCKED_RESUME_NOTIFICATION_KIND,
+        scope: s.currentMilestoneId ?? "",
+      });
       deps.sendDesktopNotification("GSD", blockedResumeMessage, "warning", "attention", basename(s.originalBasePath || s.basePath));
       deps.logCmuxEvent(prefs, blockedResumeMessage, "warning");
     } else {
@@ -703,7 +711,10 @@ export async function runPreDispatch(
       );
     }
     await deps.pauseAuto(ctx, pi);
-    ctx.ui.notify(blockedResumeMessage, "warning");
+    notifyDeduped(ctx, blockedResumeMessage, "warning", {
+      kind: BLOCKED_RESUME_NOTIFICATION_KIND,
+      scope: mid,
+    });
     deps.sendDesktopNotification("GSD", blockedResumeMessage, "warning", "attention", basename(s.originalBasePath || s.basePath));
     deps.logCmuxEvent(prefs, blockedResumeMessage, "warning");
     debugLog("autoLoop", { phase: "exit", reason: "blocked" });

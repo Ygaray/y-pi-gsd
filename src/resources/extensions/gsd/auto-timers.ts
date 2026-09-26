@@ -27,6 +27,7 @@ import { resolveAgentEndCancelled } from "./auto/resolve.js";
 import type { PauseAutoOptions } from "./auto/loop-deps.js";
 import type { AutoSession } from "./auto/session.js";
 import { logWarning, logError } from "./workflow-logger.js";
+import { notifyDeduped } from "./bootstrap/notify-interceptor.js";
 
 export interface SupervisionContext {
   s: AutoSession;
@@ -44,6 +45,25 @@ export interface SupervisionContext {
 
 export const PROJECT_RESEARCH_SOFT_TIMEOUT_MINUTES = 3;
 export const PROJECT_RESEARCH_HARD_TIMEOUT_MINUTES = 5;
+
+/** NOISE-04: kind identities for the three idle-watchdog notice sites — each is
+ *  distinct so one never suppresses another on the same unit (they fire from
+ *  different branches of the same 15s interval body). */
+export const IDLE_STALLED_TOOL_NOTIFICATION_KIND = "idle-stalled-tool";
+export const IDLE_NO_PROGRESS_NOTIFICATION_KIND = "idle-no-progress";
+export const IDLE_WATCHDOG_ERROR_NOTIFICATION_KIND = "idle-watchdog-error";
+
+/**
+ * NOISE-04: per-unit notice scope — mirrors auto-unit-closeout.ts:150's
+ * `${unitType}/${unitId}` convention for notifyUnitCompletion's scope, so both
+ * per-unit dedup conventions in the codebase stay identical. MUST include
+ * unitId — a scope of just the notice name would silently suppress a second,
+ * genuinely different unit going idle inside the same window (Pitfall 4,
+ * threat T-24-10).
+ */
+export function buildUnitNoticeScope(unitType: string, unitId: string): string {
+  return `${unitType}/${unitId}`;
+}
 
 export function resolveUnitSupervisionTimeouts(
   unitType: string,
@@ -248,9 +268,11 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
         // below do not override the stall verdict (#2527).
         stalledToolDetected = true;
         clearInFlightTools();
-        ctx.ui.notify(
+        notifyDeduped(
+          ctx,
           `Stalled tool detected: a tool has been in-flight for ${Math.round(toolAgeMs / 60000)}min (budget ${Math.round(stalledToolTimeoutMs / 60000)}min). Treating as hung — attempting idle recovery.`,
           "warning",
+          { kind: IDLE_STALLED_TOOL_NOTIFICATION_KIND, scope: buildUnitNoticeScope(unitType, unitId) },
         );
       }
 
@@ -285,9 +307,11 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
       writeUnitRuntimeRecord(s.basePath, unitType, unitId, s.currentUnit.startedAt, {
         phase: "paused",
       });
-      ctx.ui.notify(
+      notifyDeduped(
+        ctx,
         `Unit ${unitType} ${unitId} made no meaningful progress for ${supervisor.idle_timeout_minutes}min. Pausing auto-mode.`,
         "warning",
+        { kind: IDLE_NO_PROGRESS_NOTIFICATION_KIND, scope: buildUnitNoticeScope(unitType, unitId) },
       );
       await pauseAuto(ctx, pi, undefined, { expectedCurrentUnit });
     } catch (err) {
@@ -296,7 +320,12 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
       // Unblock any pending unit promise so the auto-loop is not orphaned.
       resolveAgentEndCancelled({ message: `Idle watchdog error: ${message}`, category: "idle", isTransient: true });
       try {
-        ctx.ui.notify(`Idle watchdog error: ${message}`, "warning");
+        notifyDeduped(
+          ctx,
+          `Idle watchdog error: ${message}`,
+          "warning",
+          { kind: IDLE_WATCHDOG_ERROR_NOTIFICATION_KIND, scope: buildUnitNoticeScope(unitType, unitId) },
+        );
       } catch (err) { /* best effort */
         logWarning("timer", `notification failed: ${err instanceof Error ? err.message : String(err)}`);
       }
