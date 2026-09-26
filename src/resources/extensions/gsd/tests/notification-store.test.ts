@@ -18,6 +18,8 @@ import {
   unsuppressPersistence,
   onNotificationStoreChange,
   _resetNotificationStore,
+  DEDUP_WINDOW_MS,
+  _dedupKeyCount,
 } from "../notification-store.js";
 import { resolveNotificationStoreBasePath } from "../bootstrap/register-hooks.js";
 
@@ -376,5 +378,84 @@ describe("notification-store", () => {
     assert.equal(calls, 3, "clear should emit one change");
 
     unsubscribe();
+  });
+
+  // ─── appendNotification boolean contract (24-01 Task 2) ────────────────
+
+  test("appendNotification returns true on a real append", () => {
+    initNotificationStore(tmp);
+    assert.equal(appendNotification("fresh", "info"), true);
+  });
+
+  test("appendNotification returns false on dedup collapse", () => {
+    initNotificationStore(tmp);
+    assert.equal(appendNotification("dup-check", "info"), true);
+    assert.equal(appendNotification("dup-check", "info"), false);
+  });
+
+  test("appendNotification returns false when persistence is suppressed, true again after unsuppress", () => {
+    initNotificationStore(tmp);
+    suppressPersistence();
+    assert.equal(appendNotification("while-suppressed", "info"), false);
+    unsuppressPersistence();
+    assert.equal(appendNotification("while-suppressed", "info"), true);
+  });
+
+  test("appendNotification returns false with no base path", () => {
+    _resetNotificationStore();
+    assert.equal(appendNotification("no-base-path", "info"), false);
+  });
+
+  test("appendNotification boundary: exactly 30000ms elapsed returns true, 29999ms returns false", (t) => {
+    initNotificationStore(tmp);
+    let now = 1_000;
+    t.mock.method(Date, "now", () => now);
+
+    assert.equal(appendNotification("boundary-a", "info"), true);
+    now += DEDUP_WINDOW_MS;
+    assert.equal(appendNotification("boundary-a", "info"), true, "exactly 30000ms elapsed must return true (strict <)");
+
+    _resetNotificationStore();
+    initNotificationStore(tmp);
+    now = 1_000;
+    assert.equal(appendNotification("boundary-b", "info"), true);
+    now += DEDUP_WINDOW_MS - 1;
+    assert.equal(appendNotification("boundary-b", "info"), false, "29999ms elapsed must still return false");
+  });
+
+  test("kind:scope return values: same kind+scope dedups, different scope does not", () => {
+    initNotificationStore(tmp);
+    assert.equal(appendNotification("msg-a", "info", "notify", { kind: "k", scope: "s1" }), true);
+    assert.equal(appendNotification("msg-a-rephrased", "info", "notify", { kind: "k", scope: "s1" }), false);
+    assert.equal(appendNotification("msg-a", "info", "notify", { kind: "k", scope: "s2" }), true);
+  });
+
+  test("DEDUP_WINDOW_MS is importable and equals 30000", () => {
+    assert.equal(DEDUP_WINDOW_MS, 30000);
+  });
+
+  test("bounded dedup map ceiling (T-24-01): stays capped, evicts oldest-first, newest key still dedups", (t) => {
+    initNotificationStore(tmp);
+    const DEDUP_MAX_ENTRIES_REFERENCE = 2000;
+    t.mock.method(Date, "now", () => 1_000);
+
+    const overCeiling = DEDUP_MAX_ENTRIES_REFERENCE + 50;
+    for (let i = 0; i < overCeiling; i++) {
+      appendNotification(`msg-${i}`, "info", "notify", { kind: "burst", scope: `s-${i}` });
+    }
+
+    assert.ok(
+      _dedupKeyCount() <= DEDUP_MAX_ENTRIES_REFERENCE,
+      `dedup map must stay at or below the ceiling, got ${_dedupKeyCount()}`,
+    );
+
+    // Eviction must drop OLDEST keys, never the newest — the most recently
+    // appended key must still dedup a fresh duplicate.
+    const mostRecentScope = `s-${overCeiling - 1}`;
+    assert.equal(
+      appendNotification(`msg-${overCeiling - 1}`, "info", "notify", { kind: "burst", scope: mostRecentScope }),
+      false,
+      "the most recently appended key must still be suppressed on repeat",
+    );
   });
 });
