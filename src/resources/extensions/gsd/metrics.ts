@@ -166,10 +166,22 @@ export function snapshotUnitMetrics(
     causedBy?: string;
   },
 ): UnitMetrics | null {
-  if (!ledger) return null;
+  if (!ledger) {
+    logWarning(
+      "engine",
+      `snapshotUnitMetrics: metrics ledger was not initialized for this snapshot (unitType=${unitType}, unitId=${unitId}) — unit dropped`,
+    );
+    return null;
+  }
 
   const entries = ctx.sessionManager.getEntries();
-  if (!entries || entries.length === 0) return null;
+  if (!entries || entries.length === 0) {
+    logWarning(
+      "engine",
+      `snapshotUnitMetrics: session produced no entries to snapshot (unitType=${unitType}, unitId=${unitId}) — unit dropped`,
+    );
+    return null;
+  }
 
   const tokens: TokenCounts = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   let cost = 0;
@@ -295,6 +307,16 @@ export function snapshotUnitMetrics(
  */
 export function getLedger(): MetricsLedger | null {
   return ledger;
+}
+
+/**
+ * Get the base path the current in-memory singleton ledger was loaded from.
+ * Returns "" if no ledger has been initialized (fresh module or after resetMetrics()).
+ *
+ * @deprecated TODO(C-future): remove module singleton. Use scoped workspace state instead.
+ */
+export function getMetricsBasePath(): string {
+  return basePath;
 }
 
 // ─── Scope-aware API (canonical) ─────────────────────────────────────────────
