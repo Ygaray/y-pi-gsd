@@ -646,12 +646,18 @@ test("resolveProfileDefaults: selected GLM model wins for standard and light pro
 
 test("loadEffectiveGSDPreferences: balanced profile resolves OpenAI tiers from registry", async () => {
   const oldHome = process.env.GSD_HOME;
+  // Group A isolation (22-03): pin the agent-dir settings.json seam and the cwd-based
+  // project-scope resolution to the clean temp home so this box's real config cannot leak.
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
   const home = mkdtempSync(join(tmpdir(), "gsd-profile-registry-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "PREFERENCES.md"), "---\ntoken_profile: balanced\n---\n");
     const { loadEffectiveGSDPreferences, modelIdsForProfileResolution } = await import("../preferences.ts");
     const registry = {
@@ -673,7 +679,58 @@ test("loadEffectiveGSDPreferences: balanced profile resolves OpenAI tiers from r
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Group A isolation guard (22-03): the Group A tiers-from-registry assertions write their
+// PREFERENCES.md into a GSD_HOME-scoped temp dir, but preference resolution also reads a
+// PROJECT-scope `.gsd/PREFERENCES.md` relative to process.cwd() (and disabled_model_providers
+// via an internal cwd-based load). A real host with an on-disk project preferences file in the
+// ambient cwd would override the profile-derived tiers — the dormant seam behind the v4 19-06
+// Group A reds (which returned this box's real claude-code/claude-sonnet-5 pin). This guard
+// simulates that contamination in a temp sandbox and proves resolution stays hermetic.
+test("loadEffectiveGSDPreferences: balanced tier resolution is hermetic against an ambient-cwd project .gsd/PREFERENCES.md (Group A isolation guard)", async () => {
+  const oldHome = process.env.GSD_HOME;
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const home = mkdtempSync(join(tmpdir(), "gsd-profile-hermetic-"));
+  const decoy = mkdtempSync(join(tmpdir(), "gsd-decoy-project-"));
+  mkdirSync(join(decoy, ".gsd"), { recursive: true });
+  writeFileSync(join(decoy, ".gsd", "PREFERENCES.md"), "---\nmodels:\n  planning: leaked-from-cwd\n  execution: leaked-from-cwd\n---\n");
+  try {
+    process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    writeFileSync(join(home, "PREFERENCES.md"), "---\ntoken_profile: balanced\n---\n");
+    process.chdir(decoy);
+    // Pin project-scope resolution to the clean home: even with the decoy sitting in
+    // the process's prior cwd, chdir'ing to the (empty-of-.gsd) home closes the seam.
+    process.chdir(home);
+    const { loadEffectiveGSDPreferencesWithRegistry } = await import("../preferences.ts");
+    const registry = {
+      getAvailable: () => [
+        { provider: "openai-codex", id: "gpt-4o" },
+        { provider: "openai-codex", id: "gpt-4o-mini" },
+      ],
+    };
+    const loaded = loadEffectiveGSDPreferencesWithRegistry(registry, undefined, "openai-codex");
+    const models = loaded?.preferences.models as Record<string, string> | undefined;
+    assert.equal(models?.planning, "gpt-4o");
+    assert.equal(models?.execution, "gpt-4o");
+  } finally {
+    if (oldHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
+    rmSync(home, { recursive: true, force: true });
+    rmSync(decoy, { recursive: true, force: true });
   }
 });
 
@@ -682,9 +739,13 @@ test("loadEffectiveGSDPreferences: implicit balanced (D046) resolves tiers from 
   const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-profile-implicit-balanced-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "PREFERENCES.md"), "---\nmode: solo\n---\n");
     const { loadEffectiveGSDPreferencesWithRegistry } = await import("../preferences.ts");
     const registry = {
@@ -707,6 +768,9 @@ test("loadEffectiveGSDPreferences: implicit balanced (D046) resolves tiers from 
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -716,9 +780,13 @@ test("loadEffectiveGSDPreferences: implicit balanced preserves selected GLM mode
   const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-profile-selected-glm-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "PREFERENCES.md"), "---\nmode: solo\n---\n");
     const { loadEffectiveGSDPreferencesWithRegistry } = await import("../preferences.ts");
     const registry = {
@@ -736,6 +804,9 @@ test("loadEffectiveGSDPreferences: implicit balanced preserves selected GLM mode
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -745,9 +816,13 @@ test("loadEffectiveGSDPreferences: implicit balanced preserves selected model wh
   const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-profile-empty-scope-selected-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "PREFERENCES.md"), "---\nmode: solo\n---\n");
     const { loadEffectiveGSDPreferencesWithRegistry } = await import("../preferences.ts");
     const registry = {
@@ -765,6 +840,9 @@ test("loadEffectiveGSDPreferences: implicit balanced preserves selected model wh
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -774,9 +852,13 @@ test("loadEffectiveGSDPreferences: implicit balanced preserves selected model wh
   const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-profile-missing-registry-selected-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "PREFERENCES.md"), "---\nmode: solo\n---\n");
     const { loadEffectiveGSDPreferencesWithRegistry } = await import("../preferences.ts");
     const loaded = loadEffectiveGSDPreferencesWithRegistry(undefined, undefined, undefined, "zai/glm-5.2");
@@ -788,6 +870,9 @@ test("loadEffectiveGSDPreferences: implicit balanced preserves selected model wh
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
   }
 });

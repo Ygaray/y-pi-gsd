@@ -19,9 +19,18 @@ import { KNOWN_UNIT_LABELS } from "../preferences-types.ts";
 
 function withModelPreferences<T>(fn: () => T): T {
   const oldHome = process.env.GSD_HOME;
+  // Group A isolation (22-03): resolution also consults the agent-dir settings.json
+  // (getAgentDir(), via GSD_CODING_AGENT_DIR) and a project-scope .gsd/PREFERENCES.md
+  // relative to process.cwd(). Pin BOTH to the clean temp home alongside GSD_HOME so
+  // this box's real ~/.gsd/agent/settings.json pin and any ambient-cwd project prefs
+  // cannot bleed past the models this helper writes.
+  const oldAgentDir = process.env.GSD_CODING_AGENT_DIR;
+  const oldCwd = process.cwd();
   const home = mkdtempSync(join(tmpdir(), "gsd-model-map-"));
   try {
     process.env.GSD_HOME = home;
+    process.env.GSD_CODING_AGENT_DIR = home;
+    process.chdir(home);
     writeFileSync(join(home, "preferences.md"), [
       "---",
       "models:",
@@ -41,6 +50,9 @@ function withModelPreferences<T>(fn: () => T): T {
   } finally {
     if (oldHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = oldHome;
+    if (oldAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
+    else process.env.GSD_CODING_AGENT_DIR = oldAgentDir;
+    process.chdir(oldCwd);
     rmSync(home, { recursive: true, force: true });
   }
 }
@@ -50,6 +62,35 @@ test("discuss unit types route to the discuss model bucket", () => {
     assert.equal(resolveModelWithFallbacksForUnit("discuss-milestone")?.primary, "discuss-model");
     assert.equal(resolveModelWithFallbacksForUnit("discuss-slice")?.primary, "discuss-model");
   });
+});
+
+// Group A isolation guard (22-03): the six Group A assertions inject their own model
+// registry / write their own preferences into a GSD_HOME-scoped temp dir, but preference
+// resolution also reads a PROJECT-scope `.gsd/PREFERENCES.md` relative to process.cwd().
+// A real host with an on-disk project preferences file in the ambient cwd would leak its
+// `models` block past the injected values (this is the dormant seam behind the v4 19-06
+// Group A reds, which returned this box's real claude-code/claude-sonnet-5 pin). This guard
+// simulates that contamination in a temp sandbox and proves resolution stays hermetic.
+test("discuss unit resolution is hermetic against an ambient-cwd project .gsd/PREFERENCES.md (Group A isolation guard)", () => {
+  const oldCwd = process.cwd();
+  const decoy = mkdtempSync(join(tmpdir(), "gsd-decoy-project-"));
+  mkdirSync(join(decoy, ".gsd"), { recursive: true });
+  writeFileSync(join(decoy, ".gsd", "PREFERENCES.md"), [
+    "---",
+    "models:",
+    "  discuss: leaked-from-cwd",
+    "---",
+    "",
+  ].join("\n"));
+  try {
+    process.chdir(decoy);
+    withModelPreferences(() => {
+      assert.equal(resolveModelWithFallbacksForUnit("discuss-milestone")?.primary, "discuss-model");
+    });
+  } finally {
+    process.chdir(oldCwd);
+    rmSync(decoy, { recursive: true, force: true });
+  }
 });
 
 test("validation unit types route to the validation model bucket", () => {
