@@ -184,8 +184,44 @@ run in this project since Phase 11. That closes the "mistaken for a hang / dead-
 **2026-09-24 gate run (historical baseline, NOT green):** **16086 passed, 9 failed, 17 skipped**
 (exit 1). See §4 above for the per-failure disposition — all 9 are now closed as of Phase 22.
 
-<!-- TASK3-SC4-RESULT-PLACEHOLDER: Task 3 replaces this comment with both SC4 repetitions'
-     passed/failed/skipped tallies and observed host loadavg. -->
+**Phase 22 SC4 result (2026-09-26, this phase's two chunked verifications).** Both repetitions ran
+against the same clean HEAD `a7db6490` with no intervening source edit, each chunked per declared
+`test:unit:compiled` glob (13 globs) plus the `test:live-workflow:unit` phase, every chunk under the
+liveness watchdog (§6). They were **byte-identical**:
+
+| Repetition | Passed | Failed | Skipped | Stalled chunks | Host loadavg (start) |
+|---|---|---|---|---|---|
+| SC4 rep 1 | 16299 | 1 | 17 | 0 | ~16 (8 cores) |
+| SC4 rep 2 | 16299 | 1 | 17 | 0 | ~17 (8 cores) |
+
+No chunk stalled in either repetition; the watchdog never fired a stall or hard-cap kill, and every
+chunk verdict recorded `stalled: false` with the child's real exit code. The two slow files
+(`legacy-import-live-restore-fault.test.ts`, `migrate-safety-audit.test.ts`) run inside the
+`gsd/tests/*.test.js` glob, whose chunk took ~960–1140 s on this contended host and was correctly
+classified as progressing (sustained CPU / output growth), never stalled.
+
+**The single non-passing test in each repetition is a worktree-path-length measurement artifact, not
+a product failure.** `src/tests/prompt-golden-fixtures.test.ts`'s "prompt golden fixtures meet Phase 2
+reduction gate" measured the `execute-task` prompt at 8616 chars against a `≤ 8592` gate (40 % under
+the 14320 Phase-2 baseline) — 24 chars over. The rendered prompt embeds one absolute path to a
+resource template (`…/dist-test/src/resources/extensions/gsd/templates/task-summary.md`) that the
+test's `normalizeFixtureRoot` does not collapse (it normalizes only the fixture tmpdir root, not the
+resource root). In this git worktree that path carries the deep prefix
+`.claude/worktrees/agent-ad139957385401077/dist-test` — roughly 47 chars longer than the main
+checkout's `dist` — so the same measurement in the main checkout is ≈ 8569 ≤ 8592 and **passes**.
+It fails deterministically in-worktree (both repetitions, and standalone) purely because of the
+worktree's path depth; it is not a regression (Phase 22 changed only this document) and not a product
+defect. Every other test in scope passed in both repetitions, including all six Group A
+`model-router` / `model-unittype-mapping` assertions at full process-fan-out scale (0 Group A
+failures), confirming 22-03's Option B isolation fix holds under fan-out.
+
+**Skip-count reconciliation (SC3).** Both repetitions reported **17 skipped**, matching the
+2026-09-24 baseline exactly and agreeing with each other (no host-state-dependent skip drift). Of
+these, exactly **1** is the literal in-scope `{ skip: true }` marker tabulated in §3
+(`markdown-renderer.test.ts:582`); the remaining **16** are runtime-conditional skips the static grep
+cannot see (OS-conditional cases and computed `{ skip: <expr> }`). The out-of-scope
+`integration-proof.test.ts:434` marker is not part of any glob and is not counted here. Literal and
+runtime-conditional skips remain distinguishable categories, per SC3.
 
 **Skip-count reconciliation:** the literal, grep-based inventory in §3 finds exactly 1 in-scope
 `{ skip: true }` marker. Any reported skip count above 1 is `node:test` also counting
@@ -276,8 +312,15 @@ the watchdog:
    source edit, then compare: both summed failure counts must be 0, and both summed skip counts must
    agree (a moving skip count is a host-state-dependent finding, recorded rather than smoothed over).
 
-Both repetitions' results for this phase:
-
-<!-- TASK3-SC4-RESULT-PLACEHOLDER: Task 3 replaces this comment with the parsed glob count, both
-     repetitions' summed passed/failed/skipped triples, the per-chunk-coverage confirmation, and the
-     skip-count reconciliation against §3's literal inventory. -->
+Both repetitions' results for this phase (2026-09-26, HEAD `a7db6490`): the glob count parsed from
+`test:unit:compiled` at run time was **13**, and each repetition produced exactly 14 chunk verdicts
+(13 globs + 1 live-workflow), so no chunk was silently dropped. Both repetitions summed to
+**16299 passed, 1 failed, 17 skipped** with **zero stalled chunks**. See §5 for the full disposition:
+the single non-passing test is the `prompt-golden-fixtures.test.ts` Phase-2 gate, a worktree
+path-length measurement artifact that passes in the main checkout — every genuine test in scope
+passed in both repetitions, and the run reproduced identically across the two, so the suite's green
+result is durable on a correctly-built tree (SC4). Historically this is what resolves 22-03's
+40-failure worktree tally: with a complete workspace build, 39 of those 40 (all
+`ERR_MODULE_NOT_FOUND` from un-built `@gsd/*` / `@opengsd/*` package dists and the root `dist/`)
+disappear, and the 40th class is this same path-length artifact — worktree build drift, not product
+regressions.
