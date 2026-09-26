@@ -6,6 +6,7 @@
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -14,6 +15,8 @@ import {
   UNIT_COMPLETE_NOTIFICATION_KIND,
   buildUnitCompletionNotice,
   notifyUnitCompletion,
+  closeoutAutoUnit,
+  closeoutUnit,
   type UnitCompletionNotificationDeps,
 } from "../auto-unit-closeout.ts";
 import {
@@ -21,6 +24,25 @@ import {
   readNotifications,
   _resetNotificationStore,
 } from "../notification-store.ts";
+import { resetMetrics } from "../metrics.ts";
+
+function makeCtx(entries: unknown[] = []) {
+  return {
+    sessionManager: {
+      getEntries: () => entries,
+    },
+    model: { id: "test-model" },
+  } as any;
+}
+
+function createTempGitRepo(t: TestContext): string {
+  const dir = mkdtempSync(join(tmpdir(), "closeout-notify-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  execSync("git init", { cwd: dir });
+  execSync("git config user.email test@test.com", { cwd: dir });
+  execSync("git config user.name Test", { cwd: dir });
+  return dir;
+}
 
 function makeMockDeps(overrides: Partial<UnitCompletionNotificationDeps> = {}): UnitCompletionNotificationDeps & {
   appendCalls: Array<{ message: string; severity: string; source: string; meta: { kind: string; scope: string } }>;
@@ -103,7 +125,7 @@ test("notifyUnitCompletion: an injected append throw resolves without rejecting,
 
 // ─── Task 1: notifyUnitCompletion against the REAL store (dedup proof) ────
 
-test("notifyUnitCompletion: two DIFFERENT unit ids back to back with no clock advance yield TWO store entries, in call order", async (t: TestContext) => {
+test("notifyUnitCompletion: two DIFFERENT unit ids back to back with no clock advance yield TWO store entries, in call order", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "notify-store-test-"));
   t.after(() => {
     rmSync(dir, { recursive: true, force: true });
@@ -122,7 +144,7 @@ test("notifyUnitCompletion: two DIFFERENT unit ids back to back with no clock ad
   assert.equal(inCallOrder[1].scope, "execute-task/M001/S01/T02");
 });
 
-test("notifyUnitCompletion: two IDENTICAL unit closeouts back to back with no clock advance yield ONE store entry (pre-existing dedup preserved)", async (t: TestContext) => {
+test("notifyUnitCompletion: two IDENTICAL unit closeouts back to back with no clock advance yield ONE store entry (pre-existing dedup preserved)", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "notify-store-test-"));
   t.after(() => {
     rmSync(dir, { recursive: true, force: true });
@@ -136,4 +158,127 @@ test("notifyUnitCompletion: two IDENTICAL unit closeouts back to back with no cl
   const entries = readNotifications(dir, { kind: UNIT_COMPLETE_NOTIFICATION_KIND });
   assert.equal(entries.length, 1);
   assert.equal(entries[0].scope, "execute-task/M001/S01/T01");
+});
+
+// ─── Task 2: life-of-run behaviour through the real closeoutAutoUnit ──────
+
+test("closeoutAutoUnit: five sequential closeouts produce FIVE ordered unit-complete entries (inverse of the real run's 37-units/1-notice outcome)", async (t) => {
+  const dir = createTempGitRepo(t);
+  t.after(() => _resetNotificationStore());
+  initNotificationStore(dir);
+
+  const ids = ["T01", "T02", "T03", "T04", "T05"];
+  for (const id of ids) {
+    await closeoutAutoUnit({
+      ctx: makeCtx(),
+      basePath: dir,
+      unitType: "execute-task",
+      unitId: `M001/S01/${id}`,
+      startedAt: Date.now(),
+    });
+  }
+
+  const entries = readNotifications(dir, { kind: UNIT_COMPLETE_NOTIFICATION_KIND });
+  assert.equal(entries.length, 5);
+  const scopesInCallOrder = [...entries].reverse().map((e) => e.scope);
+  assert.deepEqual(
+    scopesInCallOrder,
+    ids.map((id) => `execute-task/M001/S01/${id}`),
+  );
+});
+
+test("closeoutAutoUnit: mixed unit types (research-slice then execute-task) for the same slice id produce two entries — differing unitType alone avoids collapse", async (t) => {
+  const dir = createTempGitRepo(t);
+  t.after(() => _resetNotificationStore());
+  initNotificationStore(dir);
+
+  await closeoutAutoUnit({
+    ctx: makeCtx(),
+    basePath: dir,
+    unitType: "research-slice",
+    unitId: "M001/S01",
+    startedAt: Date.now(),
+  });
+  await closeoutAutoUnit({
+    ctx: makeCtx(),
+    basePath: dir,
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    startedAt: Date.now(),
+  });
+
+  const entries = readNotifications(dir, { kind: UNIT_COMPLETE_NOTIFICATION_KIND });
+  assert.equal(entries.length, 2);
+});
+
+test("closeoutAutoUnit: a dropped metrics snapshot (uninitialized ledger) must not also silence the notification", async (t) => {
+  const dir = createTempGitRepo(t);
+  t.after(() => {
+    _resetNotificationStore();
+    resetMetrics();
+  });
+  initNotificationStore(dir);
+  resetMetrics(); // deliberately leave the metrics singleton uninitialized
+
+  await closeoutAutoUnit({
+    ctx: makeCtx(),
+    basePath: dir,
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    startedAt: Date.now(),
+  });
+
+  const entries = readNotifications(dir, { kind: UNIT_COMPLETE_NOTIFICATION_KIND });
+  assert.equal(entries.length, 1);
+});
+
+test("closeoutAutoUnit: an empty-string unitId still produces exactly one entry with a non-empty message", async (t) => {
+  const dir = createTempGitRepo(t);
+  t.after(() => _resetNotificationStore());
+  initNotificationStore(dir);
+
+  await closeoutAutoUnit({
+    ctx: makeCtx(),
+    basePath: dir,
+    unitType: "execute-task",
+    unitId: "",
+    startedAt: Date.now(),
+  });
+
+  const entries = readNotifications(dir, { kind: UNIT_COMPLETE_NOTIFICATION_KIND });
+  assert.equal(entries.length, 1);
+  assert.ok(entries[0].message.length > 0);
+  assert.equal(entries[0].scope, "execute-task/");
+});
+
+test("closeoutAutoUnit: notification store never initialized (appendNotification early-returns) still returns the normal AutoUnitCloseoutResult shape and does not reject", async (t) => {
+  const dir = createTempGitRepo(t);
+  // Deliberately do NOT call initNotificationStore — appendNotification's
+  // `if (!_basePath) return;` early-return is a real no-op-notification path
+  // through the live code, proving the notification path is non-fatal
+  // without needing a second injectable-throw mechanism at this call site.
+  t.after(() => _resetNotificationStore());
+  _resetNotificationStore();
+
+  const result = await closeoutAutoUnit({
+    ctx: makeCtx(),
+    basePath: dir,
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    startedAt: Date.now(),
+  });
+
+  assert.equal(result.gitTransactionRecorded, false);
+  assert.equal(typeof result.activityFile === "string" || result.activityFile === undefined, true);
+});
+
+test("closeoutUnit (compatibility wrapper): produces exactly ONE unit-complete entry, not two — no double-notify", async (t) => {
+  const dir = createTempGitRepo(t);
+  t.after(() => _resetNotificationStore());
+  initNotificationStore(dir);
+
+  await closeoutUnit(makeCtx(), dir, "execute-task", "M001/S01/T01", Date.now());
+
+  const entries = readNotifications(dir, { kind: UNIT_COMPLETE_NOTIFICATION_KIND });
+  assert.equal(entries.length, 1);
 });
