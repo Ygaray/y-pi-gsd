@@ -78,12 +78,17 @@ export function notifyDeduped(
   meta: NotificationMeta,
 ): boolean {
   const persisted = appendNotification(message, severity, "notify", meta);
-  if (!persisted) return false;
+  // A falsy `persisted` alone is ambiguous — mirror the plain interceptor's
+  // isPersistenceSuppressed() distinction above: a genuine dedup collapse
+  // (not suppressed) short-circuits here, but a nested call inside an
+  // administrative suppressPersistence() block is NOT a duplicate and must
+  // still forward the toast.
+  if (!persisted && !isPersistenceSuppressed()) return false;
   suppressPersistence();
   try {
     ctx.ui.notify(message, severity);
   } finally {
     unsuppressPersistence();
   }
-  return true;
+  return persisted;
 }
