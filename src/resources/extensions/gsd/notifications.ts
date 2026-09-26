@@ -182,19 +182,17 @@ export function shouldSendDesktopNotification(
 }
 
 export function shouldPlayNotificationBell(
-  kind: NotificationBellKind,
+  // `kind` is retained in the signature for symmetry with
+  // shouldSendDesktopNotification and to leave room for per-kind bell
+  // preferences later; today every NotificationBellKind resolves to the
+  // same on_attention flag (IN-02), so it is intentionally unused here.
+  _kind: NotificationBellKind,
   preferences: NotificationPreferences | undefined = loadEffectiveGSDPreferences()?.preferences.notifications,
 ): boolean {
   if (preferences?.enabled === false) return false;
   if (preferences?.local_bell !== true) return false;
 
-  switch (kind) {
-    case "question":
-    case "stop":
-    case "attention":
-    default:
-      return preferences?.on_attention ?? true;
-  }
+  return preferences?.on_attention ?? true;
 }
 
 /**
