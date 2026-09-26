@@ -16,6 +16,9 @@ import {
   launchDesktopNotification,
   playNotificationBell,
   shouldPlayNotificationBell,
+  sendDesktopNotification,
+  remoteNotificationDispatcher,
+  _resetNotificationRateLimits,
 } from "../notifications.js";
 import type { NotificationPreferences } from "../types.js";
 
@@ -51,6 +54,7 @@ test("shouldPlayNotificationBell requires explicit local_bell opt-in", () => {
 });
 
 test("playNotificationBell writes a terminal bell when enabled", () => {
+  _resetNotificationRateLimits();
   let output = "";
   const stream = { write: (chunk: string) => { output += chunk; } };
 
@@ -59,6 +63,7 @@ test("playNotificationBell writes a terminal bell when enabled", () => {
 });
 
 test("playNotificationBell is silent when disabled", () => {
+  _resetNotificationRateLimits();
   let output = "";
   const stream = { write: (chunk: string) => { output += chunk; } };
 
@@ -67,6 +72,7 @@ test("playNotificationBell is silent when disabled", () => {
 });
 
 test("playQuestionBell writes a terminal bell when local bell is enabled", async () => {
+  _resetNotificationRateLimits();
   let output = "";
   const stream = { write: (chunk: string) => { output += chunk; } };
 
@@ -76,6 +82,7 @@ test("playQuestionBell writes a terminal bell when local bell is enabled", async
 });
 
 test("playQuestionBell is silent when local bell is disabled", async () => {
+  _resetNotificationRateLimits();
   let output = "";
   const stream = { write: (chunk: string) => { output += chunk; } };
 
@@ -84,7 +91,20 @@ test("playQuestionBell is silent when local bell is disabled", async () => {
   assert.equal(output, "");
 });
 
+test("playNotificationBell throttles a same-kind repeat inside the window (NOISE-02)", () => {
+  _resetNotificationRateLimits();
+  let output = "";
+  const stream = { write: (chunk: string) => { output += chunk; } };
+  const prefs = { enabled: true, local_bell: true };
+
+  assert.equal(playNotificationBell("stop", prefs, stream), true, "first call rings and returns true");
+  output = "";
+  assert.equal(playNotificationBell("stop", prefs, stream), false, "second same-kind call is throttled");
+  assert.equal(output, "", "a throttled bell call writes nothing to the stream");
+});
+
 test("stopAuto plays local bell for auto-mode stop notifications", async () => {
+  _resetNotificationRateLimits();
   const base = mkdtempSync(join(tmpdir(), "gsd-stop-bell-"));
   const previousCwd = process.cwd();
   const previousStderrWrite = process.stderr.write;

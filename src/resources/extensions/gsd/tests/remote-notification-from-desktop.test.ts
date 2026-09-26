@@ -20,9 +20,11 @@ import assert from "node:assert/strict";
 import {
   sendDesktopNotification,
   remoteNotificationDispatcher,
+  _resetNotificationRateLimits,
 } from "../notifications.js";
 
 test("sendDesktopNotification calls sendRemoteNotification with title and message", async (t) => {
+  _resetNotificationRateLimits();
   const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
 
   sendDesktopNotification("Test Title", "Test Message");
@@ -32,6 +34,7 @@ test("sendDesktopNotification calls sendRemoteNotification with title and messag
 });
 
 test("sendDesktopNotification does not await the remote notification", async (t) => {
+  _resetNotificationRateLimits();
   const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
 
   const result = sendDesktopNotification("Async Title", "Async Message");
@@ -41,6 +44,7 @@ test("sendDesktopNotification does not await the remote notification", async (t)
 });
 
 test("sendDesktopNotification fires remote notification even when desktop notifications are disabled", async (t) => {
+  _resetNotificationRateLimits();
   const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
 
   sendDesktopNotification(
@@ -54,4 +58,18 @@ test("sendDesktopNotification fires remote notification even when desktop notifi
 
   assert.equal(sendMock.mock.callCount(), 1);
   assert.deepEqual(sendMock.mock.calls[0].arguments, ["Remote Title", "Remote Message"]);
+});
+
+test("sendDesktopNotification throttles a same-kind repeat inside the window (NOISE-02)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("First", "First Message");
+  sendDesktopNotification("Second", "Second Message");
+
+  assert.equal(
+    sendMock.mock.callCount(),
+    1,
+    "a repeated same-kind desktop notification must not fan out to the remote dispatcher",
+  );
 });

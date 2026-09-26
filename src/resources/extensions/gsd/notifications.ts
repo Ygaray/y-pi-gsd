@@ -7,6 +7,7 @@ import { delimiter, resolve } from "node:path";
 import type { NotificationPreferences } from "./types.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { sendRemoteNotification as _sendRemoteNotification } from "../remote-questions/notify.js";
+import { DEDUP_WINDOW_MS } from "./notification-store.js";
 
 /** Swappable dispatcher for remote notifications — exported so tests can mock it. */
 export const remoteNotificationDispatcher = {
@@ -30,6 +31,61 @@ interface BellStream {
 const executablePathCache = new Map<string, string | null>();
 
 /**
+ * Channel-namespaced throttle state, keyed `${channel}:${normalizedKind}`.
+ * Shares `DEDUP_WINDOW_MS` with the notification store's own dedup map
+ * (D-01: one window constant for the whole phase) but keeps its own state —
+ * mixing this channel's timestamps into the store's map would couple
+ * Phase 23's desktop/bell call sites into the store's mutation path.
+ */
+const _channelRateLimits = new Map<string, number>();
+
+/** Closed literal kind sets per channel (T-24-06) — see `_allowChannelNotification`. */
+const DESKTOP_RATE_LIMIT_KINDS = new Set<string>(["complete", "error", "budget", "milestone", "attention"]);
+const BELL_RATE_LIMIT_KINDS = new Set<string>(["question", "stop", "attention"]);
+
+/**
+ * Normalize a runtime `kind` string against its channel's closed literal set.
+ * Any value outside the set collapses to the single literal `"other"` so an
+ * unrecognized runtime kind (JS caller, dep-injected shim) cannot mint an
+ * unbounded number of throttle buckets (T-24-06).
+ */
+function _normalizeChannelKind(channel: "desktop" | "bell", kind: string): string {
+  const knownKinds = channel === "desktop" ? DESKTOP_RATE_LIMIT_KINDS : BELL_RATE_LIMIT_KINDS;
+  return knownKinds.has(kind) ? kind : "other";
+}
+
+/**
+ * Channel-namespaced rate-limit gate shared by `sendDesktopNotification` and
+ * `playNotificationBell`. Returns `false` (throttled) only when a same-key
+ * call was already seen within `DEDUP_WINDOW_MS`; returns `true` (allowed)
+ * and re-baselines the key otherwise — including on a backwards clock jump
+ * (negative elapsed), so a clock correction can never wedge a channel shut
+ * (T-24-08). Channel namespacing keeps the shared literal `"attention"` from
+ * cross-suppressing between the desktop and bell channels.
+ */
+function _allowChannelNotification(channel: "desktop" | "bell", kind: string): boolean {
+  const normalizedKind = _normalizeChannelKind(channel, kind);
+  const key = `${channel}:${normalizedKind}`;
+  const now = Date.now();
+  const lastSeen = _channelRateLimits.get(key);
+  if (lastSeen !== undefined) {
+    const elapsed = now - lastSeen;
+    if (elapsed >= 0 && elapsed < DEDUP_WINDOW_MS) return false;
+  }
+  _channelRateLimits.set(key, now);
+  return true;
+}
+
+/**
+ * Reset module-private channel rate-limit state. Test-only — mirrors the
+ * `_resetNotificationStore` convention already established in
+ * `notification-store.ts`.
+ */
+export function _resetNotificationRateLimits(): void {
+  _channelRateLimits.clear();
+}
+
+/**
  * Send a native desktop notification. Non-blocking, non-fatal.
  * macOS: osascript, Linux: notify-send, Windows: skipped.
  */
@@ -41,6 +97,13 @@ export function sendDesktopNotification(
   projectName?: string,
   deps: { notifications?: NotificationPreferences } = {},
 ): void {
+  // Throttle gate FIRST — upstream of the remote dispatch below (T-24-07):
+  // that dispatch is deliberately upstream of the preference gate ("remote
+  // notifications fire independently of desktop preferences"), so a
+  // downstream throttle would leave the outbound Telegram/Slack/Discord
+  // fan-out completely unthrottled.
+  if (!_allowChannelNotification("desktop", kind)) return;
+
   // When a projectName is provided and the title is the default "GSD",
   // replace it with a project-qualified title for multi-project clarity.
   if (projectName && title === "GSD") {
@@ -144,6 +207,10 @@ export function playNotificationBell(
   stream: BellStream | null = resolveBellStream(),
 ): boolean {
   if (!shouldPlayNotificationBell(kind, preferences)) return false;
+  // Throttle AFTER the preference gate: a call the operator's preferences
+  // already disabled did not actually ring anything, so it must not
+  // consume the window budget.
+  if (!_allowChannelNotification("bell", kind)) return false;
   if (!stream) return false;
 
   try {
