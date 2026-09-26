@@ -52,6 +52,35 @@ test("discuss unit types route to the discuss model bucket", () => {
   });
 });
 
+// Group A isolation guard (22-03): the six Group A assertions inject their own model
+// registry / write their own preferences into a GSD_HOME-scoped temp dir, but preference
+// resolution also reads a PROJECT-scope `.gsd/PREFERENCES.md` relative to process.cwd().
+// A real host with an on-disk project preferences file in the ambient cwd would leak its
+// `models` block past the injected values (this is the dormant seam behind the v4 19-06
+// Group A reds, which returned this box's real claude-code/claude-sonnet-5 pin). This guard
+// simulates that contamination in a temp sandbox and proves resolution stays hermetic.
+test("discuss unit resolution is hermetic against an ambient-cwd project .gsd/PREFERENCES.md (Group A isolation guard)", () => {
+  const oldCwd = process.cwd();
+  const decoy = mkdtempSync(join(tmpdir(), "gsd-decoy-project-"));
+  mkdirSync(join(decoy, ".gsd"), { recursive: true });
+  writeFileSync(join(decoy, ".gsd", "PREFERENCES.md"), [
+    "---",
+    "models:",
+    "  discuss: leaked-from-cwd",
+    "---",
+    "",
+  ].join("\n"));
+  try {
+    process.chdir(decoy);
+    withModelPreferences(() => {
+      assert.equal(resolveModelWithFallbacksForUnit("discuss-milestone")?.primary, "discuss-model");
+    });
+  } finally {
+    process.chdir(oldCwd);
+    rmSync(decoy, { recursive: true, force: true });
+  }
+});
+
 test("validation unit types route to the validation model bucket", () => {
   withModelPreferences(() => {
     assert.equal(resolveModelWithFallbacksForUnit("validate-milestone")?.primary, "validation-model");
