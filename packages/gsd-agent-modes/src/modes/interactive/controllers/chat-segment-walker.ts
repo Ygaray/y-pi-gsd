@@ -5,7 +5,7 @@ import type { DesiredSegment, RenderedSegment, StreamingRenderState } from "../s
 import { AssistantMessageComponent } from "../components/assistant-message.js";
 import type { TimestampFormat } from "../components/timestamp.js";
 import { reconcileChatTurnConnections } from "../components/chat-turn-connect.js";
-import { ToolExecutionComponent } from "../components/tool-execution.js";
+import { ToolExecutionComponent, coerceToolNameForDisplay } from "../components/tool-execution.js";
 import { markFirstVisibleAssistantOutput } from "./chat-controller-latency.js";
 import {
 	buildDesiredSegmentsForMessage,
@@ -69,15 +69,20 @@ export function scanNewContentBlocks(
 	for (let i = rs.lastProcessedContentIndex; i < contentBlocks.length; i++) {
 		const content = contentBlocks[i];
 		if (content.type === "toolCall") {
+			// Coerce BEFORE registration/construction, matching the invariant the
+			// standalone path (chat-controller.ts's tool_execution_start handler)
+			// already enforces — the "coerce before construction" half of D-02
+			// applied consistently regardless of ingestion entry point (WR-04).
+			const displayToolName = coerceToolNameForDisplay(content.name);
 			const { component } = registerPendingToolComponent(
 				host,
 				content.id,
-				content.name,
+				displayToolName,
 				content.arguments,
 				"content",
 				() =>
 					new ToolExecutionComponent(
-						content.name,
+						displayToolName,
 						content.arguments,
 						{ showImages: host.settingsManager.getShowImages(), source: "content" },
 						host.getRegisteredToolDefinition(content.name),
