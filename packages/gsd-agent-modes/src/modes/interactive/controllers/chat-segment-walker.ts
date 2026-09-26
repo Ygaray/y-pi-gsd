@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Segment walker and message_end rebuild for interactive chat streaming.
 import type { InteractiveModeStateHost } from "../interactive-mode-state.js";
-import type { RenderedSegment, StreamingRenderState } from "../streaming-render-state.js";
+import type { DesiredSegment, RenderedSegment, StreamingRenderState } from "../streaming-render-state.js";
 import { AssistantMessageComponent } from "../components/assistant-message.js";
 import type { TimestampFormat } from "../components/timestamp.js";
 import { reconcileChatTurnConnections } from "../components/chat-turn-connect.js";
@@ -292,6 +292,66 @@ export function runSegmentWalker(
 	}
 }
 
+/**
+ * Comparable identity for one `desired` or `rs.renderedSegments` entry.
+ * Used only to detect an already-committed message_end repeat — never a
+ * general resemblance check. Text is compared via exact string equality:
+ * the rendered side reads the already-stored `cachedText` field (no
+ * re-derivation), and the desired side reads a fresh
+ * `getTextFromContentBlocks()` — neither is normalized or trimmed, so a
+ * whitespace-differing rebuild is never mistaken for identical.
+ */
+function segmentFingerprint(
+	seg: DesiredSegment | RenderedSegment,
+	finalBlocks: Array<any>,
+): string {
+	if (seg.kind === "tool") return `tool:${seg.contentIndex}`;
+	if (seg.kind !== "text-run") return `other:${seg.kind}`;
+	const text = "cachedText" in seg
+		? (seg.cachedText ?? "")
+		: getTextFromContentBlocks(finalBlocks, seg.startIndex, seg.endIndex, seg.contentType);
+	return `text-run:${seg.contentType}:${seg.startIndex}:${seg.endIndex}:${text}`;
+}
+
+/**
+ * True only when `rs.renderedSegments` already reflects `desired` exactly —
+ * same segments, in the same order, with identical text — so
+ * `rebuildSegmentsOnMessageEnd` can skip its destructive remove-then-re-add
+ * cycle for a repeated message_end whose final content did not change.
+ * `shouldSuppressRedundantHandoffText`-suppressed text-runs are excluded
+ * from the desired side first (same predicate the rebuild loop below
+ * applies), so a segment that is legitimately never rendered is not
+ * misread as "missing" and does not force a pointless rebuild. Position
+ * matters: compared index-for-index, never as unordered sets, so a
+ * reordering still counts as a change and still rebuilds.
+ */
+function renderedSegmentsMatchDesired(
+	host: ChatStreamHost,
+	rs: StreamingRenderState,
+	desired: DesiredSegment[],
+	finalBlocks: Array<any>,
+): boolean {
+	const expectedDesired = desired.filter((seg) => {
+		if (seg.kind !== "text-run" || seg.contentType !== "text") return true;
+		const segmentText = getTextFromContentBlocks(finalBlocks, seg.startIndex, seg.endIndex, seg.contentType);
+		return !shouldSuppressRedundantHandoffText(
+			host.session.messages,
+			segmentText,
+			rs.orphanedSegments,
+			rs.renderedSegments,
+		);
+	});
+
+	if (expectedDesired.length !== rs.renderedSegments.length) return false;
+
+	for (let i = 0; i < expectedDesired.length; i++) {
+		if (segmentFingerprint(expectedDesired[i], finalBlocks) !== segmentFingerprint(rs.renderedSegments[i], finalBlocks)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 export function rebuildSegmentsOnMessageEnd(
 	host: ChatStreamHost,
 	rs: StreamingRenderState,
@@ -306,6 +366,8 @@ export function rebuildSegmentsOnMessageEnd(
 		}),
 		finalBlocks,
 	);
+
+	if (renderedSegmentsMatchDesired(host, rs, desired, finalBlocks)) return;
 
 	const toolComponentsById = new Map<string, ToolExecutionComponent>();
 	for (const [toolId, component] of host.pendingTools.entries()) {
