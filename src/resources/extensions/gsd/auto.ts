@@ -154,6 +154,8 @@ import {
   initMetrics,
   resetMetrics,
   getLedger,
+  getMetricsBasePath,
+  shouldReinitMetricsForBase,
   getProjectTotals,
   filterUnitsForMilestone,
   formatCost,
@@ -3004,7 +3006,11 @@ export async function startAuto(
     setLogBasePath(base);
     s.unitDispatchCount.clear();
     s.unitLifetimeDispatches.clear();
-    if (!getLedger()) initMetrics(base);
+    // saveLedger writes through the module-level basePath, not a parameter —
+    // a live ledger left over from a stale worktree/root would otherwise keep
+    // misrouting every unit this resume records, so the base itself (not just
+    // ledger truthiness) must be part of the re-init decision (SIGNAL-04).
+    if (shouldReinitMetricsForBase(base, Boolean(getLedger()), getMetricsBasePath())) initMetrics(base);
     if (s.currentMilestoneId) setActiveMilestoneId(base, s.currentMilestoneId);
     await openProjectDbIfPresent(base);
     registerAutoWorkerForSession(s, base);

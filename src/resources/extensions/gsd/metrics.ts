@@ -319,6 +319,24 @@ export function getMetricsBasePath(): string {
   return basePath;
 }
 
+/**
+ * Decide whether the auto-resume path should re-init the metrics singleton.
+ *
+ * Re-init is required whenever the in-memory ledger is absent (the
+ * pre-existing behaviour), OR whenever the resolved base path differs from
+ * the base the in-memory ledger was actually loaded from — a live ledger
+ * with a stale base would otherwise keep writing through saveLedger's
+ * module-level `basePath`, silently misrouting every subsequent unit into a
+ * previous worktree/root's metrics.json across a resume boundary.
+ */
+export function shouldReinitMetricsForBase(
+  base: string,
+  currentLedgerPresent: boolean,
+  currentBase: string,
+): boolean {
+  return !currentLedgerPresent || currentBase !== base;
+}
+
 // ─── Scope-aware API (canonical) ─────────────────────────────────────────────
 
 /**
