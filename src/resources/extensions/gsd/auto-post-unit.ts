@@ -124,6 +124,8 @@ import {
   routeEvidenceCrossReferenceBlock,
   type EvidenceCrossReferenceBlockResult,
 } from "./auto-verification.js";
+import { notifyDeduped } from "./bootstrap/notify-interceptor.js";
+import { suppressPersistence, unsuppressPersistence } from "./notification-store.js";
 
 export function resolveEvidenceRoutePresentation(
   routed: EvidenceCrossReferenceBlockResult | null,
@@ -164,6 +166,9 @@ const MAX_GIT_COMMIT_REMEDIATION_RETRIES = 2;
 /** Keep failure toasts short while still showing concrete examples. */
 const MAX_NOTIFICATION_DETAILS = 3;
 const NOTIFICATION_BULLET = "•";
+/** NOISE-03: kind identity for the aggregated file-change safety notice — collapses
+ *  repeated closeouts under one milestone within DEDUP_WINDOW_MS to a single notice. */
+export const SAFETY_FILE_CHANGE_NOTIFICATION_KIND = "safety-file-change";
 
 function isParallelResearchUnit(unitType: string, unitId: string): boolean {
   return unitType === "research-slice" && unitId.endsWith("/parallel-research");
@@ -905,19 +910,43 @@ export function shouldDeferCloseoutGitAction(unitType: string): boolean {
   return unitType === "execute-task";
 }
 
-function reportFileChangeWarnings(
+/**
+ * NOISE-03: aggregates a file-change audit into at most one operator-facing
+ * notice. `scope` is REQUIRED (not optional/defaulted) so TypeScript fails
+ * the build if either call site in runExecuteTaskFileChangeSafety is missed
+ * (Pitfall 3) — both branches sit in an early-return/fallthrough structure
+ * and look nearly identical.
+ *
+ * The per-violation logWarning loop is wrapped in suppressPersistence() /
+ * unsuppressPersistence() so its diagnostics keep reaching the workflow-log
+ * buffer, stderr (for errors), and the unified audit, while no longer
+ * minting one notification-store entry per changed file — workflow-logger's
+ * own _push() calls appendNotification for every warning it records with no
+ * kind/scope, so each distinct file path was becoming its own persisted
+ * entry (see <research_correction>, threat T-24-10: no diagnostic is
+ * removed, only its store side effect is suppressed).
+ */
+export function reportFileChangeWarnings(
   ctx: ExtensionContext,
   audit: FileChangeAudit | null,
+  scope: string,
 ): void {
   if (!audit || audit.violations.length === 0) return;
   const warnings = audit.violations.filter(v => v.severity === "warning");
-  for (const v of warnings) {
-    logWarning("safety", `file-change: ${v.file} — ${v.reason}`);
+  suppressPersistence();
+  try {
+    for (const v of warnings) {
+      logWarning("safety", `file-change: ${v.file} — ${v.reason}`);
+    }
+  } finally {
+    unsuppressPersistence();
   }
   if (warnings.length > 0) {
-    ctx.ui.notify(
+    notifyDeduped(
+      ctx,
       `Safety: ${warnings.length} unexpected file change(s) outside task plan`,
       "warning",
+      { kind: SAFETY_FILE_CHANGE_NOTIFICATION_KIND, scope },
     );
   }
 }
@@ -950,6 +979,7 @@ function runExecuteTaskFileChangeSafety(
       reportFileChangeWarnings(
         ctx,
         validateFileChanges(s.basePath, expectedOutput, plannedFiles, fileChangeAllowlist, { headBeforeCloseout }),
+        sMid,
       );
       return;
     }
@@ -965,6 +995,7 @@ function runExecuteTaskFileChangeSafety(
         fileChangeAllowlist,
         { headBeforeCloseout },
       ),
+      sMid,
     );
   } catch (e) {
     debugLog("postUnit", { phase: "safety-file-change", error: String(e) });
