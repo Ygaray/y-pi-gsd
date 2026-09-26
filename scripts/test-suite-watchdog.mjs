@@ -190,9 +190,16 @@ if (child.pid === undefined) {
   process.exit(2);
 }
 
+// IN-01: psFailures otherwise accumulates silently for the whole run and is only visible in
+// the final verdict JSON, by which point the run is already over. Once it crosses this small
+// threshold, emit a one-time stderr warning so a live operator gets a signal that the sampler
+// is unhealthy while the run is still in progress.
+const PS_FAILURE_WARNING_THRESHOLD = 3;
+
 const startedAt = Date.now();
 let outputBytes = 0;
 let psFailures = 0;
+let psFailureWarningEmitted = false;
 let sampleCount = 0;
 let prevCpuMsTotal = 0;
 let prevOutputBytes = 0;
@@ -281,6 +288,14 @@ function sampleTick() {
     // stall verdict (T-22-05). The hard cap above still bounds the run regardless of how many
     // consecutive samples are inconclusive (CR-01).
     psFailures += 1;
+    if (!psFailureWarningEmitted && psFailures >= PS_FAILURE_WARNING_THRESHOLD) {
+      psFailureWarningEmitted = true;
+      const warnLine =
+        `[watchdog] WARNING: ps sampling has failed ${psFailures} times so far — stall ` +
+        `detection is degraded; only the hard-cap wall-clock kill remains fully active.\n`;
+      appendFileSync(logPath, warnLine);
+      process.stderr.write(warnLine);
+    }
     return;
   }
   // Clamp at 0: a CPU-heavy descendant that exits between two samples drops its
