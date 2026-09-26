@@ -167,7 +167,11 @@ export function readNotifications(basePath?: string, filter?: NotificationMeta):
   const bp = basePath ?? _basePath;
   if (!bp) return [];
   const entries = _readEntriesFromDisk(bp).filter(
-    (e) => (!filter?.kind || e.kind === filter.kind) && (!filter?.scope || e.scope === filter.scope),
+    // `scope` uses an explicit undefined-check (not `!filter?.scope`): several
+    // call sites legitimately persist `scope: ""` (e.g. BLOCKED_RESUME with no
+    // active milestone), so a caller filtering for `{ scope: "" }` must get
+    // only those no-milestone entries back, not "no filter" (IN-01).
+    (e) => (!filter?.kind || e.kind === filter.kind) && (filter?.scope === undefined || e.scope === filter.scope),
   );
   return entries.reverse();
 }
