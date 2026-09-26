@@ -90,7 +90,15 @@ export function appendNotification(
   const dedupKey = `${_basePath}:${severity}:${source}:${identity}`;
   const now = Date.now();
   const lastSeen = _recentMessageTimestamps.get(dedupKey);
-  if (lastSeen !== undefined && now - lastSeen < DEDUP_WINDOW_MS) return false;
+  // T-24-08: a backward clock jump (NTP correction, VM pause/resume) must
+  // never wedge a channel shut. If `now` is before `lastSeen`, `elapsed` is
+  // negative — treat that as "not still inside the window" rather than
+  // unconditionally `< DEDUP_WINDOW_MS`, mirroring notifications.ts's
+  // `_allowChannelNotification` guard.
+  if (lastSeen !== undefined) {
+    const elapsed = now - lastSeen;
+    if (elapsed >= 0 && elapsed < DEDUP_WINDOW_MS) return false;
+  }
   _recentMessageTimestamps.set(dedupKey, now);
   if (_recentMessageTimestamps.size > DEDUP_PRUNE_THRESHOLD) {
     for (const [key, ts] of _recentMessageTimestamps) {
