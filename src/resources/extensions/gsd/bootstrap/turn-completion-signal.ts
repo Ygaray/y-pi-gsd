@@ -4,7 +4,7 @@
 
 import type { AgentAbortOrigin, AgentEndEvent, ExtensionContext } from "@gsd/pi-coding-agent";
 
-import { isAutoActive } from "../auto-runtime-state.js";
+import { autoSession, isAutoActive } from "../auto-runtime-state.js";
 import { playNotificationBell } from "../notifications.js";
 import { appendNotification } from "../notification-store.js";
 import { logWarning } from "../workflow-logger.js";
@@ -48,7 +48,13 @@ const defaultTurnCompletionSignalDeps: TurnCompletionSignalDeps = {
   autoActive: () => isAutoActive(),
   playBell: (kind) => playNotificationBell(kind),
   appendNotification: (message, severity, source, meta) => appendNotification(message, severity, source, meta),
-  emitStop: (args) => emitStop(args),
+  // WR-02: thread the active turn's correlation id through so an external
+  // supervisor consuming StopEvents over a long auto-mode run can associate
+  // a stop signal with the unit/turn it belongs to. `autoSession.currentTurnId`
+  // is null outside auto-mode / before a turn is dispatched — omit the field
+  // entirely rather than sending an explicit `null` (StopEvent's `turnId` is
+  // `string | undefined`, not `string | null`).
+  emitStop: (args) => emitStop({ ...args, turnId: autoSession.currentTurnId ?? undefined }),
   emitNotification: (kind, message, details) => emitNotification(kind, message, details),
 };
 

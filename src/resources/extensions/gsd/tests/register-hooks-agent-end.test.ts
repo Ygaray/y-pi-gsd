@@ -219,6 +219,33 @@ test("register-hooks agent_end handler is wired to signalTurnEnd end-to-end", as
   assert.equal(entries.length, 1, "exactly one turn-complete notification-store entry");
 });
 
+test("WR-02: emitStop threads autoSession.currentTurnId onto the StopEvent for correlation", async (t) => {
+  autoSession.reset();
+  autoSession.currentTurnId = "turn-wr02-abc";
+  _resetNotificationStore();
+  clearHookEmitter();
+  const base = makeRuntimeBase();
+  initNotificationStore(base);
+  t.after(() => {
+    autoSession.reset();
+    _resetNotificationStore();
+    clearHookEmitter();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const { emitAgentEnd, piEvents } = makeHookHarness();
+
+  await emitAgentEnd({ messages: [], willRetry: false });
+
+  const stopEvents = piEvents.filter((e) => e.type === "stop");
+  assert.equal(stopEvents.length, 1);
+  assert.equal(
+    stopEvents[0].turnId,
+    "turn-wr02-abc",
+    "StopEvent must carry the active turn's correlation id so an external supervisor can associate it with the unit/turn",
+  );
+});
+
 test("register-hooks agent_end handler: auto-active turn emits StopEvent but no turn-complete entry", async (t) => {
   autoSession.reset();
   autoSession.active = true;
