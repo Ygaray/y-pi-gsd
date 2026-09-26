@@ -35,11 +35,14 @@ import {
   recordToolInvocationError,
 } from "../auto-runtime-state.js";
 import {
+  getLastTurnToolOutcome,
   isDeterministicPolicyError,
   isQueuedUserMessageSkip,
   isToolSchemaValidationError,
   isToolInvocationError,
   isToolUnavailableError,
+  recordTurnToolOutcome,
+  resetTurnToolOutcome,
 } from "../auto-tool-tracking.js";
 import { applyProviderPayloadPolicy } from "../provider-payload-policy.js";
 
@@ -1307,6 +1310,11 @@ export function registerHooks(
   });
 
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
+    // SIGNAL-03: reset the per-turn tool-outcome tracker here, at the turn
+    // boundary — deliberately NOT in the agent_end handler's leading reset
+    // cluster below, which runs BEFORE handleAgentEnd(pi, event, ctx) reads
+    // the value it needs to decide whether to override the aborted-pause path.
+    resetTurnToolOutcome();
     clearAutoCompletionStopInProgress();
     resetPendingGatePauseGuard();
     applyMinimalGsdToolSurface(pi);
@@ -2164,6 +2172,12 @@ export function registerHooks(
   pi.on("tool_execution_end", async (event) => {
     const toolName = canonicalToolName(event.toolName);
     markToolEnd(event.toolCallId);
+    // SIGNAL-03: record the generic per-turn tool-outcome signal here,
+    // UNCONDITIONALLY (not gated on isAutoActive()) — this hook is
+    // UNIVERSAL_TOOL_HOOKS (engine-hook-contract.ts), so the signal behaves
+    // identically under the native engine and external (Claude Code CLI)
+    // engines. The consumer in agent-end-recovery.ts is already auto-only.
+    recordTurnToolOutcome(!event.isError);
     // #2883/#4974: Capture deterministic invocation/policy errors
     // so postUnitPreVerification can break the retry loop instead of re-dispatching.
     if (event.isError) {

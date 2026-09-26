@@ -153,6 +153,45 @@ export function clearInFlightTools(): void {
   interactiveElicitationDepth = 0;
 }
 
+// ─── Per-turn tool-outcome tracker (SIGNAL-03, #T-23-05) ──────────────────
+//
+// A generic, mode-agnostic "did the last finalized tool call in this turn
+// succeed" tri-state signal, recorded unconditionally from the universal
+// tool_execution_end hook (UNIVERSAL_TOOL_HOOKS) and reset at the
+// before_agent_start turn boundary — NOT in the agent_end handler's leading
+// reset cluster, which runs before handleAgentEnd reads the value. Holds
+// nothing but the boolean|null tri-state — never event.result, event.toolName,
+// or error text — so no raw tool output can ever be interpolated into a
+// notification through this path.
+
+let lastTurnToolOutcome: boolean | null = null;
+
+/**
+ * Records whether the last finalized tool call in the current turn
+ * succeeded. Last-call-wins: this is a LAST-call signal, not an any-call
+ * signal.
+ */
+export function recordTurnToolOutcome(succeeded: boolean): void {
+  lastTurnToolOutcome = succeeded;
+}
+
+/**
+ * Returns the raw tri-state: `true` (last call succeeded), `false` (last
+ * call errored), or `null` (no tool call recorded yet this turn).
+ */
+export function getLastTurnToolOutcome(): boolean | null {
+  return lastTurnToolOutcome;
+}
+
+/**
+ * Resets the tracker to `null`. Called at the before_agent_start turn
+ * boundary so a prior turn's success can never leak into this turn's
+ * decision.
+ */
+export function resetTurnToolOutcome(): void {
+  lastTurnToolOutcome = null;
+}
+
 // ─── Tool invocation error classification (#2883) ────────────────────────
 
 /**
