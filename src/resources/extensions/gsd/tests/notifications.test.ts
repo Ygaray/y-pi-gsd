@@ -280,3 +280,177 @@ test("buildDesktopNotificationCommand includes project name in title on macOS", 
     assert.match(command.args[1], /GSD — my-project/);
   }
 });
+
+// ─── Channel throttle edge matrix (NOISE-02) ──────────────────────────────
+
+test("sendDesktopNotification: boundary — exactly 30000ms elapsed is delivered (NOISE-02/boundary)", async (t) => {
+  _resetNotificationRateLimits();
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("Error 1", "Message 1", "info", "error");
+  now += 30000;
+  sendDesktopNotification("Error 2", "Message 2", "info", "error");
+
+  assert.equal(sendMock.mock.callCount(), 2, "a repeat at exactly the 30000ms window boundary must be delivered");
+});
+
+test("sendDesktopNotification: boundary — 29999ms elapsed is throttled (NOISE-02/boundary)", async (t) => {
+  _resetNotificationRateLimits();
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("Error 1", "Message 1", "info", "error");
+  now += 29999;
+  sendDesktopNotification("Error 2", "Message 2", "info", "error");
+
+  assert.equal(sendMock.mock.callCount(), 1, "a repeat at 29999ms elapsed must still be throttled");
+});
+
+test("playNotificationBell: boundary — exactly 30000ms elapsed is delivered (NOISE-02/boundary)", (t) => {
+  _resetNotificationRateLimits();
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const stream = { write: (_chunk: string) => {} };
+  const prefs = { enabled: true, local_bell: true };
+
+  assert.equal(playNotificationBell("stop", prefs, stream), true);
+  now += 30000;
+  assert.equal(playNotificationBell("stop", prefs, stream), true, "a bell repeat at exactly 30000ms elapsed must ring");
+});
+
+test("playNotificationBell: boundary — 29999ms elapsed is throttled (NOISE-02/boundary)", (t) => {
+  _resetNotificationRateLimits();
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const stream = { write: (_chunk: string) => {} };
+  const prefs = { enabled: true, local_bell: true };
+
+  assert.equal(playNotificationBell("stop", prefs, stream), true);
+  now += 29999;
+  assert.equal(playNotificationBell("stop", prefs, stream), false, "a bell repeat at 29999ms elapsed must still be throttled");
+});
+
+test("cross-channel adjacency: desktop attention then bell attention — neither suppresses the other (NOISE-02/adjacency)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+  const stream = { write: (_chunk: string) => {} };
+  const prefs = { enabled: true, local_bell: true };
+
+  sendDesktopNotification("Attn", "Attn message", "info", "attention");
+  assert.equal(
+    playNotificationBell("attention", prefs, stream),
+    true,
+    "the bell channel's attention kind must still ring after the desktop channel's attention kind fired",
+  );
+  assert.equal(sendMock.mock.callCount(), 1);
+});
+
+test("cross-channel adjacency (reverse order): bell attention then desktop attention — neither suppresses the other (NOISE-02/adjacency)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+  const stream = { write: (_chunk: string) => {} };
+  const prefs = { enabled: true, local_bell: true };
+
+  assert.equal(playNotificationBell("attention", prefs, stream), true);
+  sendDesktopNotification("Attn", "Attn message", "info", "attention");
+  assert.equal(
+    sendMock.mock.callCount(),
+    1,
+    "the desktop channel's attention kind must still dispatch after the bell channel's attention kind rang",
+  );
+});
+
+test("within-channel adjacency: desktop budget then desktop error are independent kinds (NOISE-02/adjacency)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("Budget", "Budget message", "warning", "budget");
+  sendDesktopNotification("Error", "Error message", "error", "error");
+
+  assert.equal(sendMock.mock.callCount(), 2, "two different kinds within one channel must never suppress each other");
+});
+
+test("empty title/message still throttles its repeat on kind alone (NOISE-02/empty)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("", "", "info", "complete");
+  sendDesktopNotification("", "", "info", "complete");
+
+  assert.equal(sendMock.mock.callCount(), 1, "an empty title/message pair must still throttle its repeat on kind alone");
+});
+
+test("omitting the kind argument throttles against an explicit 'complete' call, not a separate bucket (NOISE-02/empty)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("Explicit", "Explicit message", "info", "complete");
+  sendDesktopNotification("Omitted", "Omitted message");
+
+  assert.equal(
+    sendMock.mock.callCount(),
+    1,
+    "an omitted kind must use the 'complete' parameter default, not mint a distinct bucket",
+  );
+});
+
+test("unrecognized runtime kinds collapse into a single 'other' bucket per channel (T-24-06)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("Unknown 1", "Message 1", "info", "totally-unrecognized-kind-a" as never);
+  sendDesktopNotification("Unknown 2", "Message 2", "info", "totally-unrecognized-kind-b" as never);
+
+  assert.equal(
+    sendMock.mock.callCount(),
+    1,
+    "two DIFFERENT unrecognized kind strings must collapse into the same 'other' bucket, not mint two",
+  );
+});
+
+test("first-caller-wins within a window: the earliest same-kind call is delivered (NOISE-02/ordering)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("First Title", "First Message", "info", "milestone");
+  sendDesktopNotification("Second Title", "Second Message", "error", "milestone");
+  sendDesktopNotification("Third Title", "Third Message", "warning", "milestone");
+
+  assert.equal(sendMock.mock.callCount(), 1);
+  assert.deepEqual(
+    sendMock.mock.calls[0].arguments,
+    ["First Title", "First Message"],
+    "the single dispatched call must be the FIRST call's title and message, regardless of later calls' level/title/message",
+  );
+});
+
+test("a backwards clock jump re-baselines instead of suppressing (NOISE-02/precision, T-24-08)", async (t) => {
+  _resetNotificationRateLimits();
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+
+  sendDesktopNotification("First", "First Message", "info", "milestone");
+  now -= 5000;
+  sendDesktopNotification("Second", "Second Message", "info", "milestone");
+
+  assert.equal(sendMock.mock.callCount(), 2, "a backwards clock jump must dispatch, never suppress permanently");
+});
+
+test("preference independence: remote dispatch fires and throttles even when desktop notifications are disabled (NOISE-02)", async (t) => {
+  _resetNotificationRateLimits();
+  const sendMock = t.mock.method(remoteNotificationDispatcher, "send", async () => {});
+  const deps = { notifications: { enabled: false } };
+
+  sendDesktopNotification("Disabled 1", "Disabled Message 1", "info", "error", undefined, deps);
+  sendDesktopNotification("Disabled 2", "Disabled Message 2", "info", "error", undefined, deps);
+
+  assert.equal(
+    sendMock.mock.callCount(),
+    1,
+    "remote dispatch fires on the fresh kind despite desktop being disabled, then throttles the repeat",
+  );
+});
