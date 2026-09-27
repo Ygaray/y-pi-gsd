@@ -9,6 +9,77 @@ type GitPaths = {
 	headPath: string;
 };
 
+/** Working-tree git status counts, computed off the render path (D-01). */
+export type GitStatusInfo = {
+	staged: number;
+	dirty: number;
+	untracked: number;
+	conflicts: number;
+	ahead: number;
+	behind: number;
+};
+
+/** Ceiling on buffered `git status` stdout — bounds a pathological tree (T-28-04). */
+const GIT_STATUS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+
+function gitStatusEqual(a: GitStatusInfo | null, b: GitStatusInfo | null): boolean {
+	if (a === b) return true;
+	if (a === null || b === null) return false;
+	return (
+		a.staged === b.staged &&
+		a.dirty === b.dirty &&
+		a.untracked === b.untracked &&
+		a.conflicts === b.conflicts &&
+		a.ahead === b.ahead &&
+		a.behind === b.behind
+	);
+}
+
+/**
+ * Parse `git status --porcelain=v2 --branch` stdout into counts only — never a path,
+ * per the never-retain-a-path contract (threat register T-28-04/T-28-05).
+ */
+function parseGitStatusPorcelain(stdout: string): GitStatusInfo {
+	let ahead = 0;
+	let behind = 0;
+	let staged = 0;
+	let dirty = 0;
+	let untracked = 0;
+	let conflicts = 0;
+
+	for (const rawLine of stdout.split("\n")) {
+		const line = rawLine.trimEnd();
+		if (!line) continue;
+
+		if (line.startsWith("# branch.ab ")) {
+			const match = /^# branch\.ab \+(\d+) -(\d+)/.exec(line);
+			if (match) {
+				ahead = Number(match[1]);
+				behind = Number(match[2]);
+			}
+			continue;
+		}
+		if (line.startsWith("#")) continue;
+
+		if (line.startsWith("u ")) {
+			conflicts++;
+			continue;
+		}
+		if (line.startsWith("? ")) {
+			untracked++;
+			continue;
+		}
+		if (line.startsWith("1 ") || line.startsWith("2 ")) {
+			const xy = line.slice(2, 4);
+			if (xy[0] !== ".") staged++;
+			if (xy[1] !== ".") dirty++;
+			continue;
+		}
+	}
+
+	return { staged, dirty, untracked, conflicts, ahead, behind };
+}
+
 /**
  * Find git metadata paths by walking up from cwd.
  * Handles both regular git repos (.git is a directory) and worktrees (.git is a file).
@@ -90,6 +161,10 @@ export class FooterDataProvider {
 
 	private extensionStatuses = new Map<string, string>();
 	private cachedBranch: string | null | undefined = undefined;
+	private cachedGitStatus: GitStatusInfo | null | undefined = undefined;
+	private gitStatusChangeCallbacks = new Set<() => void>();
+	private gitStatusRefreshInFlight = false;
+	private gitStatusRefreshPending = false;
 	private gitPaths: GitPaths | null | undefined = undefined;
 	private headWatcher: FSWatcher | null = null;
 	private reftableWatcher: FSWatcher | null = null;
@@ -128,6 +203,30 @@ export class FooterDataProvider {
 		return () => this.branchChangeCallbacks.delete(callback);
 	}
 
+	/**
+	 * Working-tree git status counts, null outside a repo. Cache-only and never blocks:
+	 * on a cold cache it returns null and schedules the debounced async refresh, since
+	 * unlike HEAD, working-tree status cannot be resolved synchronously without a
+	 * subprocess and render() must never pay for one.
+	 */
+	getGitStatus(): GitStatusInfo | null {
+		if (!this.gitPaths) {
+			this.cachedGitStatus = null;
+			return null;
+		}
+		if (this.cachedGitStatus === undefined) {
+			this.cachedGitStatus = null;
+			this.scheduleRefresh();
+		}
+		return this.cachedGitStatus;
+	}
+
+	/** Subscribe to git status changes. Returns unsubscribe function. */
+	onGitStatusChange(callback: () => void): () => void {
+		this.gitStatusChangeCallbacks.add(callback);
+		return () => this.gitStatusChangeCallbacks.delete(callback);
+	}
+
 	/** Internal: set extension status */
 	setExtensionStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
@@ -164,6 +263,7 @@ export class FooterDataProvider {
 		}
 		this.clearGitWatchers();
 		this.cachedBranch = undefined;
+		this.cachedGitStatus = undefined;
 		this.gitPaths = findGitPaths(cwd);
 		this.setupGitWatcher();
 		this.notifyBranchChange();
@@ -178,10 +278,15 @@ export class FooterDataProvider {
 		}
 		this.clearGitWatchers();
 		this.branchChangeCallbacks.clear();
+		this.gitStatusChangeCallbacks.clear();
 	}
 
 	private notifyBranchChange(): void {
 		for (const cb of this.branchChangeCallbacks) cb();
+	}
+
+	private notifyGitStatusChange(): void {
+		for (const cb of this.gitStatusChangeCallbacks) cb();
 	}
 
 	private scheduleRefresh(): void {
@@ -193,6 +298,7 @@ export class FooterDataProvider {
 		this.refreshTimer = setTimeout(() => {
 			this.refreshTimer = null;
 			void this.refreshGitBranchAsync();
+			void this.refreshGitStatusAsync();
 		}, FooterDataProvider.WATCH_DEBOUNCE_MS);
 	}
 
@@ -220,6 +326,63 @@ export class FooterDataProvider {
 				this.scheduleRefresh();
 			}
 		}
+	}
+
+	private async refreshGitStatusAsync(): Promise<void> {
+		if (this.disposed) return;
+		if (this.gitStatusRefreshInFlight) {
+			this.gitStatusRefreshPending = true;
+			return;
+		}
+
+		this.gitStatusRefreshInFlight = true;
+		try {
+			let nextStatus: GitStatusInfo | null;
+			try {
+				nextStatus = await this.resolveGitStatusAsync();
+			} catch {
+				// Never-throw contract (mirrors resolveGitBranchSync): on any error, timeout,
+				// or parse failure, keep the previous cached value in place.
+				return;
+			}
+			if (this.disposed) return;
+			if (this.cachedGitStatus !== undefined && !gitStatusEqual(this.cachedGitStatus, nextStatus)) {
+				this.cachedGitStatus = nextStatus;
+				this.notifyGitStatusChange();
+				return;
+			}
+			this.cachedGitStatus = nextStatus;
+		} finally {
+			this.gitStatusRefreshInFlight = false;
+			if (this.gitStatusRefreshPending && !this.disposed) {
+				this.gitStatusRefreshPending = false;
+				this.scheduleRefresh();
+			}
+		}
+	}
+
+	private async resolveGitStatusAsync(): Promise<GitStatusInfo | null> {
+		if (!this.gitPaths) return null;
+		const repoDir = this.gitPaths.repoDir;
+		const stdout = await new Promise<string>((resolvePromise, rejectPromise) => {
+			execFile(
+				"git",
+				["--no-optional-locks", "status", "--porcelain=v2", "--branch"],
+				{
+					cwd: repoDir,
+					encoding: "utf8",
+					maxBuffer: GIT_STATUS_MAX_BUFFER_BYTES,
+				},
+				(error: ExecFileException | null, stdout: string) => {
+					if (error) {
+						rejectPromise(error);
+						return;
+					}
+					resolvePromise(stdout);
+				},
+			);
+		});
+		return parseGitStatusPorcelain(stdout);
 	}
 
 	private resolveGitBranchSync(): string | null {
@@ -350,5 +513,10 @@ export class FooterDataProvider {
 /** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange"
+	| "getGitBranch"
+	| "getExtensionStatuses"
+	| "getAvailableProviderCount"
+	| "onBranchChange"
+	| "getGitStatus"
+	| "onGitStatusChange"
 >;

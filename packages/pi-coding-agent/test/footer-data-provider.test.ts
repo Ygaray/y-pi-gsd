@@ -99,6 +99,16 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 	}
 }
 
+/**
+ * Count only the branch-resolution (`symbolic-ref`) execFile invocations. Since Plan 02, the
+ * shared debounce window fires a `git status` call alongside the branch call (RESEARCH Pattern 2
+ * / PATTERNS.md "one debounce window, not two systems"), so a raw `execFile` call count no longer
+ * isolates branch-refresh behavior on its own.
+ */
+function symbolicRefCallCount(): number {
+	return vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "symbolic-ref").length;
+}
+
 describe("FooterDataProvider reftable branch detection", () => {
 	let originalCwd: string;
 	let tempDir: string;
@@ -191,9 +201,9 @@ describe("FooterDataProvider reftable branch detection", () => {
 			provider.onBranchChange(onBranchChange);
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
+			await waitFor(() => symbolicRefCallCount() === 1);
 
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+			expect(symbolicRefCallCount()).toBe(1);
 			expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
 			expect(provider.getGitBranch()).toBe("main");
 			expect(onBranchChange).not.toHaveBeenCalled();
@@ -214,10 +224,10 @@ describe("FooterDataProvider reftable branch detection", () => {
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
 			writeFileSync(join(reftableDir, "tables.list"), "2\n");
 			writeFileSync(join(reftableDir, "tables.list"), "3\n");
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
+			await waitFor(() => symbolicRefCallCount() === 1);
 			await new Promise((resolve) => setTimeout(resolve, 650));
 
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+			expect(symbolicRefCallCount()).toBe(1);
 		} finally {
 			provider.dispose();
 		}
@@ -235,10 +245,10 @@ describe("FooterDataProvider reftable branch detection", () => {
 			provider.onBranchChange(onBranchChange);
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
+			await waitFor(() => symbolicRefCallCount() === 1);
 			await waitFor(() => provider.getGitBranch() === "foo");
 
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+			expect(symbolicRefCallCount()).toBe(1);
 			expect(provider.getGitBranch()).toBe("foo");
 			expect(onBranchChange).toHaveBeenCalledTimes(1);
 		} finally {
