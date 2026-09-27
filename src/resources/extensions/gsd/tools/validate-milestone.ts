@@ -138,10 +138,16 @@ function evidenceVerdict(
   return "pass";
 }
 
-function isVerificationNotApplicable(value: string): boolean {
+function isVerificationNotApplicable(value: string, classKeyword?: string): boolean {
   const v = (value ?? "").toLowerCase().trim().replace(/[.\s]+$/, "");
   if (!v || v === "none") return true;
-  return /^(?:none(?:[\s._\u2014-]+[\s\S]*)?|n\/?a(?:[\s._\u2014-]+[\s\S]*)?|not[\s._-]+(?:applicable|required|needed|provided)(?:[\s._\u2014-]+[\s\S]*)?|no[\s._-]+operational[\s\S]*)$/i.test(v);
+  const noClassPattern = classKeyword
+    ? `|no[\\s._-]+${classKeyword}[\\s\\S]*`
+    : "";
+  return new RegExp(
+    `^(?:none(?:[\\s._\\u2014-]+[\\s\\S]*)?|n\\/?a(?:[\\s._\\u2014-]+[\\s\\S]*)?|not[\\s._-]+(?:applicable|required|needed|provided)(?:[\\s._\\u2014-]+[\\s\\S]*)?${noClassPattern})$`,
+    "i",
+  ).test(v);
 }
 
 function getRequiredVerificationClasses(milestoneId: string): string[] {
@@ -149,10 +155,10 @@ function getRequiredVerificationClasses(milestoneId: string): string[] {
   if (!milestone) return [];
 
   const required: string[] = [];
-  if (!isVerificationNotApplicable(milestone.verification_contract)) required.push("Contract");
-  if (!isVerificationNotApplicable(milestone.verification_integration)) required.push("Integration");
-  if (!isVerificationNotApplicable(milestone.verification_operational)) required.push("Operational");
-  if (!isVerificationNotApplicable(milestone.verification_uat)) required.push("UAT");
+  if (!isVerificationNotApplicable(milestone.verification_contract, "contract")) required.push("Contract");
+  if (!isVerificationNotApplicable(milestone.verification_integration, "integration")) required.push("Integration");
+  if (!isVerificationNotApplicable(milestone.verification_operational, "operational")) required.push("Operational");
+  if (!isVerificationNotApplicable(milestone.verification_uat, "uat")) required.push("UAT");
   return required;
 }
 
