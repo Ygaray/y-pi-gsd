@@ -33,9 +33,23 @@ exactly these directories, non-recursively (`*.test.js` / `*.test.mjs`, no `**`,
 
 - `tests/live-workflow/*.unit.test.ts`
 
-**Out of scope for this document / for GREEN-06:** `test:integration`, `test:packages`,
-`test:e2e`, and `test:live-workflow` (the non-`:unit` live-workflow run). A green unit suite is not
-a green repository — it is a bounded claim about exactly the globs above.
+**Out of scope for this document / for GREEN-06:** `test:integration`, `test:e2e`, and
+`test:live-workflow` (the non-`:unit` live-workflow run). A green unit suite is not a green
+repository — it is a bounded claim about exactly the globs above.
+
+**`test:packages` is a separate, enforced-green gate (Phase 27, D-04) — no longer out of scope
+for this document.** `test:packages` (`test:compile && test:packages:compiled`) discovers and
+runs every workspace package's `packages/<pkg>/src/**` and `packages/<pkg>/test/**` under
+`node --test`, generically — no package-name special-casing (see `scripts/compile-tests.mjs`'s
+per-package entry-point collection and `scripts/run-package-tests.cjs`'s
+`selectPackageTestFiles`). Three vendored packages — `pi-ai`, `pi-coding-agent`, `pi-agent-core` —
+carry a `packages/<pkg>/test/**` corpus that is Vitest-based, not `node:test`-based; those files
+are excluded from `test:packages` by a content-based filter (`isVitestFile`, keyed on a
+`from "vitest"` / `require("vitest")` import) rather than by quarantine — `pi-ai` and
+`pi-agent-core` already run their Vitest corpus under their own `vitest --run` script, and
+`pi-coding-agent`'s currently has no runner of its own (unaffected by this gate either way). This
+is discovery-scoping by file content, not a documented-skip — see §3a for the `test:packages`
+skip inventory (currently empty).
 
 ## 2. Gate command
 
@@ -80,6 +94,32 @@ form.
 |---|---|---|---|---|
 | `src/resources/extensions/gsd/tests/markdown-renderer.test.ts` | 582 | `renderPlanFromDb creates parse-compatible slice plan + task plan files` | Skipped 2026-06-23 (commit `51c42bfcf`, "skip stale-render tests during flat-phase transition") as one of a batch of 9 stale-render/renderer tests disabled while `detectStaleRenders` was temporarily hardcoded to return `[]`. The test body has since been rewritten in place for the flat-phase model (asserts zero per-task plan files, reads the stored plan artifact directly instead of per-task files — see lines 640-664), but the `{ skip: true }` marker was never removed alongside that rewrite. | `detectStaleRenders` was reactivated via projection-drift detection in commit `1990a8b4` (2026-09-14, "Re-enable ADR-045 stale-render detection via projection drift"). Run this file standalone with `{ skip: true }` removed; if the flat-phase-rewritten body passes, delete the marker. **Flagged as needing owner confirmation** — this documentation pass verified the body reads as flat-phase-correct by inspection but did not remove the marker or re-run the test, per this plan's prohibition on touching skip state. **Phase 22 re-verified this marker in place at line 582 (unchanged) and deliberately did not un-skip it — D-04's bar is zero failures, not fewer skips, and un-skipping risks reintroducing the stale-render defect this skip guards.** |
 | `src/resources/extensions/gsd/tests/integration/integration-proof.test.ts` | 434 | `recovery: DB loss → migrateFromMarkdown restores state, stale render detection` | **Out of unit-suite scope** — lives under a `**/tests/integration/` subdirectory, excluded by `test:unit:compiled`'s non-recursive glob (see Scope). Documented here so it is not mistaken for a gap in this inventory. Skipped 2026-06-23 (commit `a336f878c`, "Keep the stale-render integration test skipped, consistent with the full disable above") for the same root cause as the row above: `detectStaleRenders` was hardcoded to return `[]` because the per-project layout gate (`isLegacyMilestonesLayout`) was unreliable — `git-service.ts` creates `milestones/<mid>/` dirs for integration-branch metadata even in flat-phase projects, which was triggering a reconciliation failure loop. | Same reactivation as the row above (`1990a8b4`, 2026-09-14) may have resolved the underlying cause. Run this file standalone with `{ skip: true }` removed and confirm the R010 (DB-loss recovery)/R013 (stale-render detection) scenario passes under the reactivated implementation. Not gating for GREEN-06 since it is out of scope, but **flagged as needing owner confirmation** since the disabling condition may no longer hold. **Phase 22 re-verified this marker in place at line 434 (unchanged) and deliberately did not un-skip it — same D-04 rationale as the row above.** |
+
+## 3a. `test:packages` skip inventory (Phase 27)
+
+The `test:packages` skip set is **empty**. `packages/pi-tui/test/` (28 `.test.ts` files) was wired
+into the compile+run harness as a first-class peer of `src/` (Phase 27 Plan 01, D-01/D-02), and
+every one of the 9 pre-existing failing cases in `tui-render.test.ts` (out of 24 total; the
+ROADMAP's stale "~13 red" figure had already been cut to 9 by an unrelated same-day commit before
+this phase started) was individually root-caused and disposed of by fix-or-rewrite (Phase 27 Plan
+02) — one genuine product bug (an anchor-convention mismatch between `fullRender`'s top-anchored
+`fixedHeightAnchor` branch and the sibling append-repaint path, fixed in place as
+`repaintTopAnchoredShortBlock`, formerly `repaintBottomAnchoredShortBlock`), one dead-code wiring
+gap (`isTermuxSession()` defined but never called, now wired into the resize branch), and 7 stale
+assertions rewritten to the current post-Phase-25 top-anchored/bottom-anchored-pristine contract.
+Zero cases were quarantined via `{ skip: true }`, `test.skip`, `it.skip`, `describe.skip`, or
+`{ todo: true }` — a fresh scan of `packages/*/test/**` and `packages/*/src/**` for those forms
+finds no hits. Per D-03, this registry's `documented-skip` disposition is reserved for cases
+legitimately blocked by environment/timing constraints, each carrying a mandatory Un-skip
+condition — none exist for `test:packages` today, and none were needed: `packages/pi-tui/test/`'s
+full 670-test corpus (including the TUI-01/TUI-04 `tui-scrollback-regression.test.ts` guard,
+11/11) is green with zero skips.
+
+The pre-existing, unrelated `@opengsd/mcp-server` `workflow-tools.test.ts` registration gap
+(58-vs-62 / 41-vs-45 registered tools, discovered during this phase's own research and unrelated
+to pi-tui) was fixed directly (Phase 27 Plan 03: registered the 4 missing `gsd_track_*` tools) —
+also not a skip, a genuine fix. This closes INC-2026-09-26-02 and re-certifies GREEN-01, GREEN-06,
+TUI-01, and TUI-04.
 
 ## 4. Phase 19 delta and Phase 22 disposition (dated history)
 
