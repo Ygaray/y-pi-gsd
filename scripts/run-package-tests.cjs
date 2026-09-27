@@ -159,7 +159,12 @@ function runPackageScript(command, args, cwd = REPO_ROOT, label = command, timeo
 }
 
 function buildNodeTestArgs(files) {
-	return ['--test-force-exit', '--test', ...files]
+	// --test-concurrency=1: node's default concurrent test-file execution (tied to
+	// os.availableParallelism()) causes non-deterministic silent test-count drops
+	// (tests vanish from the tally without being counted as failed/skipped/cancelled).
+	// Serializing file execution is the only concurrency setting that reproduced
+	// zero variance across repeated runs. See GREEN-01 (Phase 27).
+	return ['--test-force-exit', '--test-concurrency=1', '--test', ...files]
 }
 
 function main() {
