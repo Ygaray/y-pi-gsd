@@ -4,6 +4,7 @@ import { clampThinkingLevel, type Message, type Model, streamSimple } from "@gsd
 import { getAgentDir } from "@gsd/pi-coding-agent/config.js";
 import { resolvePath } from "@gsd/pi-coding-agent/utils/paths.js";
 import { AgentSession } from "./agent-session.js";
+import { parseAnthropicRateLimitHeaders, type RateLimitStatus } from "./rate-limit-headers.js";
 import { formatNoModelsAvailableMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import { AuthStorage } from "@gsd/pi-coding-agent/core/auth-storage.js";
 import { DEFAULT_THINKING_LEVEL } from "@gsd/pi-coding-agent/core/defaults.js";
@@ -30,6 +31,12 @@ import {
 	type ToolName,
 	withFileMutationQueue,
 } from "@gsd/pi-coding-agent/core/tools/index.js";
+
+/**
+ * T-28-08: guards the `GSD_DEBUG_RATELIMIT_HEADERS` one-shot capture (see `onResponse` below) so
+ * it fires at most once per process, even across multiple sessions/turns.
+ */
+let hasCapturedDebugRateLimitHeaders = false;
 
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -342,6 +349,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const rateLimitStatusRef: { current?: RateLimitStatus } = {};
 
 	agent = new Agent({
 		initialState: {
@@ -384,6 +392,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return runner.emitBeforeProviderRequest(payload, model);
 		},
 		onResponse: async (response, _model) => {
+			const parsedRateLimitStatus = parseAnthropicRateLimitHeaders(response.headers);
+			if (parsedRateLimitStatus) {
+				rateLimitStatusRef.current = parsedRateLimitStatus;
+			}
+
+			// A-28-02 / T-28-08: a one-shot, prefix-allowlisted capture of the real
+			// `anthropic-ratelimit-*`/`anthropic-fast-*` header names, gated behind an explicit
+			// env var and fired at most once per process. Never dumps the whole header record --
+			// it also carries request ids and other provider metadata that has no business in an
+			// operator's terminal.
+			if (process.env.GSD_DEBUG_RATELIMIT_HEADERS === "1" && !hasCapturedDebugRateLimitHeaders) {
+				hasCapturedDebugRateLimitHeaders = true;
+				const captured = Object.entries(response.headers).filter(([key]) => {
+					const lower = key.toLowerCase();
+					return lower.startsWith("anthropic-ratelimit") || lower.startsWith("anthropic-fast");
+				});
+				if (captured.length > 0) {
+					console.error("[GSD_DEBUG_RATELIMIT_HEADERS] captured headers:", Object.fromEntries(captured));
+				}
+			}
+
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("after_provider_response")) {
 				return;
@@ -434,6 +463,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		initialActiveToolNames,
 		allowedToolNames,
 		extensionRunnerRef,
+		rateLimitStatusRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

@@ -23,12 +23,16 @@ type UsageTotals = {
 	cost: number;
 };
 
+type RateLimitWindow = { usedPercent: number; resetsAtEpochSec: number | null };
+type RateLimitStatus = { session: RateLimitWindow | null; weekly: RateLimitWindow | null };
+
 function createSession(options: {
 	sessionName?: string;
 	modelId?: string;
 	provider?: string;
 	contextPercent?: number | null;
 	usage?: UsageTotals;
+	rateLimitStatus?: RateLimitStatus | undefined;
 }): AgentSession {
 	const usage: UsageTotals = options.usage ?? {
 		input: 0,
@@ -57,6 +61,7 @@ function createSession(options: {
 			isUsingOAuth: () => false,
 			getProviderAuthMode: () => undefined,
 		},
+		getRateLimitStatus: () => options.rateLimitStatus,
 	};
 
 	return session as unknown as AgentSession;
@@ -192,6 +197,60 @@ describe("FooterComponent stacked render", () => {
 		const unavailableCount = row2Plain.split("unavailable").length - 1;
 		assert.equal(unavailableCount, 2, `expected exactly 2 "unavailable" literals, got: ${row2Plain}`);
 		assert.doesNotMatch(row2Plain, /context: unavailable/);
+	});
+
+	it("renders real session and weekly windows with bar, percent, and reset countdown when both are supplied", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		const session = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 42, resetsAtEpochSec: nowEpochSec + 3600 },
+				weekly: { usedPercent: 10, resetsAtEpochSec: nowEpochSec + 86400 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		assert.equal(lines.length, 2);
+		for (const line of lines) {
+			assert.equal(visibleWidth(line), width);
+		}
+
+		const row2Plain = stripVTControlCharacters(lines[1]!);
+		assert.match(row2Plain, /session: [█░]{10} 42% ↻1h/);
+		assert.match(row2Plain, /weekly: [█░]{10} 10% ↻1d/);
+		assert.equal(row2Plain.includes("unavailable"), false);
+	});
+
+	it("renders unavailable for both usage segments when getRateLimitStatus() returns undefined", () => {
+		const width = 120;
+		const session = createSession({ sessionName: "demo", rateLimitStatus: undefined });
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		const row2Plain = stripVTControlCharacters(lines[1]!);
+		const unavailableCount = row2Plain.split("unavailable").length - 1;
+		assert.equal(unavailableCount, 2, `expected exactly 2 "unavailable" literals, got: ${row2Plain}`);
+	});
+
+	it("renders a real session segment and unavailable weekly when only the session window is supplied (A-28-01)", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		const session = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 55, resetsAtEpochSec: nowEpochSec + 3600 },
+				weekly: null,
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		const row2Plain = stripVTControlCharacters(lines[1]!);
+		assert.match(row2Plain, /session: [█░]{10} 55%/);
+		const unavailableCount = row2Plain.split("unavailable").length - 1;
+		assert.equal(unavailableCount, 1, `expected exactly 1 "unavailable" literal, got: ${row2Plain}`);
 	});
 
 	it("renders git dirty/staged/untracked/ahead/behind markers attached directly to the branch on row 1", () => {

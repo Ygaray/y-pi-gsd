@@ -216,11 +216,9 @@ export class FooterComponent implements Component {
 		});
 
 		const nowEpochSec = Math.floor(Date.now() / 1000);
-		// Plan 03 replaces these two `null`s with real windows from `session.getRateLimitStatus()`;
-		// nothing else about the row changes then. Rendering the honest `unavailable` today is the
-		// correct user-visible state — no provider data is wired yet — not a placeholder.
-		const sessionRowSegment = formatMeterRowSegment("session", null, nowEpochSec);
-		const weeklyRowSegment = formatMeterRowSegment("weekly", null, nowEpochSec);
+		const rateLimits = this.session.getRateLimitStatus();
+		const sessionRowSegment = formatMeterRowSegment("session", rateLimits?.session ?? null, nowEpochSec);
+		const weeklyRowSegment = formatMeterRowSegment("weekly", rateLimits?.weekly ?? null, nowEpochSec);
 
 		const row2Separator = theme.fg("dim", " · ");
 		const row2Segments = [contextRowSegment, sessionRowSegment, weeklyRowSegment].filter(

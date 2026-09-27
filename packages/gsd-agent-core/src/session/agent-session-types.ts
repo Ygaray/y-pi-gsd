@@ -23,6 +23,7 @@ import type { SettingsManager } from "@gsd/pi-coding-agent/core/settings-manager
 import type { SourceInfo } from "@gsd/pi-coding-agent/core/source-info.js";
 import type { SessionStartEvent } from "@gsd/pi-coding-agent/core/extensions/index.js";
 import type { CompactionResult } from "../compaction/index.js";
+import type { RateLimitStatus } from "../rate-limit-headers.js";
 
 // Skill Block Parsing
 // ============================================================================
@@ -151,6 +152,8 @@ export interface AgentSessionConfig {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
+	/** Mutable ref populated by sdk.ts's onResponse handler with the latest parsed rate-limit status */
+	rateLimitStatusRef?: { current?: RateLimitStatus };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 }
