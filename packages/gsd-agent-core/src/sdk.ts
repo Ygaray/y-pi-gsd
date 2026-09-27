@@ -394,10 +394,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		onResponse: async (response, model) => {
 			const parsedRateLimitStatus = parseAnthropicRateLimitHeaders(response.headers);
 			if (parsedRateLimitStatus) {
-				// CR-03: record which provider's response produced this status, so a consumer
-				// (AgentSession.getRateLimitStatus) can detect and discard a stale reading once the
-				// active model has switched to a different provider.
-				rateLimitStatusRef.current = parsedRateLimitStatus;
+				// WR-01: a `null` field on `parsedRateLimitStatus` only means "this response's headers
+				// didn't carry that window" (e.g. a weekly figure resent less often than every turn) —
+				// it must not blank out a still-valid previously-known value for that window. Merge
+				// per-window instead of replacing the whole struct. The previous reading is only
+				// eligible to fill a gap when it came from the *same* provider (CR-03) — a provider
+				// switch must never let a stale window leak through the merge.
+				const previous = rateLimitStatusRef.provider === model.provider ? rateLimitStatusRef.current : undefined;
+				rateLimitStatusRef.current = {
+					session: parsedRateLimitStatus.session ?? previous?.session ?? null,
+					weekly: parsedRateLimitStatus.weekly ?? previous?.weekly ?? null,
+				};
 				rateLimitStatusRef.provider = model.provider;
 			}
 
