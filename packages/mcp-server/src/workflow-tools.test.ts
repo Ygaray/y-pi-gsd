@@ -1368,6 +1368,192 @@ describe("workflow MCP tools", () => {
     }
   });
 
+  it("blocks gsd_track_create while a discussion gate is pending, but gsd_track_list stays exempt", async () => {
+    const base = makeTmpBase();
+    try {
+      writeWriteGateSnapshot(base, { pendingGateId: "depth_verification_M001_confirm" });
+
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const createTool = server.tools.find((t) => t.name === "gsd_track_create");
+      const listTool = server.tools.find((t) => t.name === "gsd_track_list");
+      assert.ok(createTool, "gsd_track_create should be registered");
+      assert.ok(listTool, "gsd_track_list should be registered");
+
+      const createResult = await createTool!.handler({
+        projectDir: base,
+        type: "backlog",
+        title: "Should be blocked by pending discussion gate",
+      });
+      assertToolError(createResult, /Discussion gate .* has not been confirmed/);
+
+      const listResult = await listTool!.handler({ projectDir: base });
+      assert.notEqual(
+        (listResult as any).isError,
+        true,
+        "gsd_track_list is read-only and must stay write-gate-exempt",
+      );
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_track_create/update/close/list round-trip end-to-end and refs fully replace on update", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const createTool = server.tools.find((t) => t.name === "gsd_track_create");
+      const updateTool = server.tools.find((t) => t.name === "gsd_track_update");
+      const closeTool = server.tools.find((t) => t.name === "gsd_track_close");
+      const listTool = server.tools.find((t) => t.name === "gsd_track_list");
+      assert.ok(createTool, "gsd_track_create should be registered");
+      assert.ok(updateTool, "gsd_track_update should be registered");
+      assert.ok(closeTool, "gsd_track_close should be registered");
+      assert.ok(listTool, "gsd_track_list should be registered");
+
+      const createResult = await createTool!.handler({
+        projectDir: base,
+        type: "backlog",
+        title: "Wire track tools into MCP surface",
+        severity: "MEDIUM",
+        refs: [{ refKind: "phase", refValue: "27" }],
+      });
+      const createText = (createResult as any).content[0].text as string;
+      assert.match(createText, /^Filed TRACK-\d+/);
+      const trackId = createText.match(/TRACK-\d+/)![0];
+
+      const listAfterCreate = await listTool!.handler({ projectDir: base });
+      const afterCreateDetails = (listAfterCreate as any).structuredContent;
+      assert.ok(
+        afterCreateDetails.items.some((item: any) => item.id === trackId),
+        "newly created item should be visible via gsd_track_list",
+      );
+
+      const updateResult = await updateTool!.handler({
+        projectDir: base,
+        trackId,
+        refs: [{ refKind: "requirement", refValue: "R-01" }],
+      });
+      assert.notEqual((updateResult as any).isError, true, "update should succeed");
+
+      const listAfterUpdate = await listTool!.handler({ projectDir: base, all: true });
+      const updatedItem = (listAfterUpdate as any).structuredContent.items.find(
+        (item: any) => item.id === trackId,
+      );
+      assert.ok(updatedItem, "updated item should still be listed");
+      assert.deepEqual(
+        updatedItem.refs.map((ref: any) => ({ refKind: ref.refKind, refValue: ref.refValue })),
+        [{ refKind: "requirement", refValue: "R-01" }],
+        "refs must be fully replaced, not merged, by gsd_track_update",
+      );
+
+      const closeResult = await closeTool!.handler({
+        projectDir: base,
+        trackId,
+        status: "resolved",
+      });
+      assert.match((closeResult as any).content[0].text as string, /Closed TRACK-\d+ as resolved/);
+
+      const listAfterClose = await listTool!.handler({ projectDir: base });
+      const closedListDetails = (listAfterClose as any).structuredContent;
+      assert.ok(
+        !closedListDetails.items.some((item: any) => item.id === trackId),
+        "resolved item should no longer appear in the default non-terminal listing",
+      );
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("strips projectDir before delegating gsd_track_create to the executor", async () => {
+    const base = makeTmpBase();
+    const capturePath = join(base, "captured-track-create-args.json");
+    const mockModulePath = join(base, "mock-track-executors.mjs");
+    const prevModule = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const prevCapture = process.env.GSD_TEST_TRACK_CREATE_CAPTURE_PATH;
+    try {
+      const mockSource = `
+import { writeFileSync } from "node:fs";
+
+const noop = async () => ({ content: [{ type: "text", text: "noop" }] });
+
+export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "UAT", "CONTEXT", "PLAN"];
+export const resolveMilestoneStatusObservationTokenState = () => "malformed";
+export const executeMilestoneStatus = noop;
+export const executePlanMilestone = noop;
+export const executePlanSlice = noop;
+export const executeReplanSlice = noop;
+export const executeReplanTask = noop;
+export const executeReworkBriefSave = noop;
+export const executeSliceComplete = noop;
+export const executeCompleteMilestone = noop;
+export const executeValidateMilestone = noop;
+export const executeReassessRoadmap = noop;
+export const executeSaveGateResult = noop;
+export const executeSummarySave = noop;
+export const executeUatResultSave = noop;
+export const executeTaskComplete = noop;
+export const executeTaskReopen = noop;
+export const executeTaskRecoveryResume = noop;
+export const executeTaskSettle = noop;
+export const executeSliceReopen = noop;
+export const executeSkipSlice = noop;
+export const executeMilestoneReopen = noop;
+export const executeTrackUpdate = noop;
+export const executeTrackClose = noop;
+export const executeTrackList = noop;
+
+export const executeTrackCreate = async (params, projectDir) => {
+  const capturePath = process.env.GSD_TEST_TRACK_CREATE_CAPTURE_PATH;
+  if (capturePath) {
+    writeFileSync(capturePath, JSON.stringify({ params, projectDir }, null, 2));
+  }
+  return { content: [{ type: "text", text: "Filed TRACK-000" }], details: { operation: "track_create", trackId: "TRACK-000" } };
+};
+`;
+      writeFileSync(mockModulePath, mockSource, "utf-8");
+      process.env.GSD_WORKFLOW_EXECUTORS_MODULE = mockModulePath;
+      process.env.GSD_TEST_TRACK_CREATE_CAPTURE_PATH = capturePath;
+
+      const { registerWorkflowTools: freshRegisterWorkflowTools } = await import(
+        cacheBustedWorkflowToolsImport("track-create-capture")
+      );
+      const server = makeMockServer();
+      freshRegisterWorkflowTools(server as any);
+      const createTool = server.tools.find((t) => t.name === "gsd_track_create");
+      assert.ok(createTool, "gsd_track_create should be registered");
+
+      await createTool!.handler({
+        projectDir: base,
+        type: "incident",
+        title: "Capture executor args",
+      });
+
+      const captured = JSON.parse(readFileSync(capturePath, "utf-8"));
+      assert.equal(captured.projectDir, base, "executor must still receive projectDir as its own argument");
+      assert.equal(
+        captured.params.projectDir,
+        undefined,
+        "projectDir must be stripped from the params object handed to the executor",
+      );
+      assert.equal(captured.params.type, "incident");
+      assert.equal(captured.params.title, "Capture executor args");
+    } finally {
+      if (prevModule === undefined) {
+        delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_EXECUTORS_MODULE = prevModule;
+      }
+      if (prevCapture === undefined) {
+        delete process.env.GSD_TEST_TRACK_CREATE_CAPTURE_PATH;
+      } else {
+        process.env.GSD_TEST_TRACK_CREATE_CAPTURE_PATH = prevCapture;
+      }
+      cleanup(base);
+    }
+  });
+
   it("blocks workflow mutation tools during queue mode", async () => {
     const base = makeTmpBase();
     try {
