@@ -83,6 +83,7 @@ export const ThemeJsonSchema = Type.Object({
     modeValidation: Type.Optional(ColorValueSchema),
     modeDebug: Type.Optional(ColorValueSchema),
     modeCompact: Type.Optional(ColorValueSchema),
+    contextOrange: Type.Optional(ColorValueSchema),
   }),
   export: Type.Optional(
     Type.Object({

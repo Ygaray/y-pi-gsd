@@ -32,6 +32,7 @@ const dark: ThemeJson = {
 		lineSoft: "#4e596d",
 		textSoft: "#dce4f2",
 		accent: "#8db7ff",
+		orange: "#e08c3c",
 		selectedBg: "#1d2430",
 		userMsgBg: "#232c3a",
 		toolPendingBg: "#171c26",
@@ -51,6 +52,7 @@ const dark: ThemeJson = {
 		dim: "dimGray",
 		text: "",
 		thinkingText: "gray",
+		contextOrange: "orange",
 
 		selectedBg: "selectedBg",
 		userMessageBg: "userMsgBg",
@@ -126,6 +128,7 @@ const tuiClassic: ThemeJson = {
 		dimGray: "#666666",
 		darkGray: "#505050",
 		accent: "#8abeb7",
+		orange: "#d9822b",
 		selectedBg: "#3a3a4a",
 		userMsgBg: "#343541",
 		toolPendingBg: "#282832",
@@ -145,6 +148,7 @@ const tuiClassic: ThemeJson = {
 		dim: "dimGray",
 		text: "",
 		thinkingText: "gray",
+		contextOrange: "orange",
 
 		selectedBg: "selectedBg",
 		userMessageBg: "userMsgBg",
@@ -213,6 +217,7 @@ const light: ThemeJson = {
 		red: "#dc2626",
 		yellow: "#b45309",
 		warning: "#9a3412",
+		orange: "#c2410c",
 		mediumGray: "#4b5563",
 		dimGray: "#6b7280",
 		lightGray: "#cbd5e1",
@@ -235,6 +240,7 @@ const light: ThemeJson = {
 		dim: "dimGray",
 		text: "",
 		thinkingText: "mediumGray",
+		contextOrange: "orange",
 
 		selectedBg: "selectedBg",
 		userMessageBg: "userMsgBg",
@@ -302,6 +308,7 @@ const vivid: ThemeJson = {
 		dimGray: "#93a6d6",
 		darkGray: "#475569",
 		accent: "#14b8a6",
+		orange: "#fb923c",
 		selectedBg: "#1e1b4b",
 		userMsgBg: "#172554",
 		toolPendingBg: "#1e293b",
@@ -321,6 +328,7 @@ const vivid: ThemeJson = {
 		dim: "dimGray",
 		text: "",
 		thinkingText: "gray",
+		contextOrange: "orange",
 
 		selectedBg: "selectedBg",
 		userMessageBg: "userMsgBg",
