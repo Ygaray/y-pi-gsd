@@ -180,6 +180,15 @@ type CacheEntry = { state: GsdPlanningState | null; cachedAtMs: number };
  * negative (no `.planning` anywhere up to the filesystem root) case.
  */
 const stateCache = new Map<string, CacheEntry>();
+/**
+ * Caps `stateCache`'s growth (IN-02) — in the normal interactive session this map holds one or a
+ * handful of keys, but a caller that passes many distinct `cwd` values over a long-running process
+ * (tests, or a host reusing this module across many workspaces) would otherwise grow it forever,
+ * including one permanent entry per negative/`null` result. Eviction below is FIFO by insertion
+ * order (a `Map` preserves it, and each write re-inserts its key at the end) rather than a full LRU
+ * — sufficient to bound memory without adding an access-order tracking structure.
+ */
+const MAX_CACHE_ENTRIES = 50;
 
 /**
  * Bounded read of at most `MAX_READ_BYTES` from `path` — never reads a pathological file fully into
@@ -220,7 +229,14 @@ export function readPlanningState(cwd: string, nowMs: number = Date.now()): GsdP
 
 		const path = findPlanningStatePath(cwd);
 		const state = path === null ? null : parseStateMd(readBounded(path) ?? "");
+		// Delete before re-set so an existing key moves to the end of the Map's insertion order —
+		// the eviction below then always drops the least-recently-written entry (IN-02).
+		stateCache.delete(cwd);
 		stateCache.set(cwd, { state, cachedAtMs: nowMs });
+		if (stateCache.size > MAX_CACHE_ENTRIES) {
+			const oldestKey = stateCache.keys().next().value;
+			if (oldestKey !== undefined) stateCache.delete(oldestKey);
+		}
 		return state;
 	} catch {
 		return null;
