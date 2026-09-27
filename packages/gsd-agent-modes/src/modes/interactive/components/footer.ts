@@ -28,13 +28,6 @@ import { isGsdStatusWidgetVisible } from "./gsd-status-widget.js";
 /** Extension status keys shown in the footer center when the GSD strip is visible. */
 const PRIMARY_STATUS_KEYS = ["gsd-step", "zz-notifications", "gsd-fast"] as const;
 
-function sanitizeStatusText(text: string): string {
-	return text
-		.replace(/[\r\n\t]/g, " ")
-		.replace(/ +/g, " ")
-		.trim();
-}
-
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -64,7 +57,7 @@ function pickPrimaryExtensionStatus(
 	for (const key of PRIMARY_STATUS_KEYS) {
 		const raw = statuses.get(key);
 		if (!raw) continue;
-		const text = sanitizeStatusText(raw);
+		const text = sanitizeFooterText(raw);
 		if (text) return { key, text };
 	}
 	return undefined;
@@ -77,7 +70,7 @@ function formatSecondaryExtensionStatuses(
 	return Array.from(statuses.entries())
 		.filter(([key]) => !excludedKeys.has(key))
 		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([, text]) => sanitizeStatusText(text))
+		.map(([, text]) => sanitizeFooterText(text))
 		.filter(Boolean)
 		.join(" ");
 }
