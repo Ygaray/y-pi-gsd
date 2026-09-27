@@ -17,11 +17,13 @@ import { renderProgressBar, type StatusTone } from "./transcript-design.js";
 import {
 	applyBlinkCue,
 	formatGitMarkers,
+	formatMilestoneRow,
 	formatResetIn,
 	METER_BAR_WIDTH,
 	resolveMeterTone,
 	sanitizeFooterText,
 } from "./gsd-statusline-format.js";
+import type { GsdPlanningState } from "./gsd-state-reader.js";
 
 before(() => {
 	initTheme("dark", false);
@@ -206,5 +208,89 @@ describe("custom-theme fallback (pre-existing theme JSON without contextOrange)"
 		} finally {
 			rmSync(tmpDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("formatMilestoneRow", () => {
+	const IN_FLIGHT_STATE: GsdPlanningState = {
+		milestone: "v6",
+		milestoneName: "Operator-Surface Finish + Reliability Tail",
+		currentPhase: "28",
+		status: "planning",
+		completedPhases: 0,
+		totalPhases: 6,
+		percent: 0,
+	};
+
+	it("returns the empty string for a null state", () => {
+		assert.equal(formatMilestoneRow(null), "");
+	});
+
+	it("returns the empty string when the scene cannot be resolved (no current_phase/status signal)", () => {
+		const state: GsdPlanningState = {
+			milestone: "v6",
+			milestoneName: "Test",
+			currentPhase: null,
+			status: null,
+			completedPhases: null,
+			totalPhases: null,
+			percent: null,
+		};
+		assert.equal(formatMilestoneRow(state), "");
+	});
+
+	it("renders '{version} {name} {10-cell bar} {scene}' for an in-flight state", () => {
+		const plain = stripVTControlCharacters(formatMilestoneRow(IN_FLIGHT_STATE));
+		assert.equal(plain, "v6 Operator-Surface Finish + Reliability Tail ░░░░░░░░░░ Phase 28 planning");
+	});
+
+	it("draws the bar via the shared renderProgressBar 10-cell block-glyph vocabulary at half progress", () => {
+		const state: GsdPlanningState = { ...IN_FLIGHT_STATE, completedPhases: 3 };
+		const plain = stripVTControlCharacters(formatMilestoneRow(state));
+		const barMatch = plain.match(/[█░]{10}/);
+		assert.ok(barMatch, `expected a 10-cell bar drawn from the █/░ vocabulary, got: ${plain}`);
+		assert.equal(barMatch![0], "█████░░░░░");
+	});
+
+	it("falls back to percent out of 100 when phase counts are absent", () => {
+		const state: GsdPlanningState = {
+			milestone: "v6",
+			milestoneName: "Test",
+			currentPhase: "28",
+			status: "executing",
+			completedPhases: null,
+			totalPhases: null,
+			percent: 50,
+		};
+		const plain = stripVTControlCharacters(formatMilestoneRow(state));
+		const barMatch = plain.match(/[█░]{10}/);
+		assert.equal(barMatch![0], "█████░░░░░");
+	});
+
+	it("renders the literal 'milestone complete' scene", () => {
+		const state: GsdPlanningState = { ...IN_FLIGHT_STATE, completedPhases: 6, percent: 100 };
+		const plain = stripVTControlCharacters(formatMilestoneRow(state));
+		assert.match(plain, /milestone complete$/);
+	});
+
+	it("neutralises an escape sequence embedded in the milestone name before it reaches theme.fg", () => {
+		const state: GsdPlanningState = {
+			...IN_FLIGHT_STATE,
+			milestoneName: "Evil\x1b[31mHACKED\x1b[0mName",
+		};
+		const row = formatMilestoneRow(state);
+		assert.ok(
+			!row.includes("\x1b[31mHACKED"),
+			`expected the embedded escape sequence to be neutralised, got: ${JSON.stringify(row)}`,
+		);
+	});
+
+	it("keeps the milestone name uncoloured beyond 'text' (no accent tone reserved for it)", () => {
+		const plain = formatMilestoneRow(IN_FLIGHT_STATE);
+		const textAnsi = theme.getFgAnsi("text");
+		assert.ok(
+			plain.includes(textAnsi),
+			`expected the milestone name to use the 'text' tone, got: ${JSON.stringify(plain)}`,
+		);
 	});
 });

@@ -8,6 +8,7 @@
 
 import type { GitStatusInfo } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { theme, type ThemeColor } from "@gsd/pi-coding-agent/theme/theme.js";
+import { formatGsdStateScene, type GsdPlanningState } from "./gsd-state-reader.js";
 import { renderProgressBar, type StatusTone } from "./transcript-design.js";
 
 /** Fixed width, in cells, for every meter this phase renders (context/session/weekly/milestone). */
@@ -116,4 +117,42 @@ export function formatMeterRowSegment(
 	}
 
 	return `${labelSegment} ${metric}`;
+}
+
+/**
+ * Resolve the milestone progress bar's done/total pair (SL-02, D-04's locked "Progress bar source"
+ * clause): prefer `completedPhases`/`totalPhases` when both are present and `totalPhases` is
+ * positive; otherwise fall back to `percent` out of 100 (defaulting to 0 when even that is absent),
+ * so a state missing phase counts still renders a bar rather than nothing.
+ */
+function resolveMilestoneBarSegment(state: GsdPlanningState): string {
+	if (state.totalPhases !== null && state.totalPhases > 0 && state.completedPhases !== null) {
+		return renderProgressBar(state.completedPhases, state.totalPhases, METER_BAR_WIDTH, "success");
+	}
+	return renderProgressBar(state.percent ?? 0, 100, METER_BAR_WIDTH, "success");
+}
+
+/**
+ * Render footer row 3 — the milestone/phase line (SL-02, ROADMAP SC-4): `{version} {name} {bar}
+ * {scene}`. Returns the empty string for a `null` state or a state whose scene is `null` (per
+ * `formatGsdStateScene`'s own "row 3 is omitted entirely, never blank" contract) — the caller
+ * (`footer.ts`) treats an empty string as "do not render this row at all". Every STATE.md-sourced
+ * string (version, name, scene) is routed through `sanitizeFooterText` before colouring (T-28-11) —
+ * `.planning/STATE.md` is a repository file and a cloned repo can carry escape sequences in it. The
+ * milestone name stays uncoloured beyond `text` — the UI-SPEC Color contract reserves accent tones
+ * for the meters and the git markers only, never the milestone name.
+ */
+export function formatMilestoneRow(state: GsdPlanningState | null): string {
+	if (!state) return "";
+	const scene = formatGsdStateScene(state);
+	if (scene === null) return "";
+
+	const bar = resolveMilestoneBarSegment(state);
+	const parts: string[] = [];
+	if (state.milestone) parts.push(theme.fg("text", sanitizeFooterText(state.milestone)));
+	if (state.milestoneName) parts.push(theme.fg("text", sanitizeFooterText(state.milestoneName)));
+	parts.push(bar);
+	parts.push(theme.fg("dim", sanitizeFooterText(scene)));
+
+	return parts.join(" ");
 }

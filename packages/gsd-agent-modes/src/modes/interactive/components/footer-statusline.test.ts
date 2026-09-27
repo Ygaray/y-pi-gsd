@@ -6,7 +6,10 @@
 // this package), converting them from vitest to `node:test`.
 
 import assert from "node:assert/strict";
-import { before, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@gsd/pi-tui";
 import type { AgentSession } from "@gsd/agent-core";
@@ -14,6 +17,32 @@ import type { GitStatusInfo, ReadonlyFooterDataProvider } from "@gsd/pi-coding-a
 import { initTheme, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { FooterComponent, formatCwdForFooter } from "./footer.js";
 import { resolveMeterTone } from "./gsd-statusline-format.js";
+
+/**
+ * `FooterComponent.render()` resolves `.planning/STATE.md` via `readPlanningState(gsdState?.cwd ??
+ * process.cwd())`, and `findPlanningStatePath`'s walk-up does not stop at a git worktree boundary
+ * (T-28-12, by design) — so leaving `process.cwd()` at its real value here would let every test in
+ * this file pick up this repo's own ambient `.planning/STATE.md` (found by walking up past the
+ * worktree root into the main checkout) and grow an unexpected row 3. `process.cwd` is monkey-patched
+ * to a hermetic, `.planning`-free temp directory for the whole file; `withCwd` below temporarily
+ * repoints it at a directory that DOES have a `.planning/STATE.md` for the row-3-specific tests.
+ */
+const NO_PLANNING_CWD = mkdtempSync(join(tmpdir(), "footer-statusline-no-planning-"));
+const originalProcessCwd = process.cwd;
+
+function withCwd<T>(dir: string, fn: () => T): T {
+	process.cwd = () => dir;
+	try {
+		return fn();
+	} finally {
+		process.cwd = () => NO_PLANNING_CWD;
+	}
+}
+
+function writeStateMd(dir: string, frontmatter: string): void {
+	mkdirSync(join(dir, ".planning"), { recursive: true });
+	writeFileSync(join(dir, ".planning", "STATE.md"), frontmatter, "utf8");
+}
 
 type UsageTotals = {
 	input: number;
@@ -91,6 +120,12 @@ function createFooterData(
 
 before(() => {
 	initTheme("dark", false);
+	process.cwd = () => NO_PLANNING_CWD;
+});
+
+after(() => {
+	process.cwd = originalProcessCwd;
+	rmSync(NO_PLANNING_CWD, { recursive: true, force: true });
 });
 
 describe("formatCwdForFooter", () => {
@@ -307,4 +342,91 @@ describe("FooterComponent stacked render", () => {
 			`expected row 2 to carry the contextOrange ANSI sequence at 72% context, got: ${JSON.stringify(row2)}`,
 		);
 	});
+});
+
+/** Byte-for-byte-shaped (not byte-for-byte content) `.planning/STATE.md` fixture — real field names, a
+ * caller-supplied milestone name so the SC-5 comparison can vary just that one field. */
+function stateMdFixture(milestoneName: string): string {
+	return `---
+milestone: v6
+milestone_name: ${milestoneName}
+current_phase: 28
+status: planning
+progress:
+  total_phases: 6
+  completed_phases: 0
+  percent: 0
+---
+`;
+}
+
+describe("FooterComponent milestone row (row 3, SL-02/ROADMAP SC-4/SC-5)", () => {
+	it("renders exactly 3 rows with the milestone line when .planning/STATE.md resolves", () => {
+		const width = 120;
+		const dir = mkdtempSync(join(tmpdir(), "footer-milestone-"));
+		writeStateMd(dir, stateMdFixture("Operator-Surface Finish + Reliability Tail"));
+
+		const session = createSession({ sessionName: "demo" });
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = withCwd(dir, () => footer.render(width));
+		assert.equal(lines.length, 3);
+		const row3Plain = stripVTControlCharacters(lines[2]!);
+		assert.ok(row3Plain.startsWith("v6"), `expected row 3 to start with the milestone version, got: ${row3Plain}`);
+		assert.ok(
+			row3Plain.trimEnd().endsWith("Phase 28 planning"),
+			`expected row 3 to end with the scene phrase (after trimming the row's full-width padding), got: ${JSON.stringify(row3Plain)}`,
+		);
+		assert.equal(visibleWidth(lines[2]!), width);
+
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("renders exactly 2 rows when no .planning/STATE.md is resolvable", () => {
+		const width = 120;
+		const session = createSession({ sessionName: "demo" });
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		// Default process.cwd() override (NO_PLANNING_CWD) has no .planning anywhere up to the
+		// filesystem root — row 3 must be omitted entirely, never a blank third row.
+		const lines = footer.render(width);
+		assert.equal(lines.length, 2);
+	});
+
+	it(
+		"SC-5: a 1000-character milestone name leaves rows 1 and 2 byte-identical and row 3 still measures exactly the width",
+		{ timeout: 10_000 },
+		async () => {
+			const width = 120;
+			// One fixed directory (and therefore one fixed displayed cwd) for both renders — SC-5 is
+			// about the MILESTONE NAME's length not disturbing rows 1/2, so everything else (session,
+			// footerData, displayed cwd) must be held constant; only the STATE.md content changes.
+			const dir = mkdtempSync(join(tmpdir(), "footer-milestone-sc5-"));
+			const statePath = join(dir, ".planning", "STATE.md");
+			writeStateMd(dir, stateMdFixture("Short"));
+
+			const session = createSession({ sessionName: "demo" });
+			const footer = new FooterComponent(session, createFooterData(1));
+
+			const shortLines = withCwd(dir, () => footer.render(width));
+
+			// readPlanningState caches per-cwd for a 2s TTL (by design — render() runs every
+			// keystroke). Wait past it before rewriting the fixture, or the second render would see
+			// the stale (short-name) cached state instead of the freshly-written long name.
+			await new Promise((resolve) => setTimeout(resolve, 2100));
+			writeFileSync(statePath, stateMdFixture("x".repeat(1000)), "utf8");
+
+			const longLines = withCwd(dir, () => footer.render(width));
+
+			assert.equal(shortLines.length, 3);
+			assert.equal(longLines.length, 3);
+			assert.equal(shortLines[0], longLines[0], "row 1 must be byte-identical regardless of milestone name length");
+			assert.equal(shortLines[1], longLines[1], "row 2 must be byte-identical regardless of milestone name length");
+			assert.notEqual(shortLines[2], longLines[2]);
+			assert.equal(visibleWidth(shortLines[2]!), width);
+			assert.equal(visibleWidth(longLines[2]!), width);
+
+			rmSync(dir, { recursive: true, force: true });
+		},
+	);
 });
