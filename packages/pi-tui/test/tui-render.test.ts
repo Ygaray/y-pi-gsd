@@ -556,6 +556,13 @@ describe("TUI differential rendering", () => {
 		tui.start();
 		await terminal.waitForRender();
 
+		// The pristine first render is bottom-anchored (clear === false — it
+		// deliberately seeds scrollback rather than top-anchoring, see the
+		// comment above fullRender in tui.ts) and this content-only-changes
+		// loop never leaves that anchor position, so 3 lines in a 10-row
+		// viewport land at rows 7-9, not rows 0-2.
+		const offset = 10 - 3;
+
 		// Simulate spinner animation - only middle line changes
 		const spinnerFrames = ["|", "/", "-", "\\"];
 		for (const frame of spinnerFrames) {
@@ -564,9 +571,12 @@ describe("TUI differential rendering", () => {
 			await terminal.waitForRender();
 
 			const viewport = terminal.getViewport();
-			assert.ok(viewport[0]?.includes("Header"), `Header preserved: ${viewport[0]}`);
-			assert.ok(viewport[1]?.includes(`Working ${frame}`), `Spinner updated: ${viewport[1]}`);
-			assert.ok(viewport[2]?.includes("Footer"), `Footer preserved: ${viewport[2]}`);
+			assert.ok(viewport[offset]?.includes("Header"), `Header preserved: ${viewport[offset]}`);
+			assert.ok(
+				viewport[offset + 1]?.includes(`Working ${frame}`),
+				`Spinner updated: ${viewport[offset + 1]}`,
+			);
+			assert.ok(viewport[offset + 2]?.includes("Footer"), `Footer preserved: ${viewport[offset + 2]}`);
 		}
 
 		tui.stop();
@@ -601,11 +611,15 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
+		// The pristine first render is bottom-anchored — 4 lines in a 10-row
+		// viewport land at rows 6-9, not rows 0-3 (see the spinner-case test
+		// above for the full anchor-convention rationale).
+		const offset = 10 - 4;
 		const viewport = terminal.getViewport();
-		assert.ok(viewport[0]?.includes("CHANGED"), `First line changed: ${viewport[0]}`);
-		assert.ok(viewport[1]?.includes("Line 1"), `Line 1 preserved: ${viewport[1]}`);
-		assert.ok(viewport[2]?.includes("Line 2"), `Line 2 preserved: ${viewport[2]}`);
-		assert.ok(viewport[3]?.includes("Line 3"), `Line 3 preserved: ${viewport[3]}`);
+		assert.ok(viewport[offset]?.includes("CHANGED"), `First line changed: ${viewport[offset]}`);
+		assert.ok(viewport[offset + 1]?.includes("Line 1"), `Line 1 preserved: ${viewport[offset + 1]}`);
+		assert.ok(viewport[offset + 2]?.includes("Line 2"), `Line 2 preserved: ${viewport[offset + 2]}`);
+		assert.ok(viewport[offset + 3]?.includes("Line 3"), `Line 3 preserved: ${viewport[offset + 3]}`);
 
 		tui.stop();
 	});
@@ -625,11 +639,14 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
+		// The pristine first render is bottom-anchored — 4 lines in a 10-row
+		// viewport land at rows 6-9, not rows 0-3.
+		const offset = 10 - 4;
 		const viewport = terminal.getViewport();
-		assert.ok(viewport[0]?.includes("Line 0"), `Line 0 preserved: ${viewport[0]}`);
-		assert.ok(viewport[1]?.includes("Line 1"), `Line 1 preserved: ${viewport[1]}`);
-		assert.ok(viewport[2]?.includes("Line 2"), `Line 2 preserved: ${viewport[2]}`);
-		assert.ok(viewport[3]?.includes("CHANGED"), `Last line changed: ${viewport[3]}`);
+		assert.ok(viewport[offset]?.includes("Line 0"), `Line 0 preserved: ${viewport[offset]}`);
+		assert.ok(viewport[offset + 1]?.includes("Line 1"), `Line 1 preserved: ${viewport[offset + 1]}`);
+		assert.ok(viewport[offset + 2]?.includes("Line 2"), `Line 2 preserved: ${viewport[offset + 2]}`);
+		assert.ok(viewport[offset + 3]?.includes("CHANGED"), `Last line changed: ${viewport[offset + 3]}`);
 
 		tui.stop();
 	});
@@ -649,12 +666,15 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
+		// The pristine first render is bottom-anchored — 5 lines in a 10-row
+		// viewport land at rows 5-9, not rows 0-4.
+		const offset = 10 - 5;
 		const viewport = terminal.getViewport();
-		assert.ok(viewport[0]?.includes("Line 0"), `Line 0 preserved: ${viewport[0]}`);
-		assert.ok(viewport[1]?.includes("CHANGED 1"), `Line 1 changed: ${viewport[1]}`);
-		assert.ok(viewport[2]?.includes("Line 2"), `Line 2 preserved: ${viewport[2]}`);
-		assert.ok(viewport[3]?.includes("CHANGED 3"), `Line 3 changed: ${viewport[3]}`);
-		assert.ok(viewport[4]?.includes("Line 4"), `Line 4 preserved: ${viewport[4]}`);
+		assert.ok(viewport[offset]?.includes("Line 0"), `Line 0 preserved: ${viewport[offset]}`);
+		assert.ok(viewport[offset + 1]?.includes("CHANGED 1"), `Line 1 changed: ${viewport[offset + 1]}`);
+		assert.ok(viewport[offset + 2]?.includes("Line 2"), `Line 2 preserved: ${viewport[offset + 2]}`);
+		assert.ok(viewport[offset + 3]?.includes("CHANGED 3"), `Line 3 changed: ${viewport[offset + 3]}`);
+		assert.ok(viewport[offset + 4]?.includes("Line 4"), `Line 4 preserved: ${viewport[offset + 4]}`);
 
 		tui.stop();
 	});
@@ -670,22 +690,27 @@ describe("TUI differential rendering", () => {
 		tui.start();
 		await terminal.waitForRender();
 
+		// The pristine first render is bottom-anchored — 3 lines in a 10-row
+		// viewport land at rows 7-9, not row 0.
 		let viewport = terminal.getViewport();
-		assert.ok(viewport[0]?.includes("Line 0"), "Initial content rendered");
+		assert.ok(viewport[7]?.includes("Line 0"), `Initial content rendered: ${JSON.stringify(viewport)}`);
 
 		// Clear to empty
 		component.lines = [];
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		// Add content back - this should work correctly even after empty state
+		// Add content back - this should work correctly even after empty state.
+		// Clearing to empty commits previousLines back to length 0, so this
+		// re-enters the pristine first-render path and is bottom-anchored
+		// again — 2 lines in a 10-row viewport land at rows 8-9, not rows 0-1.
 		component.lines = ["New Line 0", "New Line 1"];
 		tui.requestRender();
 		await terminal.waitForRender();
 
 		viewport = terminal.getViewport();
-		assert.ok(viewport[0]?.includes("New Line 0"), `New content rendered: ${viewport[0]}`);
-		assert.ok(viewport[1]?.includes("New Line 1"), `New content line 1: ${viewport[1]}`);
+		assert.ok(viewport[8]?.includes("New Line 0"), `New content rendered: ${JSON.stringify(viewport)}`);
+		assert.ok(viewport[9]?.includes("New Line 1"), `New content line 1: ${JSON.stringify(viewport)}`);
 
 		tui.stop();
 	});
@@ -706,7 +731,17 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > initialRedraws, "Shrink should trigger a full redraw");
+		// This shrink shape (previousLines.length > height, newLines.length >
+		// height, shrinking) takes the "tall->tall shrink viewport realign"
+		// branch (tui.ts ~L1387-1419), which commits the repaint directly
+		// (commitFrame("set")) without calling fullRender — so fullRedraws
+		// correctly stays flat here; a cheaper differential repaint, not a
+		// full redraw, is what keeps the viewport content correct below.
+		assert.strictEqual(
+			tui.fullRedraws,
+			initialRedraws,
+			"Tall->tall shrink viewport realign should not trigger a full redraw",
+		);
 		assert.deepStrictEqual(terminal.getViewport(), ["Line 2", "Line 3", "Line 4", "Line 5", "Line 6"]);
 
 		tui.stop();
@@ -772,7 +807,17 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > redrawsBeforeSwitch, "Branch switch should trigger a full redraw");
+		// This shrink (18 total lines -> 15 total lines, both taller than the
+		// 10-row viewport) takes the same "tall->tall shrink viewport realign"
+		// branch as above — it commits directly without calling fullRender,
+		// so fullRedraws correctly stays flat; the stale-content clearing
+		// this test targets comes from the realign's viewport recompute, not
+		// from a full redraw.
+		assert.strictEqual(
+			tui.fullRedraws,
+			redrawsBeforeSwitch,
+			"Chat/editor branch switch (tall->tall shrink realign) should not trigger a full redraw",
+		);
 
 		const viewport = terminal.getViewport();
 		for (let i = 0; i < 10; i++) {
