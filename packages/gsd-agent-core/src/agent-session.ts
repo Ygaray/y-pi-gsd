@@ -127,7 +127,7 @@ export class AgentSession implements AgentSessionHost {
 	_baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	_cwd: string;
 	_extensionRunnerRef: { current?: ExtensionRunner } | undefined;
-	_rateLimitStatusRef: { current?: RateLimitStatus } | undefined;
+	_rateLimitStatusRef: { current?: RateLimitStatus; provider?: string } | undefined;
 	_initialActiveToolNames: string[] | undefined;
 	_allowedToolNames: Set<string> | undefined;
 	_baseToolsOverride: Record<string, AgentTool> | undefined;
@@ -623,7 +623,15 @@ export class AgentSession implements AgentSessionHost {
 	}
 
 	getRateLimitStatus(): RateLimitStatus | undefined {
-		return this._rateLimitStatusRef?.current;
+		// CR-03: a cached status belongs to the provider that produced it. If the active model has
+		// since switched to a different provider (Ctrl+P / setModel / cycleModel), that provider's
+		// responses will never populate the Anthropic-only rate-limit headers this pipeline parses,
+		// so the ref would otherwise keep echoing a stale, now-misattributed figure forever. Falling
+		// back to `undefined` here restores the honest "unavailable" the module documents.
+		const ref = this._rateLimitStatusRef;
+		if (!ref?.current) return undefined;
+		if (ref.provider !== undefined && ref.provider !== this.model?.provider) return undefined;
+		return ref.current;
 	}
 
 	exportToHtml(outputPath?: string): Promise<string> {

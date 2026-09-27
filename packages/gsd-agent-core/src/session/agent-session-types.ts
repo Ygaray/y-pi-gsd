@@ -152,8 +152,12 @@ export interface AgentSessionConfig {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
-	/** Mutable ref populated by sdk.ts's onResponse handler with the latest parsed rate-limit status */
-	rateLimitStatusRef?: { current?: RateLimitStatus };
+	/**
+	 * Mutable ref populated by sdk.ts's onResponse handler with the latest parsed rate-limit status.
+	 * `provider` records which model's provider produced `current`, so a consumer can detect a
+	 * stale reading left over from a since-switched-away-from provider (CR-03).
+	 */
+	rateLimitStatusRef?: { current?: RateLimitStatus; provider?: string };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 }

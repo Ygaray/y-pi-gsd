@@ -349,7 +349,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
-	const rateLimitStatusRef: { current?: RateLimitStatus } = {};
+	const rateLimitStatusRef: { current?: RateLimitStatus; provider?: string } = {};
 
 	agent = new Agent({
 		initialState: {
@@ -391,10 +391,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// detection silently fails.
 			return runner.emitBeforeProviderRequest(payload, model);
 		},
-		onResponse: async (response, _model) => {
+		onResponse: async (response, model) => {
 			const parsedRateLimitStatus = parseAnthropicRateLimitHeaders(response.headers);
 			if (parsedRateLimitStatus) {
+				// CR-03: record which provider's response produced this status, so a consumer
+				// (AgentSession.getRateLimitStatus) can detect and discard a stale reading once the
+				// active model has switched to a different provider.
 				rateLimitStatusRef.current = parsedRateLimitStatus;
+				rateLimitStatusRef.provider = model.provider;
 			}
 
 			// A-28-02 / T-28-08: a one-shot, prefix-allowlisted capture of the real
