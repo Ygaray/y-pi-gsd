@@ -1961,6 +1961,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				description: "Validation verdict",
 			}),
 			remediationRound: Type.Number({
+				minimum: 0,
+				multipleOf: 1,
 				description: "Remediation round (0 for first validation)",
 			}),
 			successCriteriaChecklist: Type.String({
