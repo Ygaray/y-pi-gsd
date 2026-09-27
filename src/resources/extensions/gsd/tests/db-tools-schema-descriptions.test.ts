@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: RELY-01 drift guard - every registered gsd_* tool's exitCode parameter must be documented.
+// File Purpose: RELY-01 drift guard - every gsd_* tool registered by registerDbTools documents its exitCode parameter(s).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -95,14 +95,18 @@ test("gsd_validate_milestone documents its verificationEvidence exitCode field",
   assert.match(description as string, /command/);
 });
 
-test("every registered gsd tool documents every exitCode parameter", () => {
+// Scope note (IN-01): this guard only walks tools registered by
+// registerDbTools. An exitCode-shaped parameter added to a tool registered
+// by a different bootstrap module (exec-tools, query-tools, dynamic-tools,
+// etc.) is NOT covered by this test and needs its own guard.
+test("every gsd_* tool registered by registerDbTools documents every exitCode parameter", () => {
   const pi = makeMockPi();
   registerDbTools(pi as never);
 
   const fields = collectAllExitCodeFields(pi.tools);
   assert.ok(
     fields.length >= 2,
-    `expected at least 2 exitCode fields across registered tools, found ${fields.length} - a vacuous pass would hide a broken walk`,
+    `expected at least 2 exitCode fields across registerDbTools' registered tools, found ${fields.length} - a vacuous pass would hide a broken walk`,
   );
 
   const undocumented = fields.filter((field) => {
@@ -112,6 +116,6 @@ test("every registered gsd tool documents every exitCode parameter", () => {
   assert.deepEqual(
     undocumented.map((field) => `${field.toolName}: ${field.path}`),
     [],
-    "every exitCode parameter must carry a non-empty description",
+    "every exitCode parameter on a registerDbTools-registered tool must carry a non-empty description",
   );
 });
