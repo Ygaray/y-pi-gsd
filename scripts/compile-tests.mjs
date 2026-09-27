@@ -314,6 +314,8 @@ async function main() {
     if (!entry.isDirectory()) continue;
     const pkgSrc = join(packagesDir, entry.name, 'src');
     packageFiles.push(...await collectFiles(pkgSrc));
+    const pkgTest = join(packagesDir, entry.name, 'test');
+    packageFiles.push(...await collectFiles(pkgTest));
   }
 
   // Also compile web/lib/ — some tests import from ../../web/lib/
@@ -512,8 +514,10 @@ async function main() {
       join(DIST_TEST_DIR, 'packages', entry.name, 'src'),
       join(packagesDir, entry.name, 'src'),
     );
-    staleCleaned += await removePathIfExists(
+    staleCleaned += await removeStaleMirroredFiles(
       join(DIST_TEST_DIR, 'packages', entry.name, 'test'),
+      join(packagesDir, entry.name, 'test'),
+      { testOnly: true },
     );
     staleCleaned += await removeCompiledTestArtifacts(
       join(DIST_TEST_DIR, 'packages', entry.name, 'dist'),

@@ -2,7 +2,7 @@
 'use strict'
 
 const { spawnSync } = require('child_process')
-const { existsSync, readdirSync } = require('fs')
+const { existsSync, readdirSync, readFileSync } = require('fs')
 const { join, relative } = require('path')
 const { getLinkablePackages, REPO_ROOT } = require('./lib/workspace-manifest.cjs')
 
@@ -33,9 +33,21 @@ function findTestFiles(dir) {
 	return out
 }
 
+function isVitestFile(filePath) {
+	try {
+		const content = readFileSync(filePath, 'utf8')
+		return /from\s*["']vitest["']|require\(["']vitest["']\)/.test(content)
+	} catch {
+		return false
+	}
+}
+
 function selectPackageTestFiles(distTestPkg, pkgDist) {
 	const fromCompiledSrc = findTestFiles(join(distTestPkg, 'src'))
-	if (fromCompiledSrc.length > 0) return fromCompiledSrc
+	const fromCompiledTest = findTestFiles(join(distTestPkg, 'test')).filter((f) => !isVitestFile(f))
+	if (fromCompiledSrc.length > 0 || fromCompiledTest.length > 0) {
+		return [...fromCompiledSrc, ...fromCompiledTest]
+	}
 	if (existsSync(distTestPkg)) return []
 	// Fall back to package-local build outputs when test:compile does not cover a package yet.
 	return findTestFiles(pkgDist)
@@ -235,6 +247,7 @@ if (require.main === module) {
 
 module.exports = {
 	findTestFiles,
+	isVitestFile,
 	selectPackageTestFiles,
 	findDistTestFiles,
 	buildNodeTestArgs,
