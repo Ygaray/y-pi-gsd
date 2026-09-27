@@ -60,7 +60,19 @@ async function importKeyTester(): Promise<RuntimeState> {
 		target: "node22",
 		plugins: [plugin],
 	});
-	await import(pathToFileURL(outfile).href);
+	const previousExit = process.exit;
+	const sigintListenersBefore = process.listeners("SIGINT");
+	process.exit = (() => undefined) as typeof process.exit;
+	try {
+		await import(pathToFileURL(outfile).href);
+	} finally {
+		process.exit = previousExit;
+		for (const listener of process.listeners("SIGINT")) {
+			if (!sigintListenersBefore.includes(listener)) {
+				process.removeListener("SIGINT", listener);
+			}
+		}
+	}
 	return (globalThis as typeof globalThis & { __keyTesterState: RuntimeState }).__keyTesterState;
 }
 

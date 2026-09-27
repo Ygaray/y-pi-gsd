@@ -94,10 +94,13 @@ async function importImageTest(imagePath: string): Promise<RuntimeState> {
 	});
 	const originalArgv = process.argv;
 	process.argv = [process.argv[0]!, process.argv[1]!, imagePath];
+	const previousExit = process.exit;
+	process.exit = (() => undefined) as typeof process.exit;
 	try {
 		await import(pathToFileURL(outfile).href);
 		return (globalThis as typeof globalThis & { __imageTestState: RuntimeState }).__imageTestState;
 	} finally {
+		process.exit = previousExit;
 		process.argv = originalArgv;
 	}
 }
