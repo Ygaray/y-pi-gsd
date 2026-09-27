@@ -436,3 +436,77 @@ test("an empty assistant message creates no component", async () => {
 
 	assert.equal(chatContainer.children.length, 0, "an empty message must create no component");
 });
+
+// ── Task 3 (25-05, Gate-2 UAT sign-off item 1): bare repeated message_end
+// against chat-controller.ts's `!host.streamingComponent` fallback branch ──
+//
+// Unlike every case above (which drives an intervening message_update to
+// reach rebuildSegmentsOnMessageEnd's 25-03 guard — see file header note),
+// these two cases deliberately send NOTHING between the two message_end
+// calls. That is the exact shape 25-03-SUMMARY.md's own investigation
+// flagged as unguarded: rs.renderedSegments is empty by the time the second
+// message_end runs (chat-controller.ts's unconditional post-message_end
+// rs.resetStreamingSegments() already cleared it), so
+// rebuildSegmentsOnMessageEnd's early return fires and the ONLY thing left
+// that could duplicate the render is chat-controller.ts's separate
+// `!host.streamingComponent` fallback branch — which these two cases pin
+// directly.
+
+test("a genuinely bare repeated message_end for identical content adds no children (fallback branch guard)", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host = makeMinimalHost(chatContainer, rs);
+
+	const finalContent = [{ type: "text", text: "Final answer." }];
+
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+	// No message_update in between — this is the shape where a provider
+	// delivers the full final content only at message_end, never via deltas,
+	// so host.streamingComponent was never set and the fallback branch is
+	// the ONLY path that renders the first component.
+	await handleAgentEvent(host, messageEnd(finalContent));
+
+	const childrenAfterFirst = [...chatContainer.children];
+	assert.equal(childrenAfterFirst.length, 1, "sanity: the first message_end renders exactly one component");
+
+	// The bare repeat under test: a SECOND message_end for the SAME final
+	// content, with NO intervening message_start or message_update.
+	await handleAgentEvent(host, messageEnd(finalContent));
+
+	assert.equal(
+		chatContainer.children.length,
+		childrenAfterFirst.length,
+		"a bare repeated message_end must not mint a second AssistantMessageComponent via the fallback branch",
+	);
+	assert.equal(
+		chatContainer.children[0],
+		childrenAfterFirst[0],
+		"the surviving child must be the SAME object reference — no remove+re-add churn either",
+	);
+});
+
+test("a genuinely new turn with coincidentally identical content after a finalized turn still renders", async () => {
+	const chatContainer = new Container();
+	const rs = createStreamingRenderState();
+	const host = makeMinimalHost(chatContainer, rs);
+
+	const sameContent = [{ type: "text", text: "Same answer." }];
+
+	// Turn 1: finalize once via the bare fallback shape.
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+	await handleAgentEvent(host, messageEnd(sameContent));
+	assert.equal(chatContainer.children.length, 1, "sanity: turn 1 renders exactly one component");
+
+	// Turn 2: a genuinely NEW turn (message_start fires again) whose final
+	// content coincidentally matches turn 1's content byte-for-byte. Content
+	// equality alone must never suppress this render — only "no new turn
+	// began since the last finalization" may, and a new turn DID begin.
+	await handleAgentEvent(host, { type: "message_start", message: { role: "assistant", content: [] } } as any);
+	await handleAgentEvent(host, messageEnd(sameContent));
+
+	assert.equal(
+		chatContainer.children.length,
+		2,
+		"a genuinely new turn must render its own component even if content coincidentally matches the prior turn",
+	);
+});

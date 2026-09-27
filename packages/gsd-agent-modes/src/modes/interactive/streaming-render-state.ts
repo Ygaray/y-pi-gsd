@@ -58,6 +58,22 @@ export class StreamingRenderState {
 	/** Cache for buildDesiredSegmentsForMessage — avoids O(n) block iteration during streaming. */
 	_desiredSegmentsCache?: DesiredSegmentsCache;
 
+	/**
+	 * Monotonically-incrementing turn-boundary counter, bumped only by
+	 * `resetForNewAssistantMessage()` — i.e. only when a `message_start` for
+	 * an assistant message (or a session-change reset) actually begins a new
+	 * lifecycle. This is the PRIMARY signal chat-controller.ts's message_end
+	 * handler uses to detect a genuinely bare repeated `message_end` (no new
+	 * turn began since the last finalization) — never content equality
+	 * alone, so a genuinely new turn whose content coincidentally matches a
+	 * prior turn's content is never mistaken for a repeat (25-05).
+	 */
+	assistantTurnSeq = 0;
+	/** Snapshot of `assistantTurnSeq` taken at the last message_end finalization. */
+	finalizedTurnSeq = -1;
+	/** Content fingerprint taken at the last message_end finalization — defense-in-depth second check alongside `finalizedTurnSeq`, never the only signal. */
+	finalizedContentFingerprint: string | undefined = undefined;
+
 	resetStreamingSegments(): void {
 		this.lastProcessedContentIndex = 0;
 		this.lastContentLength = 0;
@@ -77,6 +93,7 @@ export class StreamingRenderState {
 	}
 
 	resetForNewAssistantMessage(): void {
+		this.assistantTurnSeq++;
 		this.resetStreamingSegments();
 		this.resetPinnedZone();
 	}

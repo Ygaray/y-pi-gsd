@@ -94,6 +94,37 @@ export function stopActivityIndicator(host: InteractiveModeStateHost): void {
 	}
 }
 
+/**
+ * Comparable identity for an assistant message's final content — used ONLY
+ * as a defense-in-depth second check (alongside `rs.assistantTurnSeq`) to
+ * detect a genuinely bare repeated `message_end` (same content, no
+ * intervening message_start/message_update) in the `message_end` handler's
+ * `!host.streamingComponent` fallback branch below (25-05, Gate-2 UAT
+ * sign-off item 1). Text is compared via exact string equality — no
+ * normalization/trimming — matching chat-segment-walker.ts's
+ * `segmentFingerprint` style, so a whitespace-differing rebuild is never
+ * mistaken for identical.
+ */
+function fingerprintAssistantMessageContent(content: Array<any> | undefined): string {
+	if (!content || content.length === 0) return "empty";
+	return content
+		.map((block) => {
+			switch (block?.type) {
+				case "text":
+					return `text:${block.text ?? ""}`;
+				case "thinking":
+					return `thinking:${block.thinking ?? ""}`;
+				case "toolCall":
+					return `tool:${block.id ?? ""}:${block.name ?? ""}:${JSON.stringify(block.arguments ?? {})}`;
+				case "serverToolUse":
+					return `serverTool:${block.id ?? ""}:${block.name ?? ""}:${JSON.stringify(block.input ?? {})}`;
+				default:
+					return `other:${block?.type ?? "unknown"}:${block?.id ?? ""}`;
+			}
+		})
+		.join("|");
+}
+
 export async function handleAgentEvent(host: InteractiveModeStateHost & {
 	init: () => Promise<void>;
 	getMarkdownThemeWithSettings: () => any;
@@ -327,7 +358,31 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 					// ranges/components don't keep stale partial indices.
 					rebuildSegmentsOnMessageEnd(host, rs, timestampFormat);
 
-					if (!host.streamingComponent && shouldRenderAssistant && !suppressRedundantHandoff) {
+					// Detect a genuinely bare repeated message_end for the SAME
+					// final content, with NO intervening message_start (new turn)
+					// or message_update (real re-stream). rs.resetStreamingSegments()
+					// below runs unconditionally after every assistant message_end,
+					// so a bare repeat empties rs.renderedSegments before it could
+					// ever reach rebuildSegmentsOnMessageEnd's own 25-03 idempotency
+					// guard — leaving THIS fallback branch as the only remaining
+					// path that could mint a second AssistantMessageComponent for
+					// content already fully rendered and torn down by the prior
+					// message_end (25-05, Gate-2 UAT sign-off item 1; closes the
+					// plausible mechanism behind RESEARCH.md's A1 assumption).
+					// PRIMARY signal: rs.assistantTurnSeq (bumped only by
+					// resetForNewAssistantMessage(), i.e. only by an actual new
+					// message_start) must be unchanged since the last finalization
+					// — so a genuinely NEW turn whose content coincidentally
+					// matches a prior turn is never suppressed by content equality
+					// alone. The content fingerprint is a defense-in-depth SECOND
+					// check, not the only one.
+					const finalContentFingerprint = fingerprintAssistantMessageContent(host.streamingMessage.content);
+					const isBareRepeatOfFinalizedTurn =
+						rs.finalizedTurnSeq === rs.assistantTurnSeq &&
+						rs.finalizedContentFingerprint !== undefined &&
+						rs.finalizedContentFingerprint === finalContentFingerprint;
+
+					if (!host.streamingComponent && shouldRenderAssistant && !suppressRedundantHandoff && !isBareRepeatOfFinalizedTurn) {
 						host.streamingComponent = new AssistantMessageComponent(
 							undefined,
 							host.hideThinkingBlock,
@@ -352,6 +407,14 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 						host.streamingComponent.setShowMetadata(true);
 						host.streamingComponent.updateContent(host.streamingMessage);
 					}
+
+					// Snapshot this finalization so a LATER bare repeat (no
+					// intervening message_start/message_update) can be detected
+					// next time — unconditional, so an 8x-repeat chain (the
+					// original BlackJackTrainer M001 shape) stays guarded on
+					// every subsequent call, not just the first repeat.
+					rs.finalizedTurnSeq = rs.assistantTurnSeq;
+					rs.finalizedContentFingerprint = finalContentFingerprint;
 
 				if (host.streamingMessage.stopReason === "aborted" || host.streamingMessage.stopReason === "error") {
 					if (!errorMessage) {
