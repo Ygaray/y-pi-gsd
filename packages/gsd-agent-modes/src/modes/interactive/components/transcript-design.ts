@@ -5,7 +5,7 @@ import { alignRight, isImageLine, padRight, style, truncateToWidth, visibleWidth
 import { theme, type ThemeBg, type ThemeColor } from "@gsd/pi-coding-agent/theme/theme.js";
 import { formatTimestamp, type TimestampFormat } from "./timestamp.js";
 
-export type StatusTone = "running" | "success" | "error" | "warning" | "muted";
+export type StatusTone = "running" | "success" | "error" | "warning" | "muted" | "contextOrange";
 export type TuiTone = "default" | "accent" | "success" | "warning" | "error" | "muted";
 export type TuiBreakpoint = "compact" | "regular" | "wide";
 
@@ -221,6 +221,7 @@ function toneColor(tone: StatusTone): ThemeColor {
 		case "success": return "border";
 		case "error": return "toolError";
 		case "warning": return "warning";
+		case "contextOrange": return "contextOrange";
 		case "muted":
 		default: return "toolMuted";
 	}

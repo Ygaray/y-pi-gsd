@@ -4,7 +4,7 @@
 import { type Component, truncateToWidth } from "@gsd/pi-tui";
 import type { AgentSession } from "@gsd/agent-core";
 import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
-import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
+import { theme, type ThemeColor } from "@gsd/pi-coding-agent/theme/theme.js";
 import { providerAuthBadge, providerDisplayName } from "./model-selector.js";
 import {
 	badge,
@@ -12,10 +12,9 @@ import {
 	renderMinimalFooterLine,
 	renderProgressBar,
 } from "./transcript-design.js";
+import { applyBlinkCue, formatMeterRowSegment, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
 import type { GsdStatusWidgetState } from "./gsd-status-widget.js";
 import { isGsdStatusWidgetVisible } from "./gsd-status-widget.js";
-
-const CONTEXT_BAR_WIDTH = 6;
 
 /** Extension status keys shown in the footer center when the GSD strip is visible. */
 const PRIMARY_STATUS_KEYS = ["gsd-step", "zz-notifications", "gsd-fast"] as const;
@@ -148,9 +147,6 @@ export class FooterComponent implements Component {
 		const gsdWidgetVisible = gsdState ? isGsdStatusWidgetVisible(gsdState, width) : false;
 		const gsdSegment = gsdWidgetVisible ? undefined : badge("● GSD", "default");
 
-		const barColor: "error" | "warning" | "success" =
-			contextPercentValue > 90 ? "error" : contextPercentValue > 70 ? "warning" : "success";
-
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		const primaryStatus = gsdWidgetVisible ? pickPrimaryExtensionStatus(extensionStatuses) : undefined;
 		const secondaryExtText = formatSecondaryExtensionStatuses(
@@ -166,16 +162,22 @@ export class FooterComponent implements Component {
 			providerSuffix = authLabel ? `${providerLabel} ${authLabel}` : providerLabel;
 		}
 
-		const pctLabel = theme.fg(barColor, contextPercent === "?" ? "?" : `${contextPercent}%`);
+		const barTone = resolveMeterTone(contextPercentValue);
+		// resolveMeterTone only ever returns success/warning/contextOrange/error — a literal subset of
+		// both StatusTone and ThemeColor. The percent label colors directly by that literal name (unlike
+		// the bar fill, which goes through renderProgressBar's toneColor() remap) — RESEARCH Pitfall 3.
+		const pctLabel = theme.fg(barTone as ThemeColor, contextPercent === "?" ? "?" : `${contextPercent}%`);
 		const contextTokens = contextUsage?.tokens;
 		const tokenHint =
 			contextPercent === "?" || contextTokens == null
 				? ""
 				: theme.fg("dim", ` ${formatTokens(contextTokens)}/${formatTokens(contextWindow)}`);
 		const pct = contextPercent === "?" ? 0 : contextPercentValue;
-		const contextBar = renderProgressBar(pct, 100, CONTEXT_BAR_WIDTH, barColor);
+		const contextBar = renderProgressBar(pct, 100, METER_BAR_WIDTH, barTone);
 		const autoHint = this.autoCompactEnabled ? theme.fg("dim", " (auto)") : "";
-		const contextSegment = `${contextBar} ${pctLabel}${tokenHint}${autoHint}`;
+		let contextMetric = `${contextBar} ${pctLabel}${tokenHint}${autoHint}`;
+		if (barTone === "error") contextMetric = applyBlinkCue(contextMetric);
+		const contextRowSegment = `${theme.fg("dim", "context:")} ${contextMetric}`;
 
 		const leftSegments = [
 			gsdSegment,
@@ -184,7 +186,6 @@ export class FooterComponent implements Component {
 		].filter((segment): segment is string => !!segment);
 
 		const rightSegments = [
-			contextSegment,
 			cacheSegment,
 			costSegment,
 			providerSuffix ? theme.fg("dim", providerSuffix) : undefined,
@@ -197,7 +198,7 @@ export class FooterComponent implements Component {
 			? primaryStatus?.text
 			: formatWorkspaceCenter(cwd, sessionName);
 
-		const line = layoutFullWidthMinimalFooter(leftSegments, rightSegments, width, (budget) => {
+		const line1 = layoutFullWidthMinimalFooter(leftSegments, rightSegments, width, (budget) => {
 			if (!centerSource) return "";
 			const styled = gsdWidgetVisible
 				? theme.fg("text", centerSource)
@@ -205,6 +206,19 @@ export class FooterComponent implements Component {
 			return truncateToWidth(styled, budget, "…");
 		});
 
-		return renderMinimalFooterLine(line, width);
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		// Plan 03 replaces these two `null`s with real windows from `session.getRateLimitStatus()`;
+		// nothing else about the row changes then. Rendering the honest `unavailable` today is the
+		// correct user-visible state — no provider data is wired yet — not a placeholder.
+		const sessionRowSegment = formatMeterRowSegment("session", null, nowEpochSec);
+		const weeklyRowSegment = formatMeterRowSegment("weekly", null, nowEpochSec);
+
+		const row2Separator = theme.fg("dim", " · ");
+		const row2Segments = [contextRowSegment, sessionRowSegment, weeklyRowSegment].filter(
+			(segment): segment is string => !!segment,
+		);
+		const line2 = row2Segments.join(row2Separator);
+
+		return [...renderMinimalFooterLine(line1, width), ...renderMinimalFooterLine(line2, width)];
 	}
 }

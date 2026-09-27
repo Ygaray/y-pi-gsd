@@ -86,7 +86,8 @@ export type ThemeColor =
 	| "modeWorkflow"
 	| "modeValidation"
 	| "modeDebug"
-	| "modeCompact";
+	| "modeCompact"
+	| "contextOrange";
 
 export type ThemeBg =
 	| "selectedBg"
@@ -408,6 +409,7 @@ function withSemanticColorDefaults(colors: ThemeJson["colors"]): ThemeJson["colo
 		modeValidation: colors.modeValidation ?? colors.warning,
 		modeDebug: colors.modeDebug ?? colors.error,
 		modeCompact: colors.modeCompact ?? colors.muted,
+		contextOrange: colors.contextOrange ?? colors.warning,
 	};
 }
 
