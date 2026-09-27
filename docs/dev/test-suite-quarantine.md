@@ -97,7 +97,9 @@ form.
 
 ## 3a. `test:packages` skip inventory (Phase 27)
 
-The `test:packages` skip set is **empty**. `packages/pi-tui/test/` (28 `.test.ts` files) was wired
+The `test:packages` **disposition-tracked** skip set is **empty** — see below for the pre-existing,
+out-of-scope-for-disposition environment-conditional skips this inventory does not claim to cover.
+`packages/pi-tui/test/` (28 `.test.ts` files) was wired
 into the compile+run harness as a first-class peer of `src/` (Phase 27 Plan 01, D-01/D-02), and
 every one of the 9 pre-existing failing cases in `tui-render.test.ts` (out of 24 total; the
 ROADMAP's stale "~13 red" figure had already been cut to 9 by an unrelated same-day commit before
@@ -107,13 +109,22 @@ this phase started) was individually root-caused and disposed of by fix-or-rewri
 `repaintTopAnchoredShortBlock`, formerly `repaintBottomAnchoredShortBlock`), one dead-code wiring
 gap (`isTermuxSession()` defined but never called, now wired into the resize branch), and 7 stale
 assertions rewritten to the current post-Phase-25 top-anchored/bottom-anchored-pristine contract.
-Zero cases were quarantined via `{ skip: true }`, `test.skip`, `it.skip`, `describe.skip`, or
-`{ todo: true }` — a fresh scan of `packages/*/test/**` and `packages/*/src/**` for those forms
-finds no hits. Per D-03, this registry's `documented-skip` disposition is reserved for cases
-legitimately blocked by environment/timing constraints, each carrying a mandatory Un-skip
-condition — none exist for `test:packages` today, and none were needed: `packages/pi-tui/test/`'s
-full 670-test corpus (including the TUI-01/TUI-04 `tui-scrollback-regression.test.ts` guard,
-11/11) is green with zero skips.
+No *disposition-tracked* document-skips exist for the `test:packages` `node:test` corpus this
+phase wired in (`pi-tui`): `packages/pi-tui/test/`'s full 670-test corpus (including the
+TUI-01/TUI-04 `tui-scrollback-regression.test.ts` guard, 11/11) is green with zero `{ skip: true }`,
+`test.skip`, `it.skip`, `describe.skip`, or `{ todo: true }` markers. A literal
+`grep -rlE "\{\s*skip:\s*true\s*\}|\.skip\(|\{\s*todo:\s*true\s*\}" packages/*/test packages/*/src`
+does return hits elsewhere, but neither is a `test:packages` gap: the `pi-ai` hits
+(`test/tokens.test.ts`, `test/image-tool-result.test.ts`) are Vitest-filtered out of the
+`node --test` corpus by `isVitestFile` (§1) and never selected by `findDistTestFiles`, so they are
+inert for this gate. The `packages/native/src/__tests__/{stream-process,clipboard}.test.mjs` hits
+*are* live — `@gsd/native`'s own `node --test src/__tests__/*.test.mjs` run is part of
+`test:packages` whenever a native addon or `cargo` is available — but they are pre-existing
+environment-conditional runtime skips (clipboard/native-addon unavailable in this environment), not
+a D-03 quarantine disposition, and were not introduced or touched by this phase. Per D-03, this
+registry's `documented-skip` disposition is reserved for cases legitimately blocked by
+environment/timing constraints, each carrying a mandatory Un-skip condition — none of that kind
+exist for the `pi-tui` corpus this phase wired in, and none were needed for it.
 
 The pre-existing, unrelated `@opengsd/mcp-server` `workflow-tools.test.ts` registration gap
 (58-vs-62 / 41-vs-45 registered tools, discovered during this phase's own research and unrelated
