@@ -140,6 +140,7 @@ export class InteractiveMode {
 	private skillCommands = new Map<string, string>();
 	private unsubscribe?: () => void;
 	private _branchChangeUnsub?: () => void;
+	private _gitStatusChangeUnsub?: () => void;
 	private _themeChangeUnsub?: () => void;
 	private markdownThemeCache?: MarkdownTheme;
 	private markdownThemeCacheIndent?: string;
@@ -294,6 +295,10 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
+		this._gitStatusChangeUnsub = this.footerDataProvider.onGitStatusChange(() => {
+			this.ui.requestRender();
+		});
+
 		await this.updateAvailableProviderCount();
 	}
 
@@ -437,6 +442,8 @@ export class InteractiveMode {
 		this.clearExtensionTerminalInputListeners();
 		this._branchChangeUnsub?.();
 		this._branchChangeUnsub = undefined;
+		this._gitStatusChangeUnsub?.();
+		this._gitStatusChangeUnsub = undefined;
 		this._themeChangeUnsub?.();
 		this._themeChangeUnsub = undefined;
 		stopThemeWatcher();

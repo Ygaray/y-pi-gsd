@@ -6,6 +6,7 @@
 // deliberately NOT ported; every colour here goes through `theme.fg` except the one documented
 // `applyBlinkCue` SGR exception).
 
+import type { GitStatusInfo } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { theme, type ThemeColor } from "@gsd/pi-coding-agent/theme/theme.js";
 import { renderProgressBar, type StatusTone } from "./transcript-design.js";
 
@@ -48,6 +49,40 @@ export function formatResetIn(resetsAtEpochSec: number, nowEpochSec: number): st
 	if (secs < 3600) return `${Math.max(1, Math.round(secs / 60))}m`;
 	if (secs < 86400) return `${Math.round(secs / 3600)}h`;
 	return `${Math.round(secs / 86400)}d`;
+}
+
+/**
+ * Sanitize free-form text before it is interpolated into a terminal write (T-28-05) — a shared
+ * version of `footer.ts`'s `sanitizeStatusText` scrub, widened to also remove the escape character
+ * itself (not just CR/LF/TAB), so an embedded ANSI/SGR escape sequence is neutralised into inert
+ * plain text rather than reaching the terminal as a live escape.
+ */
+export function sanitizeFooterText(text: string): string {
+	return text
+		.replace(/[\r\n\t]/g, " ")
+		.replace(/\x1b/g, "")
+		.replace(/ +/g, " ")
+		.trim();
+}
+
+/**
+ * Render the git dirty/staged/untracked/ahead/behind markers for footer row 1 (D-01/D-02, UI-SPEC
+ * "Git status marker tones"). Emits only the markers whose count is non-zero, in the fixed order
+ * staged/dirty/untracked/ahead/behind, with no separator between them. Returns the empty string
+ * when `status` is `null` or every count is zero — per the UI-SPEC Color table, a clean/in-sync
+ * tree is signalled by absence, never a `✓` glyph. The `conflicts` count is captured by
+ * `FooterDataProvider` (Task 1) but has no marker of its own this phase (see UI-SPEC's locked
+ * marker table — only staged/dirty/untracked/ahead/behind are listed).
+ */
+export function formatGitMarkers(status: GitStatusInfo | null): string {
+	if (!status) return "";
+	const parts: string[] = [];
+	if (status.staged) parts.push(theme.fg("success", `+${status.staged}`));
+	if (status.dirty) parts.push(theme.fg("warning", `~${status.dirty}`));
+	if (status.untracked) parts.push(theme.fg("error", `?${status.untracked}`));
+	if (status.ahead) parts.push(theme.fg("success", `↑${status.ahead}`));
+	if (status.behind) parts.push(theme.fg("error", `↓${status.behind}`));
+	return parts.join("");
 }
 
 /**

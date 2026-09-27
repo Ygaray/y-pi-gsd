@@ -12,7 +12,14 @@ import {
 	renderMinimalFooterLine,
 	renderProgressBar,
 } from "./transcript-design.js";
-import { applyBlinkCue, formatMeterRowSegment, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
+import {
+	applyBlinkCue,
+	formatGitMarkers,
+	formatMeterRowSegment,
+	METER_BAR_WIDTH,
+	resolveMeterTone,
+	sanitizeFooterText,
+} from "./gsd-statusline-format.js";
 import type { GsdStatusWidgetState } from "./gsd-status-widget.js";
 import { isGsdStatusWidgetVisible } from "./gsd-status-widget.js";
 
@@ -179,11 +186,13 @@ export class FooterComponent implements Component {
 		if (barTone === "error") contextMetric = applyBlinkCue(contextMetric);
 		const contextRowSegment = `${theme.fg("dim", "context:")} ${contextMetric}`;
 
-		const leftSegments = [
-			gsdSegment,
-			branch ? theme.fg("dim", branch) : undefined,
-			theme.fg("text", modelName),
-		].filter((segment): segment is string => !!segment);
+		const branchSegment = branch
+			? `${theme.fg("dim", sanitizeFooterText(branch))}${formatGitMarkers(this.footerData.getGitStatus())}`
+			: undefined;
+
+		const leftSegments = [gsdSegment, branchSegment, theme.fg("text", modelName)].filter(
+			(segment): segment is string => !!segment,
+		);
 
 		const rightSegments = [
 			cacheSegment,
