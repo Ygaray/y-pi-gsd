@@ -417,6 +417,14 @@ async function main() {
     const pkgSrc = join(packagesDir, entry.name, 'src');
     const pkgDistSrc = join(DIST_TEST_DIR, 'packages', entry.name, 'src');
     await copyAssets(pkgSrc, pkgDistSrc);
+    // Mirror packages/<pkg>/test/ the same way as src/ above: esbuild only
+    // emits compiled .js for .ts/.mjs entry points, so any sibling non-TS
+    // fixture asset (JSON/.md/image/snapshot) a test resolves via a relative
+    // path or import.meta.url would otherwise silently fail to resolve in
+    // dist-test/ (WR-03, Phase 27 review).
+    const pkgTestDir = join(packagesDir, entry.name, 'test');
+    const pkgDistTest = join(DIST_TEST_DIR, 'packages', entry.name, 'test');
+    await copyAssets(pkgTestDir, pkgDistTest);
     // Workspace package symlinks may resolve through dist-test/node_modules on
     // Windows, so the mirrored package tree also needs built package entrypoints.
     await copyAssets(
