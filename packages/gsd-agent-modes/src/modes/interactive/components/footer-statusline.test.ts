@@ -163,6 +163,27 @@ describe("FooterComponent stacked render", () => {
 		assert.ok(barMatch, `expected a 10-cell bar drawn from the █/░ vocabulary, got: ${row2Plain}`);
 	});
 
+	it("renders the usage row's three labelled segments, honestly reporting session/weekly as unavailable", () => {
+		const width = 120;
+		const session = createSession({ sessionName: "demo" });
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		assert.equal(lines.length, 2);
+		for (const line of lines) {
+			assert.equal(visibleWidth(line), width);
+		}
+
+		const row2Plain = stripVTControlCharacters(lines[1]!);
+		assert.match(row2Plain, /context:/);
+		assert.match(row2Plain, /session:/);
+		assert.match(row2Plain, /weekly:/);
+
+		const unavailableCount = row2Plain.split("unavailable").length - 1;
+		assert.equal(unavailableCount, 2, `expected exactly 2 "unavailable" literals, got: ${row2Plain}`);
+		assert.doesNotMatch(row2Plain, /context: unavailable/);
+	});
+
 	it("renders the context meter's filled cells in contextOrange at 72% — distinct from warning", () => {
 		const width = 120;
 		const session = createSession({ sessionName: "demo", contextPercent: 72 });

@@ -13,7 +13,7 @@ import { stripVTControlCharacters } from "node:util";
 import { initTheme, loadThemeFromPath, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { builtinThemes } from "@gsd/pi-coding-agent/theme/themes.js";
 import { renderProgressBar, type StatusTone } from "./transcript-design.js";
-import { applyBlinkCue, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
+import { applyBlinkCue, formatResetIn, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
 
 before(() => {
 	initTheme("dark", false);
@@ -92,6 +92,32 @@ describe("blink is a bonus cue, never the sole >=80% signal", () => {
 			blinkStripped.includes(theme.getFgAnsi("error")),
 			"expected the error-tier colour to survive removal of just the blink sequences",
 		);
+	});
+});
+
+describe("formatResetIn", () => {
+	it("returns the empty string for non-finite input on either side", () => {
+		assert.equal(formatResetIn(NaN, 1000), "");
+		assert.equal(formatResetIn(1000, NaN), "");
+		assert.equal(formatResetIn(Infinity, 1000), "");
+	});
+
+	it("returns 'now' at or below zero seconds remaining", () => {
+		assert.equal(formatResetIn(1000, 1000), "now");
+		assert.equal(formatResetIn(999, 1000), "now");
+	});
+
+	it("returns whole minutes, floored at 1, under an hour", () => {
+		assert.equal(formatResetIn(1000 + 12 * 60, 1000), "12m");
+		assert.equal(formatResetIn(1010, 1000), "1m");
+	});
+
+	it("returns whole hours under a day", () => {
+		assert.equal(formatResetIn(1000 + 3 * 3600, 1000), "3h");
+	});
+
+	it("returns whole days at a day or beyond", () => {
+		assert.equal(formatResetIn(1000 + 2 * 86400, 1000), "2d");
 	});
 });
 

@@ -12,7 +12,7 @@ import {
 	renderMinimalFooterLine,
 	renderProgressBar,
 } from "./transcript-design.js";
-import { applyBlinkCue, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
+import { applyBlinkCue, formatMeterRowSegment, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
 import type { GsdStatusWidgetState } from "./gsd-status-widget.js";
 import { isGsdStatusWidgetVisible } from "./gsd-status-widget.js";
 
@@ -206,8 +206,17 @@ export class FooterComponent implements Component {
 			return truncateToWidth(styled, budget, "…");
 		});
 
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		// Plan 03 replaces these two `null`s with real windows from `session.getRateLimitStatus()`;
+		// nothing else about the row changes then. Rendering the honest `unavailable` today is the
+		// correct user-visible state — no provider data is wired yet — not a placeholder.
+		const sessionRowSegment = formatMeterRowSegment("session", null, nowEpochSec);
+		const weeklyRowSegment = formatMeterRowSegment("weekly", null, nowEpochSec);
+
 		const row2Separator = theme.fg("dim", " · ");
-		const row2Segments = [contextRowSegment].filter((segment): segment is string => !!segment);
+		const row2Segments = [contextRowSegment, sessionRowSegment, weeklyRowSegment].filter(
+			(segment): segment is string => !!segment,
+		);
 		const line2 = row2Segments.join(row2Separator);
 
 		return [...renderMinimalFooterLine(line1, width), ...renderMinimalFooterLine(line2, width)];
