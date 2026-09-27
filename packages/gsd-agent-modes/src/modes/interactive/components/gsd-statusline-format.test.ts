@@ -10,10 +10,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { before, describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
+import type { GitStatusInfo } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { initTheme, loadThemeFromPath, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { builtinThemes } from "@gsd/pi-coding-agent/theme/themes.js";
 import { renderProgressBar, type StatusTone } from "./transcript-design.js";
-import { applyBlinkCue, formatResetIn, METER_BAR_WIDTH, resolveMeterTone } from "./gsd-statusline-format.js";
+import {
+	applyBlinkCue,
+	formatGitMarkers,
+	formatResetIn,
+	METER_BAR_WIDTH,
+	resolveMeterTone,
+	sanitizeFooterText,
+} from "./gsd-statusline-format.js";
 
 before(() => {
 	initTheme("dark", false);
@@ -118,6 +126,65 @@ describe("formatResetIn", () => {
 
 	it("returns whole days at a day or beyond", () => {
 		assert.equal(formatResetIn(1000 + 2 * 86400, 1000), "2d");
+	});
+});
+
+function gitStatus(overrides: Partial<GitStatusInfo> = {}): GitStatusInfo {
+	return { staged: 0, dirty: 0, untracked: 0, conflicts: 0, ahead: 0, behind: 0, ...overrides };
+}
+
+describe("formatGitMarkers", () => {
+	it("returns the empty string for null status", () => {
+		assert.equal(formatGitMarkers(null), "");
+	});
+
+	it("returns the empty string when every count is zero", () => {
+		assert.equal(formatGitMarkers(gitStatus()), "");
+	});
+
+	it("renders a single non-zero marker alone", () => {
+		const stripped = stripVTControlCharacters(formatGitMarkers(gitStatus({ staged: 2 })));
+		assert.equal(stripped, "+2");
+	});
+
+	it("renders all five markers in the locked order +N~N?N↑N↓N with no separator", () => {
+		const status = gitStatus({ staged: 1, dirty: 3, untracked: 2, ahead: 4, behind: 5 });
+		const stripped = stripVTControlCharacters(formatGitMarkers(status));
+		assert.equal(stripped, "+1~3?2↑4↓5");
+	});
+
+	it("colors each marker with its locked tone", () => {
+		const status = gitStatus({ staged: 1, dirty: 3, untracked: 2, ahead: 4, behind: 5 });
+		const rendered = formatGitMarkers(status);
+		assert.ok(rendered.includes(theme.fg("success", "+1")), "staged should be success-toned");
+		assert.ok(rendered.includes(theme.fg("warning", "~3")), "dirty should be warning-toned");
+		assert.ok(rendered.includes(theme.fg("error", "?2")), "untracked should be error-toned");
+		assert.ok(rendered.includes(theme.fg("success", "↑4")), "ahead should be success-toned");
+		assert.ok(rendered.includes(theme.fg("error", "↓5")), "behind should be error-toned");
+	});
+
+	it("never emits a checkmark or other clean-state glyph", () => {
+		assert.doesNotMatch(formatGitMarkers(gitStatus()), /✓/);
+		assert.doesNotMatch(formatGitMarkers(gitStatus({ staged: 1 })), /✓/);
+	});
+
+	it("omits a zero count entirely rather than rendering a zero-valued marker", () => {
+		const stripped = stripVTControlCharacters(formatGitMarkers(gitStatus({ staged: 1, ahead: 0 })));
+		assert.equal(stripped, "+1");
+		assert.doesNotMatch(stripped, /↑0/);
+	});
+});
+
+describe("sanitizeFooterText", () => {
+	it("strips CR/LF/TAB and collapses runs of spaces, mirroring footer.ts's sanitizeStatusText", () => {
+		assert.equal(sanitizeFooterText("main\r\n\tbranch"), "main branch");
+		assert.equal(sanitizeFooterText("a   b"), "a b");
+	});
+
+	it("removes the escape character itself, neutralising an embedded escape sequence before theme.fg", () => {
+		const malicious = "main\x1b[31mFAKE\x1b[0m";
+		const sanitized = sanitizeFooterText(malicious);
+		assert.ok(!sanitized.includes("\x1b"), `expected no ESC byte, got: ${JSON.stringify(sanitized)}`);
 	});
 });
 

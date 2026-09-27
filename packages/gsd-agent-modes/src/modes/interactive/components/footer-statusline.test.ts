@@ -10,7 +10,7 @@ import { before, describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@gsd/pi-tui";
 import type { AgentSession } from "@gsd/agent-core";
-import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
+import type { GitStatusInfo, ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { initTheme, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { FooterComponent, formatCwdForFooter } from "./footer.js";
 import { resolveMeterTone } from "./gsd-statusline-format.js";
@@ -62,12 +62,22 @@ function createSession(options: {
 	return session as unknown as AgentSession;
 }
 
-function createFooterData(providerCount = 1): ReadonlyFooterDataProvider {
+function createFooterData(
+	providerCount = 1,
+	options: { branch?: string | null; gitStatus?: GitStatusInfo | null } = {},
+): ReadonlyFooterDataProvider {
+	const branch = options.branch === undefined ? "main" : options.branch;
+	const gitStatus = options.gitStatus === undefined ? null : options.gitStatus;
 	return {
-		getGitBranch: () => "main",
+		getGitBranch: () => branch,
 		getExtensionStatuses: () => new Map<string, string>(),
 		getAvailableProviderCount: () => providerCount,
 		onBranchChange: (callback: () => void) => {
+			void callback;
+			return () => {};
+		},
+		getGitStatus: () => gitStatus,
+		onGitStatusChange: (callback: () => void) => {
 			void callback;
 			return () => {};
 		},
@@ -182,6 +192,44 @@ describe("FooterComponent stacked render", () => {
 		const unavailableCount = row2Plain.split("unavailable").length - 1;
 		assert.equal(unavailableCount, 2, `expected exactly 2 "unavailable" literals, got: ${row2Plain}`);
 		assert.doesNotMatch(row2Plain, /context: unavailable/);
+	});
+
+	it("renders git dirty/staged/untracked/ahead/behind markers attached directly to the branch on row 1", () => {
+		const width = 120;
+		const session = createSession({ sessionName: "demo" });
+		const gitStatus: GitStatusInfo = { staged: 1, dirty: 3, untracked: 2, conflicts: 0, ahead: 4, behind: 5 };
+		const footer = new FooterComponent(session, createFooterData(1, { gitStatus }));
+
+		const lines = footer.render(width);
+		assert.equal(lines.length, 2);
+		for (const line of lines) {
+			assert.equal(visibleWidth(line), width);
+		}
+
+		const row1Plain = stripVTControlCharacters(lines[0]!);
+		assert.match(row1Plain, /main\+1~3\?2↑4↓5/, `expected markers attached to branch, got: ${row1Plain}`);
+	});
+
+	it("renders the bare branch name with no marker run for a clean, in-sync tree", () => {
+		const width = 120;
+		const session = createSession({ sessionName: "demo" });
+		const cleanStatus: GitStatusInfo = { staged: 0, dirty: 0, untracked: 0, conflicts: 0, ahead: 0, behind: 0 };
+		const footer = new FooterComponent(session, createFooterData(1, { gitStatus: cleanStatus }));
+
+		const lines = footer.render(width);
+		const row1Plain = stripVTControlCharacters(lines[0]!);
+		assert.match(row1Plain, /main/);
+		assert.doesNotMatch(row1Plain, /main[+~?↑↓]/);
+	});
+
+	it("omits the branch+marker segment entirely outside a repo", () => {
+		const width = 120;
+		const session = createSession({ sessionName: "demo" });
+		const footer = new FooterComponent(session, createFooterData(1, { branch: null }));
+
+		const lines = footer.render(width);
+		const row1Plain = stripVTControlCharacters(lines[0]!);
+		assert.doesNotMatch(row1Plain, /main/);
 	});
 
 	it("renders the context meter's filled cells in contextOrange at 72% — distinct from warning", () => {
