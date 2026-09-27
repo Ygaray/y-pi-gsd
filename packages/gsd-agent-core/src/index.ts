@@ -104,3 +104,4 @@ export {
 	type ExtensionUiSnapshot,
 	type WebExtensionUiFields,
 } from "./extension-ui-snapshot.js";
+export { type RateLimitStatus, type RateLimitWindow } from "./rate-limit-headers.js";

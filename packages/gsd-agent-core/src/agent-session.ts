@@ -38,6 +38,7 @@ import type {
 } from "@gsd/pi-coding-agent/core/extensions/index.js";
 import type { BashExecutionMessage, CustomMessage } from "@gsd/pi-coding-agent/core/messages.js";
 import type { ModelRegistry } from "@gsd/pi-coding-agent/core/model-registry.js";
+import type { RateLimitStatus } from "./rate-limit-headers.js";
 import type { PromptTemplate } from "@gsd/pi-coding-agent/core/prompt-templates.js";
 import type { ResourceLoader } from "@gsd/pi-coding-agent/core/resource-loader.js";
 import type { BranchSummaryEntry, SessionManager } from "@gsd/pi-coding-agent/core/session-manager.js";
@@ -126,6 +127,7 @@ export class AgentSession implements AgentSessionHost {
 	_baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	_cwd: string;
 	_extensionRunnerRef: { current?: ExtensionRunner } | undefined;
+	_rateLimitStatusRef: { current?: RateLimitStatus } | undefined;
 	_initialActiveToolNames: string[] | undefined;
 	_allowedToolNames: Set<string> | undefined;
 	_baseToolsOverride: Record<string, AgentTool> | undefined;
@@ -168,6 +170,7 @@ export class AgentSession implements AgentSessionHost {
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
+		this._rateLimitStatusRef = config.rateLimitStatusRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
@@ -617,6 +620,10 @@ export class AgentSession implements AgentSessionHost {
 
 	getContextUsage(): ContextUsage | undefined {
 		return this._navigation.getContextUsage();
+	}
+
+	getRateLimitStatus(): RateLimitStatus | undefined {
+		return this._rateLimitStatusRef?.current;
 	}
 
 	exportToHtml(outputPath?: string): Promise<string> {
