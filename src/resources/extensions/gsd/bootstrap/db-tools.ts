@@ -2012,7 +2012,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 							workingDirectory: Type.String({ minLength: 1 }),
 							startedAt: Type.String({ minLength: 1 }),
 							endedAt: Type.String({ minLength: 1 }),
-							exitCode: Type.Optional(Type.Number()),
+							exitCode: Type.Optional(Type.Number({ description: "Exit code of the command; required when evidenceClass is \"command\", and must be 0 when observation is \"passed\"" })),
 							observation: StringEnum(["passed", "failed", "inconclusive"]),
 							durableOutputRef: Type.String({ minLength: 1 }),
 							testedSourceRevision: Type.String({
