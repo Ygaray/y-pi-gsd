@@ -36,3 +36,24 @@ test("the three reviewer sections are still present and still named A, B, C", ()
   assert.match(prompt, /\*\*Reviewer B - Cross-Slice Integration\*\*/);
   assert.match(prompt, /\*\*Reviewer C - Assessment & Acceptance Criteria\*\*/);
 });
+
+test("the reviewer persona defers to a dispatching task prompt's own output format", () => {
+  assert.match(
+    reviewerPersona,
+    /if the task prompt that dispatched this agent specifies its own output format, verdict vocabulary, or table shape, follow those instructions exactly instead of the format below/i,
+  );
+});
+
+test("the reviewer persona's default verdict vocabulary is preserved for its other callers", () => {
+  assert.match(reviewerPersona, /## Output Format/);
+  assert.match(reviewerPersona, /## Review Summary/);
+  assert.match(reviewerPersona, /## Findings/);
+  assert.match(reviewerPersona, /## Verdict/);
+  assert.match(reviewerPersona, /APPROVE/);
+  assert.match(reviewerPersona, /REQUEST_CHANGES/);
+  assert.match(reviewerPersona, /NEEDS_DISCUSSION/);
+  assert.match(reviewerPersona, /Critical/i);
+  assert.match(reviewerPersona, /High/);
+  assert.match(reviewerPersona, /Medium/);
+  assert.match(reviewerPersona, /Low/);
+});
