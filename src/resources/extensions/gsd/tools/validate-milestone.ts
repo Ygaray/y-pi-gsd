@@ -206,21 +206,6 @@ function recordCanonicalValidation(input: {
     group.push(evidence);
     evidenceByClass.set(className, group);
   }
-  const missingEvidence = input.requiredClasses.filter(
-    (className) => (evidenceByClass.get(className.toLowerCase())?.length ?? 0) === 0,
-  );
-  if (missingEvidence.length > 0) {
-    return {
-      error: `planned ${missingEvidence.join(", ")} verification requires current structured database evidence; verificationClasses prose cannot authorize Milestone validation`,
-    };
-  }
-  for (const className of input.requiredClasses) {
-    const evidence = evidenceByClass.get(className.toLowerCase()) ?? [];
-    if (new Set(evidence.map((entry) => entry.evidenceClass)).size > 1) {
-      return { error: `${className} verification evidence must use one evidence class` };
-    }
-  }
-
   const replaySource = readMilestoneValidationReplaySource(input.invocation.idempotencyKey);
   let sourceRevision: string;
   let sourceTargets: Array<{ id: string; revision: string }>;
@@ -254,6 +239,26 @@ function recordCanonicalValidation(input: {
       revision: target.revision,
     }));
   }
+
+  // #RELY-01: sourceRevision must be computed BEFORE this check so the
+  // missing-evidence error below can embed the real current aggregate
+  // revision — without a placeholder round-trip to learn it.
+  const missingEvidence = input.requiredClasses.filter(
+    (className) => (evidenceByClass.get(className.toLowerCase())?.length ?? 0) === 0,
+  );
+  if (missingEvidence.length > 0) {
+    return {
+      error: `planned ${missingEvidence.join(", ")} verification requires current structured database evidence; verificationClasses prose cannot authorize Milestone validation. `
+        + `Supply at least one verificationEvidence entry for each missing class, with testedSourceRevision set on every entry to the current aggregate source revision ${sourceRevision} — use that value as-is.`,
+    };
+  }
+  for (const className of input.requiredClasses) {
+    const evidence = evidenceByClass.get(className.toLowerCase()) ?? [];
+    if (new Set(evidence.map((entry) => entry.evidenceClass)).size > 1) {
+      return { error: `${className} verification evidence must use one evidence class` };
+    }
+  }
+
   const staleEvidence = (input.params.verificationEvidence ?? []).find(
     (evidence) => evidence.testedSourceRevision !== sourceRevision,
   );
@@ -262,7 +267,7 @@ function recordCanonicalValidation(input: {
       error:
         `${staleEvidence.verificationClass} verification evidence was tested against ` +
         `${staleEvidence.testedSourceRevision}, but the current source revision is ` +
-        `${sourceRevision}`,
+        `${sourceRevision}. If this evidence genuinely reflects the current source, copy ${sourceRevision} onto every verificationEvidence entry (only the first stale entry is reported); if the source has actually moved, re-produce the evidence against the current source instead of relabelling it.`,
     };
   }
 
