@@ -16,10 +16,12 @@ import {
 	applyBlinkCue,
 	formatGitMarkers,
 	formatMeterRowSegment,
+	formatMilestoneRow,
 	METER_BAR_WIDTH,
 	resolveMeterTone,
 	sanitizeFooterText,
 } from "./gsd-statusline-format.js";
+import { readPlanningState } from "./gsd-state-reader.js";
 import type { GsdStatusWidgetState } from "./gsd-status-widget.js";
 import { isGsdStatusWidgetVisible } from "./gsd-status-widget.js";
 
@@ -226,6 +228,15 @@ export class FooterComponent implements Component {
 		);
 		const line2 = row2Segments.join(row2Separator);
 
-		return [...renderMinimalFooterLine(line1, width), ...renderMinimalFooterLine(line2, width)];
+		const planningState = readPlanningState(cwd);
+		const line3 = formatMilestoneRow(planningState);
+
+		const lines = [...renderMinimalFooterLine(line1, width), ...renderMinimalFooterLine(line2, width)];
+		if (line3) {
+			// Own `renderMinimalFooterLine` call, never sharing row 1/2's truncation budget — this
+			// independent per-row truncation is the entire mechanism behind ROADMAP SC-5.
+			lines.push(...renderMinimalFooterLine(line3, width));
+		}
+		return lines;
 	}
 }
