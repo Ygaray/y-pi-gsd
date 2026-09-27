@@ -1796,6 +1796,10 @@ export const executeSkipSlice = (params, projectDir, invocation) =>
   captureSliceLifecycle("skip", params, projectDir, invocation);
 export const executeMilestoneReopen = (params, projectDir, invocation) =>
   captureMilestoneLifecycle("reopen", params, projectDir, invocation);
+export const executeTrackCreate = noop;
+export const executeTrackUpdate = noop;
+export const executeTrackClose = noop;
+export const executeTrackList = noop;
 
 export const executeTaskReopen = async (params, projectDir, invocation) => {
   const capturePath = process.env.GSD_TEST_TASK_REOPEN_CAPTURE_PATH;

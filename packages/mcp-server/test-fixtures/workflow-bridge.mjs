@@ -25,6 +25,10 @@ export {
   noop as executeSliceReopen,
   noop as executeSkipSlice,
   noop as executeMilestoneReopen,
+  noop as executeTrackCreate,
+  noop as executeTrackUpdate,
+  noop as executeTrackClose,
+  noop as executeTrackList,
 };
 
 export function loadWriteGateSnapshot() {

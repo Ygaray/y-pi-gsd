@@ -492,6 +492,51 @@ type WorkflowToolExecutors = {
     basePath: string,
     invocation: ExecutionInvocation,
   ) => Promise<unknown>;
+  executeTrackCreate: (
+    params: {
+      type: "backlog" | "incident";
+      title: string;
+      severity?: "HIGH" | "MEDIUM" | "LOW";
+      detail?: string;
+      dispositionTags?: string[];
+      refs?: Array<{
+        refKind: "phase" | "requirement" | "reviews_md" | "track_item" | "control_plane_incident";
+        refValue: string;
+      }>;
+    },
+    basePath?: string,
+  ) => Promise<unknown>;
+  executeTrackUpdate: (
+    params: {
+      trackId: string;
+      title?: string;
+      severity?: "HIGH" | "MEDIUM" | "LOW";
+      detail?: string;
+      dispositionTags?: string[];
+      status?: "open" | "in-progress" | "resolved" | "closed" | "wont-fix";
+      refs?: Array<{
+        refKind: "phase" | "requirement" | "reviews_md" | "track_item" | "control_plane_incident";
+        refValue: string;
+      }>;
+    },
+    basePath?: string,
+  ) => Promise<unknown>;
+  executeTrackClose: (
+    params: {
+      trackId: string;
+      status?: "resolved" | "closed" | "wont-fix";
+      resolutionNote?: string;
+    },
+    basePath?: string,
+  ) => Promise<unknown>;
+  executeTrackList: (
+    params: {
+      type?: "backlog" | "incident";
+      status?: "open" | "in-progress" | "resolved" | "closed" | "wont-fix";
+      all?: boolean;
+    },
+    basePath?: string,
+  ) => Promise<unknown>;
 };
 
 type WorkflowWriteGateModule = {
@@ -794,6 +839,10 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
     "executeSliceReopen",
     "executeSkipSlice",
     "executeMilestoneReopen",
+    "executeTrackCreate",
+    "executeTrackUpdate",
+    "executeTrackClose",
+    "executeTrackList",
   ];
 
   return Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES) &&
@@ -3065,6 +3114,157 @@ export function registerWorkflowTools(
         const message = err instanceof Error ? err.message : String(err);
         return mapCanonicalReadError("get_requirement", message, params.id);
       }
+    },
+  );
+
+  // ─── Phase 27-03: per-project tracker tools (TRACK-03's tool surface) ────
+  //
+  // Delegates to the extension's existing tracker executors
+  // (workflow-tool-executors.ts's executeTrackCreate/Update/Close/List,
+  // which themselves wrap the same createTrackerItem/updateTrackerItem/
+  // resolveTrackerItem writers and readTrackerItems() reader the `/gsd
+  // track` command surface uses) — mirrors the native registration in
+  // src/resources/extensions/gsd/bootstrap/db-tools.ts so both transports
+  // stay parity-locked, matching ADR-008's "one handler layer, multiple
+  // transports" pattern already used for gsd_task_complete.
+
+  const trackRefParams = {
+    refKind: z
+      .enum(["phase", "requirement", "reviews_md", "track_item", "control_plane_incident"])
+      .describe("What kind of thing this back-reference points at"),
+    refValue: z.string().describe("The referenced id/value (e.g. a phase number)"),
+  };
+
+  const trackCreateParams = {
+    projectDir: projectDirParam,
+    type: z
+      .enum(["backlog", "incident"])
+      .describe("Whether this item is a deferred backlog entry or a harness/tooling incident"),
+    title: z.string().describe("Short, human-readable title"),
+    severity: z
+      .enum(["HIGH", "MEDIUM", "LOW"])
+      .optional()
+      .describe("Severity/priority; defaults to MEDIUM"),
+    detail: z.string().optional().describe("Longer free-text detail/context"),
+    dispositionTags: z
+      .array(z.string())
+      .optional()
+      .describe("Freeform classification tags (e.g. y-pi-gsd-owned)"),
+    refs: z
+      .array(z.object(trackRefParams))
+      .optional()
+      .describe(
+        "Back-references to phases, requirements, REVIEWS.md, other tracker items, or control-plane incidents",
+      ),
+  };
+  const trackCreateSchema = z.object(trackCreateParams);
+
+  server.tool(
+    "gsd_track_create",
+    "Create a durable backlog item or incident in the per-project tracker. Tracker items survive phase and milestone cleanup/archival.",
+    trackCreateParams,
+    async (args: Record<string, unknown>) => {
+      const parsed = parseWorkflowArgs(trackCreateSchema, args);
+      const { projectDir, ...params } = parsed;
+      await enforceWorkflowWriteGate("gsd_track_create", projectDir);
+      const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
+        const { executeTrackCreate } = await getWorkflowToolExecutors();
+        return executeTrackCreate(params, projectDir);
+      });
+      return adaptExecutorResult(result);
+    },
+  );
+
+  const trackUpdateParams = {
+    projectDir: projectDirParam,
+    trackId: z.string().describe("The tracker item id to update (e.g. TRACK-003)"),
+    title: z.string().optional().describe("New title"),
+    severity: z.enum(["HIGH", "MEDIUM", "LOW"]).optional().describe("New severity"),
+    detail: z.string().optional().describe("New detail/context text"),
+    dispositionTags: z
+      .array(z.string())
+      .optional()
+      .describe("Replacement set of freeform classification tags"),
+    status: z
+      .enum(["open", "in-progress", "resolved", "closed", "wont-fix"])
+      .optional()
+      .describe("New status; must be a legal transition from the current status"),
+    refs: z
+      .array(z.object(trackRefParams))
+      .optional()
+      .describe("Replaces the ENTIRE back-reference set for this item — not a merge"),
+  };
+  const trackUpdateSchema = z.object(trackUpdateParams);
+
+  server.tool(
+    "gsd_track_update",
+    "Update one or more mutable fields (and/or the back-reference set) on an existing tracker item.",
+    trackUpdateParams,
+    async (args: Record<string, unknown>) => {
+      const parsed = parseWorkflowArgs(trackUpdateSchema, args);
+      const { projectDir, ...params } = parsed;
+      await enforceWorkflowWriteGate("gsd_track_update", projectDir);
+      const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
+        const { executeTrackUpdate } = await getWorkflowToolExecutors();
+        return executeTrackUpdate(params, projectDir);
+      });
+      return adaptExecutorResult(result);
+    },
+  );
+
+  const trackCloseParams = {
+    projectDir: projectDirParam,
+    trackId: z.string().describe("The tracker item id to close (e.g. TRACK-003)"),
+    status: z
+      .enum(["resolved", "closed", "wont-fix"])
+      .optional()
+      .describe("Terminal status to settle into; defaults to closed"),
+    resolutionNote: z.string().optional().describe("Free-text note explaining the resolution"),
+  };
+  const trackCloseSchema = z.object(trackCloseParams);
+
+  server.tool(
+    "gsd_track_close",
+    "Settle a tracker item exactly once — resolved, closed, or wont-fix.",
+    trackCloseParams,
+    async (args: Record<string, unknown>) => {
+      const parsed = parseWorkflowArgs(trackCloseSchema, args);
+      const { projectDir, ...params } = parsed;
+      await enforceWorkflowWriteGate("gsd_track_close", projectDir);
+      const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
+        const { executeTrackClose } = await getWorkflowToolExecutors();
+        return executeTrackClose(params, projectDir);
+      });
+      return adaptExecutorResult(result);
+    },
+  );
+
+  const trackListParams = {
+    projectDir: projectDirParam,
+    type: z.enum(["backlog", "incident"]).optional().describe("Filter to one item type"),
+    status: z
+      .enum(["open", "in-progress", "resolved", "closed", "wont-fix"])
+      .optional()
+      .describe("Filter to one status"),
+    all: z
+      .boolean()
+      .optional()
+      .describe("Include terminal items (resolved/closed/wont-fix); defaults to non-terminal only"),
+  };
+  const trackListSchema = z.object(trackListParams);
+
+  server.tool(
+    "gsd_track_list",
+    "List tracker items with the deterministic open/closed status summary — the read to run before assuming nothing is outstanding.",
+    trackListParams,
+    async (args: Record<string, unknown>) => {
+      const parsed = parseWorkflowArgs(trackListSchema, args);
+      const { projectDir, ...params } = parsed;
+      const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
+        const { executeTrackList } = await getWorkflowToolExecutors();
+        return executeTrackList(params, projectDir);
+      });
+      return adaptExecutorResult(result);
     },
   );
 
