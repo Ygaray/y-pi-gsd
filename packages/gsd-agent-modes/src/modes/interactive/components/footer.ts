@@ -130,7 +130,7 @@ export class FooterComponent implements Component {
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(0) : "?";
 
 		const branch = this.footerData.getGitBranch();
-		const modelName = displayModel?.id || "no-model";
+		const modelName = sanitizeFooterText(displayModel?.id || "no-model");
 
 		const inputSide = totalInput + totalCacheRead + totalCacheWrite;
 		let cacheSegment: string | undefined;
@@ -161,7 +161,7 @@ export class FooterComponent implements Component {
 			const authMode = this.session.modelRegistry.getProviderAuthMode(displayModel.provider);
 			const authLabel = providerAuthBadge(authMode);
 			const providerLabel = providerDisplayName(displayModel.provider);
-			providerSuffix = authLabel ? `${providerLabel} ${authLabel}` : providerLabel;
+			providerSuffix = sanitizeFooterText(authLabel ? `${providerLabel} ${authLabel}` : providerLabel);
 		}
 
 		const barTone = resolveMeterTone(contextPercentValue);
@@ -196,8 +196,14 @@ export class FooterComponent implements Component {
 			secondaryExtText ? theme.fg("dim", secondaryExtText) : undefined,
 		].filter((segment): segment is string => !!segment);
 
-		const cwd = gsdState?.cwd ?? process.cwd();
-		const sessionName = this.session.sessionManager.getSessionName() ?? gsdState?.sessionName;
+		// `rawCwd` stays unsanitized for the filesystem lookup below (`readPlanningState`) — only the
+		// display copy needs escape-stripping; sanitizing the path itself could point the STATE.md
+		// read at a directory that doesn't exist.
+		const rawCwd = gsdState?.cwd ?? process.cwd();
+		const cwd = sanitizeFooterText(rawCwd);
+		const sessionName = sanitizeFooterText(
+			this.session.sessionManager.getSessionName() ?? gsdState?.sessionName ?? "",
+		);
 		const centerSource = gsdWidgetVisible
 			? primaryStatus?.text
 			: formatWorkspaceCenter(cwd, sessionName);
@@ -221,7 +227,7 @@ export class FooterComponent implements Component {
 		);
 		const line2 = row2Segments.join(row2Separator);
 
-		const planningState = readPlanningState(cwd);
+		const planningState = readPlanningState(rawCwd);
 		const line3 = formatMilestoneRow(planningState);
 
 		const lines = [...renderMinimalFooterLine(line1, width), ...renderMinimalFooterLine(line2, width)];
