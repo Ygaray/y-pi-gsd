@@ -177,6 +177,14 @@ export class FooterDataProvider {
 	private refreshInFlight = false;
 	private refreshPending = false;
 	private disposed = false;
+	/**
+	 * Bumped on every `setCwd()` call (WR-02). A debounced refresh in flight for the *previous*
+	 * cwd captures this value before awaiting its subprocess/readFileSync result; if the
+	 * generation has since moved on by the time it resolves, the result is discarded instead of
+	 * being written into `cachedBranch`/`cachedGitStatus` — otherwise a stale directory's git
+	 * data could land in the new directory's cache slot.
+	 */
+	private cwdGeneration = 0;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
@@ -257,6 +265,7 @@ export class FooterDataProvider {
 		}
 
 		this.cwd = cwd;
+		this.cwdGeneration++;
 		if (this.refreshTimer) {
 			clearTimeout(this.refreshTimer);
 			this.refreshTimer = null;
@@ -310,9 +319,13 @@ export class FooterDataProvider {
 		}
 
 		this.refreshInFlight = true;
+		const gen = this.cwdGeneration;
 		try {
 			const nextBranch = await this.resolveGitBranchAsync();
 			if (this.disposed) return;
+			// WR-02: `setCwd()` may have run while the await above was pending. Its result belongs
+			// to a directory we've since navigated away from — discard rather than caching it.
+			if (gen !== this.cwdGeneration) return;
 			if (this.cachedBranch !== undefined && this.cachedBranch !== nextBranch) {
 				this.cachedBranch = nextBranch;
 				this.notifyBranchChange();
@@ -336,6 +349,7 @@ export class FooterDataProvider {
 		}
 
 		this.gitStatusRefreshInFlight = true;
+		const gen = this.cwdGeneration;
 		try {
 			let nextStatus: GitStatusInfo | null;
 			try {
@@ -346,6 +360,9 @@ export class FooterDataProvider {
 				return;
 			}
 			if (this.disposed) return;
+			// WR-02: discard a result whose cwd generation has since moved on — see
+			// refreshGitBranchAsync's matching guard for the full rationale.
+			if (gen !== this.cwdGeneration) return;
 			if (this.cachedGitStatus !== undefined && !gitStatusEqual(this.cachedGitStatus, nextStatus)) {
 				this.cachedGitStatus = nextStatus;
 				this.notifyGitStatusChange();
