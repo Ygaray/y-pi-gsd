@@ -263,6 +263,16 @@ test("command evidence requires an exit code and cannot pass with a failing exit
     () => validateMilestone(missingExitCode),
     /command evidence requires an exit code/i,
   );
+  // RELY-01: the appended detail must self-remediate — naming the exact field
+  // and the condition that makes it required, without reading source.
+  let missingExitCodeMessage = "";
+  try {
+    validateMilestone(missingExitCode);
+  } catch (error) {
+    missingExitCodeMessage = (error as Error).message;
+  }
+  assert.match(missingExitCodeMessage, /exitCode/);
+  assert.match(missingExitCodeMessage, /evidenceClass/);
 
   const failedExit = combinedValidationInput("milestone-validation/command/failed-exit");
   failedExit.criteria[0]!.evidence[0]!.exitCode = 1;
@@ -270,6 +280,14 @@ test("command evidence requires an exit code and cannot pass with a failing exit
     () => validateMilestone(failedExit),
     /passing command evidence requires exit code 0/i,
   );
+  // RELY-01: the appended detail must name the inconsistent field pair.
+  let failedExitMessage = "";
+  try {
+    validateMilestone(failedExit);
+  } catch (error) {
+    failedExitMessage = (error as Error).message;
+  }
+  assert.match(failedExitMessage, /observation/);
 });
 
 test("the current schema preserves the v42 validation upgrade from a genuine v41 database", () => {

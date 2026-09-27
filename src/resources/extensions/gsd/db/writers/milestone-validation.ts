@@ -688,10 +688,14 @@ function validateEvidence(
     }
     if (evidence.evidenceClass === "command") {
       if (evidence.exitCode === undefined) {
-        throw new Error("command evidence requires an exit code");
+        throw new Error(
+          "command evidence requires an exit code - set exitCode to the integer exit status of commandOrTool (evidenceClass is \"command\", which makes it required); a passing observation requires that status to be zero",
+        );
       }
       if (evidence.observation === "passed" && evidence.exitCode !== 0) {
-        throw new Error("passing command evidence requires exit code 0");
+        throw new Error(
+          "passing command evidence requires exit code 0 - either record the honest non-zero exitCode with a non-passing observation, or supply the real zero exitCode",
+        );
       }
     }
   }
