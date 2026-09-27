@@ -4,13 +4,14 @@
 import { type Component, truncateToWidth } from "@gsd/pi-tui";
 import type { AgentSession } from "@gsd/agent-core";
 import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
-import { theme, type ThemeColor } from "@gsd/pi-coding-agent/theme/theme.js";
+import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { providerAuthBadge, providerDisplayName } from "./model-selector.js";
 import {
 	badge,
 	layoutFullWidthMinimalFooter,
 	renderMinimalFooterLine,
 	renderProgressBar,
+	toneColor,
 } from "./transcript-design.js";
 import {
 	applyBlinkCue,
@@ -165,10 +166,11 @@ export class FooterComponent implements Component {
 		}
 
 		const barTone = resolveMeterTone(contextPercentValue);
-		// resolveMeterTone only ever returns success/warning/contextOrange/error — a literal subset of
-		// both StatusTone and ThemeColor. The percent label colors directly by that literal name (unlike
-		// the bar fill, which goes through renderProgressBar's toneColor() remap) — RESEARCH Pitfall 3.
-		const pctLabel = theme.fg(barTone as ThemeColor, contextPercent === "?" ? "?" : `${contextPercent}%`);
+		// IN-01: route the percent label through the same toneColor() remap the bar fill uses
+		// (renderProgressBar), rather than casting the tone literal directly to ThemeColor, so the
+		// two render paths can't diverge for a tone whose remap isn't the identity (e.g. "error" ->
+		// "toolError") in a custom theme.
+		const pctLabel = theme.fg(toneColor(barTone), contextPercent === "?" ? "?" : `${contextPercent}%`);
 		const contextTokens = contextUsage?.tokens;
 		const tokenHint =
 			contextPercent === "?" || contextTokens == null

@@ -215,7 +215,14 @@ function padLine(line: string, width: number): string {
 	return padRight(truncateToWidth(line, width, ""), width);
 }
 
-function toneColor(tone: StatusTone): ThemeColor {
+/**
+ * Maps a `StatusTone` to its render color. Exported (IN-01) so callers that color a percent label
+ * to match a `renderProgressBar` fill (the statusline meters) go through the identical remap
+ * instead of casting the tone literal directly to `ThemeColor` — the two render paths previously
+ * could diverge for "error" (bar: `toolError`, label: `error` via cast) in a theme that doesn't
+ * keep those two keys equal.
+ */
+export function toneColor(tone: StatusTone): ThemeColor {
 	switch (tone) {
 		case "running": return "toolRunning";
 		case "success": return "border";

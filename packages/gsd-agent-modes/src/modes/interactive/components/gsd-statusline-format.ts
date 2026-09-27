@@ -7,9 +7,9 @@
 // `applyBlinkCue` SGR exception).
 
 import type { GitStatusInfo } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
-import { theme, type ThemeColor } from "@gsd/pi-coding-agent/theme/theme.js";
+import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { formatGsdStateScene, type GsdPlanningState } from "./gsd-state-reader.js";
-import { renderProgressBar, type StatusTone } from "./transcript-design.js";
+import { renderProgressBar, toneColor, type StatusTone } from "./transcript-design.js";
 
 /** Fixed width, in cells, for every meter this phase renders (context/session/weekly/milestone). */
 export const METER_BAR_WIDTH = 10;
@@ -105,9 +105,10 @@ export function formatMeterRowSegment(
 
 	const tone = resolveMeterTone(window.usedPercent);
 	const bar = renderProgressBar(window.usedPercent, 100, METER_BAR_WIDTH, tone);
-	// resolveMeterTone only ever returns success/warning/contextOrange/error — a literal subset of
-	// both StatusTone and ThemeColor (RESEARCH Pitfall 3; see the matching cast in footer.ts).
-	const pctLabel = theme.fg(tone as ThemeColor, `${Math.round(window.usedPercent)}%`);
+	// IN-01: route the percent label through the same toneColor() remap the bar fill uses (instead
+	// of casting the tone literal directly to ThemeColor), so the two can never diverge for a tone
+	// whose remap isn't the identity (e.g. "error" -> "toolError") in a custom theme.
+	const pctLabel = theme.fg(toneColor(tone), `${Math.round(window.usedPercent)}%`);
 	let metric = `${bar} ${pctLabel}`;
 	if (tone === "error") metric = applyBlinkCue(metric);
 
