@@ -337,6 +337,15 @@ export class TUI extends Container {
 	private _shrinkDebounceActive = false;
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
+	// Tracks which anchor convention the on-screen short block (previousLines.length
+	// <= height) currently uses. A short block can land on screen via two different
+	// writers with different conventions: fullRender's fixedHeightAnchor branch
+	// (clear === true, top-anchored, df41008f) or the pristine first-render branch
+	// (clear === false, deliberately bottom-anchored to seed scrollback, see the
+	// comment above fullRender). The append-growth repaint below must know which
+	// one is currently on screen to avoid writing a top-anchored patch over a
+	// bottom-anchored previous frame (or vice versa) and leaving stale rows.
+	private previousShortBlockTopAnchored = false;
 	private fullRedrawCount = 0;
 	private stopped = false;
 	private readonly useSynchronizedOutput =
@@ -1331,6 +1340,13 @@ export class TUI extends Container {
 			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 			this.terminal.write(buffer);
 			commitFrame(clear ? "set" : "grow");
+			// Record which anchor convention this write left on screen so a later
+			// append-growth repaint (repaintTopAnchoredShortBlock below) knows
+			// whether it's safe to patch in place or must fall back to a full
+			// repaint. Only meaningful when the result fits the viewport
+			// (newLines.length <= height); irrelevant otherwise since a tall
+			// frame can't reach the append-growth branch anyway.
+			this.previousShortBlockTopAnchored = fixedHeightAnchor;
 		};
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
@@ -1341,8 +1357,18 @@ export class TUI extends Container {
 			fs.appendFileSync(logPath, msg);
 		};
 
-		const repaintBottomAnchoredShortBlock = (): void => {
-			const startRow = Math.max(1, height - Math.max(1, newLines.length) + 1);
+		// Repaints an append (previousLines.length <= height && newLines.length <=
+		// height, i.e. both fit inside the viewport) that grew from an already
+		// top-anchored short block. Must agree with fullRender's fixedHeightAnchor
+		// convention (df41008f): a short block sits at the TOP of the viewport, not
+		// the bottom. Anchoring at the bottom here (the pre-df41008f convention)
+		// would leave the previous top-anchored rows un-cleared while writing the
+		// new content lower on screen, duplicating content (#27-D-03 Pitfall #4).
+		// Because this branch only fires on growth (newLines.length >
+		// previousLines.length), top-anchoring and rewriting every row 1..newLines
+		// .length always covers every row the previous top-anchored write touched.
+		const repaintTopAnchoredShortBlock = (): void => {
+			const startRow = 1;
 			let buffer = this.useSynchronizedOutput ? "\x1b[?2026h" : "";
 			// Same rationale as fullRender: this path repaints whole lines with
 			// \x1b[2K, which does not remove Kitty graphics. Delete the prior frame's
@@ -1361,6 +1387,7 @@ export class TUI extends Container {
 			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 			this.terminal.write(buffer);
 			commitFrame("grow");
+			this.previousShortBlockTopAnchored = true;
 		};
 
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
@@ -1370,6 +1397,18 @@ export class TUI extends Container {
 		}
 
 		if (widthChanged || heightChanged) {
+			if (isTermuxSession()) {
+				// Termux's terminal reflows/redraws its own buffer on resize; a forced
+				// full redraw here is both unnecessary and (per the test this wires up)
+				// visibly disruptive. Still record the new dimensions so this branch
+				// isn't re-entered on every subsequent frame for the same resize.
+				logRedraw(
+					`terminal size changed in Termux, skipping full redraw (${this.previousWidth}x${this.previousHeight} -> ${width}x${height})`,
+				);
+				this.previousWidth = width;
+				this.previousHeight = height;
+				return;
+			}
 			logRedraw(`terminal size changed (${this.previousWidth}x${this.previousHeight} -> ${width}x${height})`);
 			fullRender(true);
 			return;
@@ -1468,7 +1507,19 @@ export class TUI extends Container {
 		}
 
 		if (appendedLines && this.previousLines.length <= height && newLines.length <= height) {
-			repaintBottomAnchoredShortBlock();
+			if (this.previousShortBlockTopAnchored) {
+				repaintTopAnchoredShortBlock();
+			} else {
+				// The on-screen short block is bottom-anchored (the pristine
+				// first-render convention, clear === false — see the comment
+				// above fullRender). Patching it in place with a top-anchored
+				// write would leave the stale bottom-anchored rows uncleared
+				// and duplicate content. Fall back to a full repaint, which
+				// top-anchors via fixedHeightAnchor (newLines.length <= height)
+				// and is bounded to the viewport (never touches scrollback).
+				logRedraw("append onto a bottom-anchored short block — full repaint to switch anchor");
+				fullRender(true);
+			}
 			return;
 		}
 
