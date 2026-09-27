@@ -5,6 +5,8 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let resolvedBranch = "main";
+type GitStatusFixture = { kind: "ok"; stdout: string } | { kind: "error" };
+let gitStatusFixture: GitStatusFixture = { kind: "ok", stdout: "" };
 
 vi.mock("child_process", () => ({
 	execFile: vi.fn(
@@ -24,6 +26,16 @@ vi.mock("child_process", () => ({
 						),
 					0,
 				);
+				return;
+			}
+			if (args[1] === "status") {
+				setTimeout(() => {
+					if (gitStatusFixture.kind === "error") {
+						callback(new Error("boom"), "", "");
+						return;
+					}
+					callback(null, gitStatusFixture.stdout, "");
+				}, 0);
 				return;
 			}
 			setTimeout(() => callback(new Error("unsupported"), "", ""), 0);
@@ -259,6 +271,219 @@ describe("FooterDataProvider reftable branch detection", () => {
 			expect(providerWithInternals.headWatcher).not.toBe(originalWatcher);
 		} finally {
 			provider.dispose();
+			vi.useRealTimers();
+		}
+	});
+});
+
+const CLEAN_STATUS_STDOUT = ["# branch.oid abc123", "# branch.head main", "# branch.ab +0 -0", ""].join("\n");
+
+const AHEAD_BEHIND_STATUS_STDOUT = ["# branch.oid abc123", "# branch.head main", "# branch.ab +3 -0", ""].join("\n");
+
+const NO_UPSTREAM_STATUS_STDOUT = ["# branch.oid abc123", "# branch.head main", ""].join("\n");
+
+const MIXED_ENTRIES_STATUS_STDOUT = [
+	"# branch.oid abc123",
+	"# branch.head main",
+	"# branch.ab +0 -0",
+	"1 M. N... 100644 100644 100644 abc123 def456 staged-file.txt",
+	"1 .M N... 100644 100644 100644 abc123 def456 dirty-file.txt",
+	"? untracked-file.txt",
+	"u UU N... 100644 100644 100644 100644 abc123 def456 ghi789 conflict-file.txt",
+	"",
+].join("\n");
+
+type ProviderInternals = { scheduleRefresh: () => void };
+
+function scheduleRefresh(provider: FooterDataProvider): void {
+	(provider as unknown as ProviderInternals).scheduleRefresh();
+}
+
+describe("FooterDataProvider git status", () => {
+	let originalCwd: string;
+	let tempDir: string;
+
+	beforeEach(() => {
+		originalCwd = process.cwd();
+		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-status-"));
+		resolvedBranch = "main";
+		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+		vi.mocked(spawnSync).mockClear();
+		vi.mocked(execFile).mockClear();
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		if (tempDir && existsSync(tempDir)) {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns null outside a repo and never schedules a refresh", () => {
+		const outsideDir = join(tempDir, "not-a-repo");
+		mkdirSync(outsideDir, { recursive: true });
+		process.chdir(outsideDir);
+
+		const provider = new FooterDataProvider(outsideDir);
+		try {
+			expect(provider.getGitStatus()).toBeNull();
+			expect(vi.mocked(execFile)).not.toHaveBeenCalled();
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("parses ahead/behind counts from the branch.ab header", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: AHEAD_BEHIND_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			expect(provider.getGitStatus()).toBeNull();
+			await waitFor(() => provider.getGitStatus() !== null);
+			expect(provider.getGitStatus()).toEqual({
+				staged: 0,
+				dirty: 0,
+				untracked: 0,
+				conflicts: 0,
+				ahead: 3,
+				behind: 0,
+			});
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("defaults ahead/behind to 0 (never undefined/NaN) when branch.ab header is absent", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: NO_UPSTREAM_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+			const status = provider.getGitStatus();
+			expect(status?.ahead).toBe(0);
+			expect(status?.behind).toBe(0);
+			expect(Number.isNaN(status?.ahead)).toBe(false);
+			expect(Number.isNaN(status?.behind)).toBe(false);
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("classifies staged (1 M.), dirty (1 .M), untracked (?), and conflict (u) entries", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: MIXED_ENTRIES_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+			expect(provider.getGitStatus()).toEqual({
+				staged: 1,
+				dirty: 1,
+				untracked: 1,
+				conflicts: 1,
+				ahead: 0,
+				behind: 0,
+			});
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("reports all-zero counts for a clean, in-sync tree", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+			expect(provider.getGitStatus()).toEqual({
+				staged: 0,
+				dirty: 0,
+				untracked: 0,
+				conflicts: 0,
+				ahead: 0,
+				behind: 0,
+			});
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("keeps the previous cached value when a git invocation errors, without throwing", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+			const beforeError = provider.getGitStatus();
+
+			gitStatusFixture = { kind: "error" };
+			const callsBefore = vi.mocked(execFile).mock.calls.length;
+			scheduleRefresh(provider);
+			await waitFor(() => vi.mocked(execFile).mock.calls.length > callsBefore);
+			// give the errored refresh's microtask chain a chance to settle
+			await new Promise((resolve) => setTimeout(resolve, 50));
+
+			expect(() => provider.getGitStatus()).not.toThrow();
+			expect(provider.getGitStatus()).toEqual(beforeError);
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("fires onGitStatusChange only when the computed struct differs from the cached one", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+
+			const onGitStatusChange = vi.fn();
+			provider.onGitStatusChange(onGitStatusChange);
+
+			// Same fixture again -> no change -> no notification
+			const callsBefore = vi.mocked(execFile).mock.calls.length;
+			scheduleRefresh(provider);
+			await waitFor(() => vi.mocked(execFile).mock.calls.length > callsBefore);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(onGitStatusChange).not.toHaveBeenCalled();
+
+			// Different fixture -> change -> notification fires
+			gitStatusFixture = { kind: "ok", stdout: AHEAD_BEHIND_STATUS_STDOUT };
+			const callsBefore2 = vi.mocked(execFile).mock.calls.length;
+			scheduleRefresh(provider);
+			await waitFor(() => vi.mocked(execFile).mock.calls.length > callsBefore2);
+			await waitFor(() => provider.getGitStatus()?.ahead === 3);
+			expect(onGitStatusChange).toHaveBeenCalledTimes(1);
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("does not fire a refresh from a pending debounce timer after dispose()", async () => {
+		vi.useFakeTimers();
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			scheduleRefresh(provider);
+			const callsBefore = vi.mocked(execFile).mock.calls.length;
+			provider.dispose();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(vi.mocked(execFile).mock.calls.length).toBe(callsBefore);
+		} finally {
 			vi.useRealTimers();
 		}
 	});
