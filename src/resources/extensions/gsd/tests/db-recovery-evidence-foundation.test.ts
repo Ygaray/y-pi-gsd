@@ -244,21 +244,27 @@ function insertCriterion(
     kind?: string;
     evidenceClass?: string;
     requirementId?: string | null;
+    // Phase 33 / RELY-05: workflow_acceptance_criteria now carries milestone_id,
+    // and its composite FK (milestone_id, requirement_id) -> requirements only
+    // fires when BOTH are non-null (SQLite MATCH SIMPLE). The table CHECK also
+    // requires milestone_id to be NULL whenever requirement_id is NULL.
+    milestoneId?: string | null;
     supersedesCriterionId?: string | null;
   },
 ): void {
   db.prepare(`
     INSERT INTO workflow_acceptance_criteria (
-      criterion_id, criterion_key, project_id, lifecycle_id, requirement_id,
+      criterion_id, criterion_key, project_id, lifecycle_id, milestone_id, requirement_id,
       criterion_kind, evidence_class,
       required, description, supersedes_criterion_id, created_at,
       operation_id, project_revision, authority_epoch
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'Requested outcome is proven', ?, '', ?, ?, 0)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'Requested outcome is proven', ?, '', ?, ?, 0)
   `).run(
     input.id,
     input.criterionKey ?? input.id,
     projectId(db),
     input.lifecycleId,
+    input.milestoneId ?? null,
     input.requirementId ?? null,
     input.kind ?? "technical",
     input.evidenceClass ?? "command",
@@ -764,18 +770,22 @@ test("acceptance criterion lineages preserve optional requirement scope", (t) =>
   {
     insertOperations(db, 6);
     insertLifecycle(db, "life-recovery", "M-RECOVERY", 1);
+    // Phase 33 / RELY-05: requirements carry a milestone_id (composite PK), and
+    // the criteria below bind that same milestone_id so the composite FK is
+    // actually enforced (it is skipped, MATCH SIMPLE, whenever milestone_id or
+    // requirement_id is NULL — the accepted RD-01/PR-1 tradeoff for legacy rows).
     db.exec(`
-      INSERT INTO requirements (id, class, status, description)
-      VALUES ('R001', 'functional', 'active', 'First requirement'),
-        ('R002', 'functional', 'active', 'Second requirement');
+      INSERT INTO requirements (milestone_id, id, class, status, description)
+      VALUES ('M-RECOVERY', 'R001', 'functional', 'active', 'First requirement'),
+        ('M-RECOVERY', 'R002', 'functional', 'active', 'Second requirement');
     `);
     insertCriterion(db, {
       id: "criterion-r1", criterionKey: "outcome", lifecycleId: "life-recovery",
-      requirementId: "R001", revision: 2,
+      milestoneId: "M-RECOVERY", requirementId: "R001", revision: 2,
     });
     insertCriterion(db, {
       id: "criterion-r2", criterionKey: "outcome", lifecycleId: "life-recovery",
-      requirementId: "R002", revision: 2,
+      milestoneId: "M-RECOVERY", requirementId: "R002", revision: 2,
     });
     insertCriterion(db, {
       id: "criterion-lifecycle", criterionKey: "outcome", lifecycleId: "life-recovery",
@@ -787,19 +797,19 @@ test("acceptance criterion lineages preserve optional requirement scope", (t) =>
     }), /current head|same scope/);
     assert.throws(() => insertCriterion(db, {
       id: "criterion-r1-duplicate", criterionKey: "outcome", lifecycleId: "life-recovery",
-      requirementId: "R001", revision: 3,
+      milestoneId: "M-RECOVERY", requirementId: "R001", revision: 3,
     }), /current head|same scope/);
     insertCriterion(db, {
       id: "criterion-r1-v2", criterionKey: "outcome", lifecycleId: "life-recovery",
-      requirementId: "R001", revision: 3, supersedesCriterionId: "criterion-r1",
+      milestoneId: "M-RECOVERY", requirementId: "R001", revision: 3, supersedesCriterionId: "criterion-r1",
     });
     assert.throws(() => insertCriterion(db, {
       id: "criterion-cross-requirement", criterionKey: "outcome", lifecycleId: "life-recovery",
-      requirementId: "R002", revision: 4, supersedesCriterionId: "criterion-r1-v2",
+      milestoneId: "M-RECOVERY", requirementId: "R002", revision: 4, supersedesCriterionId: "criterion-r1-v2",
     }), /current head|same scope/);
     assert.throws(() => insertCriterion(db, {
       id: "criterion-missing-requirement", lifecycleId: "life-recovery",
-      requirementId: "R404", revision: 5,
+      milestoneId: "M-RECOVERY", requirementId: "R404", revision: 5,
     }), /FOREIGN KEY constraint failed/);
   }
 });

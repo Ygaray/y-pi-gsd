@@ -112,7 +112,13 @@ function expectedMigrationTargets(project: GSDProject): string[] {
     .map((match) => `decision\0${match[1]}`);
   return [
     ...hierarchy,
-    ...project.requirements.map((requirement) => `requirement\0${requirement.id}`),
+    // Phase 33 / RELY-05: requirement rows now carry a schema-level milestone_id
+    // (composite identity), so the legacy-import applier records each affected
+    // requirement target under the composite key "<milestone_id>/<id>". The
+    // migrate path parses requirements project-wide (GSDRequirement has no
+    // milestone attribution; they are written to a single root REQUIREMENTS.md),
+    // so their applied target key uses the empty-milestone-segment form "/<id>".
+    ...project.requirements.map((requirement) => `requirement\0/${requirement.id}`),
     ...decisions,
   ].sort();
 }

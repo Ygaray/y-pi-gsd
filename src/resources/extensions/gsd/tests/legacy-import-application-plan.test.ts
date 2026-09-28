@@ -211,7 +211,10 @@ describe("legacy import Application plan", () => {
         }, {
           id: "T01", slice_id: "S01", status: "complete", summary: "Verification passed.",
         }),
-        change("requirement", requirements, "create", { kind: "requirement", key: "R001" }, {
+        // Phase 33 / RELY-05: the requirement target identity is now the
+        // composite (milestone_id, id); a requirement with no milestone context
+        // uses the empty-milestone-segment key form "/<id>".
+        change("requirement", requirements, "create", { kind: "requirement", key: "/R001" }, {
           id: "R001", text: "Saved notes remain available.",
         }),
       ],

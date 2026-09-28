@@ -78,6 +78,9 @@ describe("db-decision-requirement-rows", () => {
 
     assert.deepEqual(requirement, {
       id: "R001",
+      // Phase 33 / RELY-05: rowToRequirement now maps the schema-level
+      // milestone_id column, defaulting to null when the row omits it.
+      milestone_id: null,
       class: "functional",
       status: "active",
       description: "Persist requirements",
@@ -90,6 +93,26 @@ describe("db-decision-requirement-rows", () => {
       full_content: "Full requirement text",
       superseded_by: "R002",
     });
+  });
+
+  test("maps a persisted requirement row's milestone_id when present", () => {
+    const requirement = rowToRequirement({
+      id: "R001",
+      milestone_id: "M001",
+      class: "functional",
+      status: "active",
+      description: "Persist requirements",
+      why: "planning needs durable context",
+      source: "roadmap",
+      primary_owner: "S01",
+      supporting_slices: "S02",
+      validation: "roundtrip",
+      notes: "important",
+      full_content: "Full requirement text",
+      superseded_by: "R002",
+    });
+
+    assert.equal(requirement.milestone_id, "M001");
   });
 
   test("maps active requirement rows as non-superseded", () => {
