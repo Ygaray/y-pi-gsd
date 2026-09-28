@@ -633,13 +633,13 @@ describe("legacy preview change classification", () => {
       },
       {
         name: "milestone requirement text",
-        target: { kind: "requirement", key: "CORE-01" },
+        target: { kind: "requirement", key: "M001/CORE-01" },
         normalized: {
           text: "Foundation behavior is verified.",
           title: "Foundation behavior",
         },
         rowSet: "requirements",
-        identity: { id: "CORE-01" },
+        identity: { milestone_id: "M001", id: "CORE-01" },
         canonicalField: "description",
         canonicalValue: "Foundation behavior is verified.",
         driftValue: "Old requirement.",
