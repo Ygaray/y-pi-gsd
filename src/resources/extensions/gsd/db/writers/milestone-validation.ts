@@ -9,6 +9,7 @@ import {
   type DomainOperationContext,
 } from "../domain-operation.js";
 import { getDb } from "../engine.js";
+import { resolveRequirementMilestoneId } from "../requirement-milestone-resolution.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export type MilestoneValidationEvidenceClass = "command" | "runtime" | "browser" | "artifact";
@@ -89,14 +90,21 @@ export function writeMilestoneValidationWaiver(
       ":waiver_id": input.activeWaiverId,
     });
   }
+  // RD-01 (33-02): requirement_id is always NULL here — this waiver covers
+  // the whole validation stage, not one Requirement — so milestone_id must
+  // stay NULL alongside it (workflow_waivers' CHECK: milestone_id IS NULL OR
+  // requirement_id IS NOT NULL). resolveRequirementMilestoneId(null, ...)
+  // short-circuits to null without querying (Test 6): a real milestone
+  // context would be discarded before use, so none is looked up here.
+  const milestoneId = resolveRequirementMilestoneId(null, null);
   getDb().prepare(`
     INSERT INTO workflow_waivers (
-      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_id, project_id, lifecycle_id, milestone_id, requirement_id, blocker_id,
       waiver_status, scope, rationale, granted_by_actor_type,
       granted_by_actor_id, granted_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :waiver_id, :project_id, :lifecycle_id, NULL, NULL,
+      :waiver_id, :project_id, :lifecycle_id, :milestone_id, NULL, NULL,
       'active', 'milestone-validation', :rationale, 'policy',
       :actor_id, :granted_at,
       :operation_id, :project_revision, :authority_epoch
@@ -105,6 +113,7 @@ export function writeMilestoneValidationWaiver(
     ":waiver_id": input.waiverId,
     ":project_id": context.projectId,
     ":lifecycle_id": input.lifecycleId,
+    ":milestone_id": milestoneId,
     ":rationale": input.rationale,
     ":actor_id": input.actorId,
     ":granted_at": input.grantedAt,
@@ -383,6 +392,7 @@ function ensureTechnicalCriterion(
   lifecycleId: string,
   input: MilestoneValidationCriterionWriteInput,
   createdAt: string,
+  milestoneId: string,
 ): PreparedMilestoneValidationCriterion {
   const current = currentCriterion(context, lifecycleId, input);
   const unchanged = current &&
@@ -400,14 +410,18 @@ function ensureTechnicalCriterion(
   }
 
   const criterionId = randomUUID();
+  // RD-01 (33-02): requirement_id is conditional here (supplied or null) —
+  // bind milestone_id through the same resolver/condition so the pair stays
+  // consistent with workflow_acceptance_criteria's CHECK (33-01).
+  const resolvedMilestoneId = resolveRequirementMilestoneId(input.requirementId ?? null, milestoneId);
   getDb().prepare(`
     INSERT INTO workflow_acceptance_criteria (
-      criterion_id, criterion_key, project_id, lifecycle_id, requirement_id,
+      criterion_id, criterion_key, project_id, lifecycle_id, milestone_id, requirement_id,
       criterion_kind, evidence_class, required, description,
       supersedes_criterion_id, created_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :criterion_id, :criterion_key, :project_id, :lifecycle_id, :requirement_id,
+      :criterion_id, :criterion_key, :project_id, :lifecycle_id, :milestone_id, :requirement_id,
       'technical', :evidence_class, :required, :description,
       :supersedes_criterion_id, :created_at,
       :operation_id, :project_revision, :authority_epoch
@@ -417,6 +431,7 @@ function ensureTechnicalCriterion(
     ":criterion_key": input.criterionKey,
     ":project_id": context.projectId,
     ":lifecycle_id": lifecycleId,
+    ":milestone_id": resolvedMilestoneId,
     ":requirement_id": input.requirementId ?? null,
     ":evidence_class": input.evidenceClass,
     ":required": input.required ? 1 : 0,
@@ -468,11 +483,11 @@ function prepareMilestoneValidationAttemptRows(
         description: criterion.description,
         required: false,
         ...(criterion.requirement_id ? { requirementId: criterion.requirement_id } : {}),
-      }, claimedAt);
+      }, claimedAt, input.milestoneId);
     }
   }
   const criteria = input.criteria.map((criterion) =>
-    ensureTechnicalCriterion(context, lifecycle.lifecycle_id, criterion, claimedAt)
+    ensureTechnicalCriterion(context, lifecycle.lifecycle_id, criterion, claimedAt, input.milestoneId)
   );
   const prior = getDb().prepare(`
     SELECT attempt_id, attempt_number, attempt_state

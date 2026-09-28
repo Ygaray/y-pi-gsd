@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import type { DomainOperationContext } from "../domain-operation.js";
 import { getDb } from "../engine.js";
+import { resolveRequirementMilestoneId } from "../requirement-milestone-resolution.js";
 import {
   adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
@@ -139,14 +140,20 @@ export function grantSliceCancellationWaiver(
     return { waiverId: String(existing[0]!["waiver_id"]), waiverStatus: "active" };
   }
   const waiverId = randomUUID();
+  // RD-01 (33-02): requirement_id is always NULL here — this waiver covers
+  // the Slice's whole Task set, not one Requirement — so milestone_id must
+  // stay NULL alongside it (workflow_waivers' CHECK: milestone_id IS NULL OR
+  // requirement_id IS NOT NULL). resolveRequirementMilestoneId(null, ...)
+  // short-circuits to null without querying (Test 6), so this costs nothing.
+  const milestoneId = resolveRequirementMilestoneId(null, input.milestoneId);
   getDb().prepare(`
     INSERT INTO workflow_waivers (
-      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_id, project_id, lifecycle_id, milestone_id, requirement_id, blocker_id,
       waiver_status, scope, rationale, granted_by_actor_type,
       granted_by_actor_id, granted_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :waiver_id, :project_id, :lifecycle_id, NULL, NULL,
+      :waiver_id, :project_id, :lifecycle_id, :milestone_id, NULL, NULL,
       'active', :scope, :rationale, :actor_type,
       :actor_id, :granted_at,
       :operation_id, :project_revision, :authority_epoch
@@ -155,6 +162,7 @@ export function grantSliceCancellationWaiver(
     ":waiver_id": waiverId,
     ":project_id": context.projectId,
     ":lifecycle_id": input.lifecycleId.trim(),
+    ":milestone_id": milestoneId,
     ":scope": scope,
     ":rationale": requireText(input.rationale, "rationale"),
     ":actor_type": input.grantedByActorType,
@@ -310,19 +318,32 @@ export function recordPlanReconciliationDisposition(
         WHERE successor.supersedes_disposition_id = workflow_requirement_dispositions.disposition_id
       )
   `).get({ ":requirement_id": requirementId }) as Record<string, unknown> | undefined;
+  // RD-01 (33-02): this input carries no milestoneId of its own — derive the
+  // caller's milestone context from the Waiver `recordPlanReconciliationDisposition`
+  // is binding (grantPlanReconciliationWaiver, 33-01, already stamped it with
+  // the slice's own milestone_id), rather than parsing it out of the
+  // synthetic `plan-omission:${milestoneId}/...` requirement id string.
+  const waiverMilestone = getDb().prepare(`
+    SELECT milestone_id FROM workflow_waivers WHERE waiver_id = :waiver_id
+  `).get({ ":waiver_id": waiverId }) as Record<string, unknown> | undefined;
+  const milestoneId = resolveRequirementMilestoneId(
+    requirementId,
+    waiverMilestone ? (waiverMilestone["milestone_id"] as string | null) : null,
+  );
   getDb().prepare(`
     INSERT INTO workflow_requirement_dispositions (
-      disposition_id, project_id, requirement_id, disposition, waiver_id,
+      disposition_id, project_id, milestone_id, requirement_id, disposition, waiver_id,
       supersedes_disposition_id, rationale, created_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :disposition_id, :project_id, :requirement_id, 'waived', :waiver_id,
+      :disposition_id, :project_id, :milestone_id, :requirement_id, 'waived', :waiver_id,
       :supersedes_id, :rationale, :created_at,
       :operation_id, :project_revision, :authority_epoch
     )
   `).run({
     ":disposition_id": randomUUID(),
     ":project_id": context.projectId,
+    ":milestone_id": milestoneId,
     ":requirement_id": requirementId,
     ":waiver_id": waiverId,
     ":supersedes_id": head ? String(head["disposition_id"]) : null,

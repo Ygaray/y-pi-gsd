@@ -15,6 +15,7 @@ import {
   type DomainOperationContext,
 } from "../domain-operation.js";
 import { getDb } from "../engine.js";
+import { resolveRequirementMilestoneId } from "../requirement-milestone-resolution.js";
 import { CURRENT_EVIDENCE_BACKED_FAILURE_VERDICT_SQL } from "../sql-constants.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
@@ -94,6 +95,11 @@ export interface AppendRecoveryWorkCheckpointInput {
 export interface GrantRecoveryWaiverInput {
   lifecycleId: string;
   requirementId: string;
+  // RD-01 (33-02): optional so pre-existing production callers that don't
+  // yet thread a milestone context (task-recovery-domain-operation.ts, out
+  // of this plan's file scope) keep compiling unchanged — they simply
+  // resolve to a null milestone_id, which is FK-safe (PR-1).
+  milestoneId?: string;
   blockerId?: string;
   scope: string;
   rationale: string;
@@ -105,6 +111,8 @@ export interface GrantRecoveryWaiverInput {
 
 export interface RecordRequirementDispositionInput {
   requirementId: string;
+  // RD-01 (33-02): optional for the same reason as GrantRecoveryWaiverInput.milestoneId.
+  milestoneId?: string;
   disposition: "unsatisfied" | "satisfied" | "waived";
   waiverId?: string;
   supersedesDispositionId?: string;
@@ -527,14 +535,16 @@ export function grantRecoveryWaiver(
     throw new Error("expiresAt must be after grantedAt");
   }
   const waiverId = randomUUID();
+  const requirementId = requireText(input.requirementId, "requirementId");
+  const milestoneId = resolveRequirementMilestoneId(requirementId, input.milestoneId ?? null);
   getDb().prepare(`
     INSERT INTO workflow_waivers (
-      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_id, project_id, lifecycle_id, milestone_id, requirement_id, blocker_id,
       waiver_status, scope, rationale, granted_by_actor_type,
       granted_by_actor_id, granted_at, expires_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :waiver_id, :project_id, :lifecycle_id, :requirement_id, :blocker_id,
+      :waiver_id, :project_id, :lifecycle_id, :milestone_id, :requirement_id, :blocker_id,
       'active', :scope, :rationale, :actor_type,
       :actor_id, :granted_at, :expires_at,
       :operation_id, :project_revision, :authority_epoch
@@ -543,7 +553,8 @@ export function grantRecoveryWaiver(
     ":waiver_id": waiverId,
     ":project_id": context.projectId,
     ":lifecycle_id": input.lifecycleId,
-    ":requirement_id": requireText(input.requirementId, "requirementId"),
+    ":milestone_id": milestoneId,
+    ":requirement_id": requirementId,
     ":blocker_id": input.blockerId ?? null,
     ":scope": requireText(input.scope, "scope"),
     ":rationale": requireText(input.rationale, "rationale"),
@@ -589,19 +600,21 @@ export function recordRequirementDisposition(
     throw new Error(`${input.disposition} disposition cannot reference a Waiver`);
   }
   const dispositionId = randomUUID();
+  const milestoneId = resolveRequirementMilestoneId(requirementId, input.milestoneId ?? null);
   getDb().prepare(`
     INSERT INTO workflow_requirement_dispositions (
-      disposition_id, project_id, requirement_id, disposition, waiver_id,
+      disposition_id, project_id, milestone_id, requirement_id, disposition, waiver_id,
       supersedes_disposition_id, rationale, created_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :disposition_id, :project_id, :requirement_id, :disposition, :waiver_id,
+      :disposition_id, :project_id, :milestone_id, :requirement_id, :disposition, :waiver_id,
       :supersedes_id, :rationale, :created_at,
       :operation_id, :project_revision, :authority_epoch
     )
   `).run({
     ":disposition_id": dispositionId,
     ":project_id": context.projectId,
+    ":milestone_id": milestoneId,
     ":requirement_id": requirementId,
     ":disposition": input.disposition,
     ":waiver_id": input.waiverId ?? null,

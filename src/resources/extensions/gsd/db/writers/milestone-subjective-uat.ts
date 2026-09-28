@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import type { DomainOperationContext } from "../domain-operation.js";
 import { getDb } from "../engine.js";
+import { resolveRequirementMilestoneId } from "../requirement-milestone-resolution.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export type SubjectiveUatDisposition = "accepted" | "rejected";
@@ -192,14 +193,19 @@ function ensureSubjectiveCriterion(
   }
 
   const criterionId = randomUUID();
+  // RD-01 (33-02): requirement_id is conditional here (supplied or null) —
+  // bind milestone_id through the same resolver/condition so the pair stays
+  // consistent with workflow_acceptance_criteria's CHECK (33-01). milestoneId
+  // is already in scope on `input` — no threading needed.
+  const milestoneId = resolveRequirementMilestoneId(input.requirementId ?? null, input.milestoneId);
   getDb().prepare(`
     INSERT INTO workflow_acceptance_criteria (
-      criterion_id, criterion_key, project_id, lifecycle_id, requirement_id,
+      criterion_id, criterion_key, project_id, lifecycle_id, milestone_id, requirement_id,
       criterion_kind, evidence_class, required, description,
       supersedes_criterion_id, created_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :criterion_id, :criterion_key, :project_id, :lifecycle_id, :requirement_id,
+      :criterion_id, :criterion_key, :project_id, :lifecycle_id, :milestone_id, :requirement_id,
       'subjective_uat', 'human', :required, :description,
       :supersedes_criterion_id, :created_at,
       :operation_id, :project_revision, :authority_epoch
@@ -209,6 +215,7 @@ function ensureSubjectiveCriterion(
     ":criterion_key": input.criterionKey,
     ":project_id": context.projectId,
     ":lifecycle_id": lifecycleId,
+    ":milestone_id": milestoneId,
     ":requirement_id": input.requirementId ?? null,
     ":required": input.required ? 1 : 0,
     ":description": input.description,
