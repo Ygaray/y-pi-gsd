@@ -1,48 +1,17 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const require_ = createRequire(import.meta.url);
+const { native, isNativeAddonLoaded } = require_("../../dist/native.js");
 
-// Load the native addon directly
-const addonDir = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "..",
-  "native",
-  "addon",
-);
-const platformTag = `${process.platform}-${process.arch}`;
-const candidates = [
-  path.join(addonDir, `gsd_engine.${platformTag}.node`),
-  path.join(addonDir, "gsd_engine.dev.node"),
-];
-
-let native;
-for (const candidate of candidates) {
-  try {
-    native = require(candidate);
-    break;
-  } catch {
-    // try next
-  }
-}
-
-if (!native) {
-  console.error(
-    "Native addon not found. Run `npm run build:native -w @gsd/native` first.",
-  );
-  process.exit(1);
-}
+const addonSkip = isNativeAddonLoaded()
+  ? undefined
+  : "native addon not loadable: no local native/addon build and no resolvable @opengsd/engine-<platform> package";
 
 // ── normalizeForFuzzyMatch ──────────────────────────────────────────────
 
-describe("normalizeForFuzzyMatch", () => {
+describe("normalizeForFuzzyMatch", { skip: addonSkip }, () => {
   test("strips trailing whitespace per line", () => {
     assert.equal(native.normalizeForFuzzyMatch("hello   \nworld  "), "hello\nworld");
   });
@@ -73,7 +42,7 @@ describe("normalizeForFuzzyMatch", () => {
 
 // ── fuzzyFindText ───────────────────────────────────────────────────────
 
-describe("fuzzyFindText", () => {
+describe("fuzzyFindText", { skip: addonSkip }, () => {
   test("finds exact match", () => {
     const result = native.fuzzyFindText("hello world", "world");
     assert.equal(result.found, true);
@@ -133,7 +102,7 @@ describe("fuzzyFindText", () => {
 
 // ── generateDiff ────────────────────────────────────────────────────────
 
-describe("generateDiff", () => {
+describe("generateDiff", { skip: addonSkip }, () => {
   test("generates diff for a line change", () => {
     const old = "line1\nline2\nline3";
     const newText = "line1\nmodified\nline3";
