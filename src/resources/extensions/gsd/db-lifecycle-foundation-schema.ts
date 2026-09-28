@@ -19,7 +19,8 @@ export function createLifecycleFoundationSchemaV32(db: DbAdapter): void {
       task_id TEXT DEFAULT NULL,
       lifecycle_status TEXT NOT NULL CHECK (
         lifecycle_status IN (
-          'pending', 'ready', 'in_progress', 'paused', 'completed', 'cancelled', 'blocker-accepted'
+          'pending', 'ready', 'in_progress', 'paused', 'completed', 'cancelled',
+          'blocker-accepted', 'operator-attested'
         )
       ),
       state_version INTEGER NOT NULL DEFAULT 0 CHECK (state_version >= 0),

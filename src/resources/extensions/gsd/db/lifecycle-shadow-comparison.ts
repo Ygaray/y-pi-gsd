@@ -15,7 +15,8 @@ export type CanonicalLifecycleStatus =
   | "paused"
   | "completed"
   | "cancelled"
-  | "blocker-accepted";
+  | "blocker-accepted"
+  | "operator-attested";
 
 export interface LifecycleShadowComparison {
   kind: LifecycleShadowComparisonKind;
@@ -47,6 +48,9 @@ const LEGACY_STATUS_MAP: Readonly<Record<string, CanonicalLifecycleStatus>> = {
   // from "completed" is preserved at the status-guards.ts Status seam, not here.
   shipped: "completed",
   archived: "completed",
+  // Phase 31 (D-03 / RELY-03): operator-attested closeout — terminal in both
+  // vocabularies, distinct from "completed" by design.
+  "operator-attested": "operator-attested",
 };
 
 const CANONICAL_STATUSES: ReadonlySet<string> = new Set([
@@ -57,6 +61,7 @@ const CANONICAL_STATUSES: ReadonlySet<string> = new Set([
   "completed",
   "cancelled",
   "blocker-accepted",
+  "operator-attested",
 ]);
 
 export function normalizeLegacyLifecycleStatus(status: string | null): CanonicalLifecycleStatus | null {

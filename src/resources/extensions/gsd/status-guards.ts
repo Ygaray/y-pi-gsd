@@ -40,6 +40,10 @@ export const RAW_CLOSED_STATUSES = [
   // inserted) since db/sql-constants.ts derives TERMINAL_STATUS_SQL from this
   // array verbatim and in order.
   "shipped", "archived",
+  // Phase 31 (D-03 / RELY-03): operator-attested closeout — a Task closed by
+  // an operator submitting verification evidence for a retry-classified
+  // settled/failed Attempt, distinct from a verified `completed` Task.
+  "operator-attested",
 ] as const;
 const RAW_CLOSED_SET: ReadonlySet<string> = new Set(RAW_CLOSED_STATUSES);
 

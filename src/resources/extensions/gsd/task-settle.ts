@@ -4,7 +4,7 @@
 // adopt after an interrupted Attempt or succeeded completion (#1749, #2018),
 // and the `blocker-accepted` operator closeout disposition (#2202).
 
-import { executeDomainOperation } from "./db/domain-operation.js";
+import { executeDomainOperation, type DomainJsonValue } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
 import { isAutoWorkerLive } from "./db/auto-workers.js";
 import {
@@ -17,6 +17,7 @@ import {
   adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
   closeLegacyTaskAsBlockerAccepted,
+  closeLegacyTaskAsOperatorAttested,
   readDomainOperationFence,
   type CanonicalLifecycleStatus,
 } from "./db/writers/lifecycle-commands.js";
@@ -523,7 +524,7 @@ export function applyTaskSettle(input: {
 // historical failure can never be re-routed. It never fabricates success
 // evidence and never satisfies verdict-gated completion.
 
-export type TaskSettleDisposition = "blocker-accepted";
+export type TaskSettleDisposition = "blocker-accepted" | "operator-attested";
 
 export interface TaskBlockerAcceptedRow {
   attemptId: string;
@@ -767,6 +768,337 @@ export function applyBlockerAcceptedDisposition(input: {
     task: input.task,
     accepted: true,
     alreadyAccepted: false,
+    attemptId: row.attemptId,
+    resultId: row.resultId,
+    routeConsumed: row.routeConsumed,
+  };
+}
+
+// ── operator-attested operator closeout (Phase 31, RELY-03, INC-2026-09-27-01) ──
+//
+// A Task whose execute-task Attempt settled as failed at the route stage with
+// a `retry`-classified recovery action (D-02) has no supported closeout:
+// `replan` rejects it, `settle` has nothing to settle, and
+// `gsd_task_recovery_resume`'s eligibility guard structurally refuses a
+// `retry` action before any later check runs
+// (task-recovery-domain-operation.ts:741-746 — `readTaskRecoveryResumeEligibility`
+// rejects with `failedGuard: "abort-action"`). The `operator-attested`
+// disposition (D-01/D-03) lets an operator submit structured verification
+// evidence that the Task's deliverable is actually complete and closes the
+// Task terminal in both vocabularies. It is deliberately NOT literal
+// `completed` — that requires a succeeded Attempt plus a passing host
+// Technical Verdict, neither of which can exist for a settled/failed
+// Attempt — so a verified completion and an operator-attested one remain
+// distinguishable in the DB (D-03). It never fabricates a passing Technical
+// Verdict and never satisfies verdict-gated completion.
+
+/** Evidence contract pinned at Task 1's checkpoint: all three fields required. */
+export interface OperatorAttestationEvidence {
+  /** The verification command the operator actually ran; non-blank after trim. */
+  command: string;
+  /** Must be the integer 0 — a non-zero exit is not evidence of completion. */
+  exitCode: 0;
+  /** Must be exactly "pass" — a "fail" verdict contradicts a completion attestation. */
+  verdict: "pass";
+}
+
+export interface TaskOperatorAttestedRow {
+  attemptId: string;
+  resultId: string;
+  currentStatus: string;
+  targetStatus: "operator-attested";
+  lifecycleFrom: CanonicalLifecycleStatus;
+  /** True when the route Kernel head is consumed with a closeout decision. */
+  routeConsumed: boolean;
+  supersededRecoveryActionId: string | null;
+  evidence: OperatorAttestationEvidence;
+  rationale: string;
+}
+
+export interface TaskOperatorAttestedPlan {
+  task: TaskSettleTask;
+  /** Zero rows means an apply is a no-op (the disposition already committed). */
+  rows: TaskOperatorAttestedRow[];
+  alreadyAttested: boolean;
+}
+
+export interface TaskOperatorAttestedApplyResult {
+  task: TaskSettleTask;
+  attested: boolean;
+  alreadyAttested: boolean;
+  attemptId: string | null;
+  resultId: string | null;
+  routeConsumed: boolean;
+}
+
+/**
+ * Validate the operator's completion evidence. This runs FIRST in
+ * `planOperatorAttestedDisposition` — before the already-closed short-circuit
+ * and before any DB read — so no caller (a direct domain-layer call included,
+ * D-03) can probe state or ride an already-closed no-op past the evidence
+ * gate. Reuses the non-empty-object rejection `requireRepairEvidence` uses
+ * (task-recovery-domain-operation.ts:303-313) rather than a second hand-rolled
+ * variant, then requires the three pinned fields (Task 1 decision b), each
+ * with its own error naming the field and why the value is inadequate.
+ */
+export function requireOperatorAttestationEvidence(
+  evidence: DomainJsonValue,
+): OperatorAttestationEvidence {
+  if (
+    evidence === null ||
+    Array.isArray(evidence) ||
+    typeof evidence !== "object" ||
+    Object.keys(evidence).length === 0
+  ) {
+    throw new Error("evidence must be a non-empty object");
+  }
+  const obj = evidence as Record<string, unknown>;
+  const command = typeof obj["command"] === "string" ? obj["command"].trim() : "";
+  if (!command) {
+    throw new Error(
+      "gsd_task_settle: operator-attested requires evidence.command to be a non-blank string " +
+      "naming the verification command the operator actually ran.",
+    );
+  }
+  const exitCode = obj["exitCode"];
+  if (exitCode !== 0) {
+    throw new Error(
+      "gsd_task_settle: operator-attested requires evidence.exitCode to be exactly the integer " +
+      `0; found ${typeof exitCode === "number" ? exitCode : JSON.stringify(exitCode)} — a ` +
+      "non-zero exit is not evidence a deliverable is complete.",
+    );
+  }
+  const verdict = obj["verdict"];
+  if (verdict !== "pass") {
+    throw new Error(
+      "gsd_task_settle: operator-attested requires evidence.verdict to be exactly \"pass\"; found " +
+      `${typeof verdict === "string" ? verdict : JSON.stringify(verdict)} — a "fail" verdict is a ` +
+      "contradiction in a completion attestation.",
+    );
+  }
+  return { command, exitCode: 0, verdict: "pass" };
+}
+
+/**
+ * Read-only disposition plan: the exact Attempt, lifecycle, legacy status, and
+ * route-head transitions an apply would write. Guards fail closed with the
+ * exact prerequisite and the supported next action.
+ */
+export function planOperatorAttestedDisposition(
+  task: TaskSettleTask,
+  evidence: DomainJsonValue,
+  reason: string,
+): TaskOperatorAttestedPlan {
+  // Step 1 (load-bearing ordering, D-03): validate evidence FIRST, before any
+  // DB read — no caller can probe state or ride an already-closed no-op past
+  // the evidence gate.
+  const validatedEvidence = requireOperatorAttestationEvidence(evidence);
+
+  const state = readTaskLifecycleState(task);
+  if (state.lifecycleStatus === "operator-attested" || state.legacyStatus === "operator-attested") {
+    return { task, rows: [], alreadyAttested: true };
+  }
+  const running = readRunningAttempts(task);
+  if (running.length > 0) {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires no running Attempt for ${unitId(task)} — ` +
+      "settle the running Attempt first (gsd_task_settle without settleDisposition).",
+    );
+  }
+  if (state.lifecycleStatus !== "in_progress") {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires the Task lifecycle in_progress; found ` +
+      `${state.lifecycleStatus ?? "none"} for ${unitId(task)} — only an active Task with a ` +
+      "settled/failed Attempt awaiting recovery routing can be closed by operator attestation.",
+    );
+  }
+  const attempt = readLatestTaskAttempt(task);
+  if (
+    !attempt || attempt.state !== "settled" || attempt.outcome !== "failed" ||
+    attempt.nextStage !== "route"
+  ) {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires the latest Attempt of ${unitId(task)} settled ` +
+      `as failed at the route stage; found ` +
+      `${attempt ? `${attempt.state}/${attempt.outcome ?? "no-result"}` : "no Attempt"} at ` +
+      `${attempt?.nextStage ?? "no Kernel head"}. ` +
+      "gsd_task_recovery_resume is the separate successor-Attempt path for abort/remediate routes.",
+    );
+  }
+  if (!attempt.resultId) {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires the failed Result identity of Attempt ` +
+      `${attempt.attemptId} for ${unitId(task)}; the Attempt has no Result to preserve.`,
+    );
+  }
+  // D-02: filter specifically on the routed recovery action being "retry" —
+  // a broad "any settled/failed Attempt" filter would over-widen and overlap
+  // blocker-accepted (blocker-discovered) and gsd_task_recovery_resume
+  // (abort/remediate).
+  const route = readTaskRecoveryRoute(attempt.attemptId);
+  if (!route || route.action !== "retry") {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires the routed recovery action for Attempt ` +
+      `${attempt.attemptId} of ${unitId(task)} to be "retry"; found ` +
+      `${route ? route.action : "no routed recovery action"}. ` +
+      "A \"blocker-discovered\" route is closed by blocker-accepted; an \"abort\"/\"remediate\" " +
+      "route is resumed by gsd_task_recovery_resume.",
+    );
+  }
+  const head = readRouteHead(task);
+  if (!head || head.next_stage !== "route" || head.attempt_id !== attempt.attemptId) {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires the route Kernel head of ${unitId(task)} on ` +
+      `Attempt ${attempt.attemptId}; found ${head ? `next_stage ${head.next_stage}` : "no Kernel head"}. ` +
+      "The disposition consumes the route head with a terminal closeout decision.",
+    );
+  }
+  return {
+    task,
+    rows: [{
+      attemptId: attempt.attemptId,
+      resultId: attempt.resultId,
+      currentStatus: state.legacyStatus,
+      targetStatus: "operator-attested",
+      lifecycleFrom: state.lifecycleStatus,
+      routeConsumed: true,
+      supersededRecoveryActionId: route.recoveryActionId,
+      evidence: validatedEvidence,
+      rationale: reason,
+    }],
+    alreadyAttested: false,
+  };
+}
+
+/**
+ * Apply the `operator-attested` disposition: one Domain Operation writes the
+ * terminal `operator-attested` status to both vocabularies, the evidence
+ * payload on the canonical plan, and the terminal closeout Kernel decision
+ * that consumes the route head. A repeated applied run is a no-op.
+ */
+export function applyOperatorAttestedDisposition(input: {
+  invocation: ExecutionInvocation;
+  task: TaskSettleTask;
+  evidence: DomainJsonValue;
+  reason: string;
+}): TaskOperatorAttestedApplyResult {
+  const plan = planOperatorAttestedDisposition(input.task, input.evidence, input.reason);
+  if (plan.alreadyAttested || plan.rows.length === 0) {
+    return {
+      task: input.task,
+      attested: false,
+      alreadyAttested: true,
+      attemptId: null,
+      resultId: null,
+      routeConsumed: false,
+    };
+  }
+  const row = plan.rows[0];
+  const entityId = unitId(input.task);
+  const attestedAt = new Date().toISOString();
+  const fence = readDomainOperationFence(input.invocation.idempotencyKey);
+  executeDomainOperation({
+    operationType: "task.settle.operator-attested",
+    idempotencyKey: input.invocation.idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: {
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      attemptId: row.attemptId,
+      resultId: row.resultId,
+      disposition: "operator-attested",
+      evidence: {
+        command: row.evidence.command,
+        exitCode: row.evidence.exitCode,
+        verdict: row.evidence.verdict,
+      },
+      rationale: input.reason,
+    },
+  }, (context) => {
+    // Consume the route head first: the terminal closeout decision makes the
+    // historical failure unreachable for recovery routing. Re-validate BOTH
+    // the route head (still `route`, still this Attempt) AND that the
+    // recovery route's action is still `retry` before writing — strictly
+    // stronger than the blocker-accepted precedent, which re-checks only the
+    // head; this closes the TOCTOU window a concurrent retry claim or a
+    // fresh recovery route could open between the dry-run plan and this
+    // apply (T-31-05).
+    const head = readRouteHead(input.task);
+    if (!head || head.next_stage !== "route" || head.attempt_id !== row.attemptId) {
+      throw new Error(
+        `gsd_task_settle: the route Kernel head of ${entityId} changed after the dry-run plan; ` +
+        "retry the operation",
+      );
+    }
+    const route = readTaskRecoveryRoute(row.attemptId);
+    if (!route || route.action !== "retry") {
+      throw new Error(
+        `gsd_task_settle: the routed recovery action of ${entityId} changed after the dry-run ` +
+        "plan; retry the operation",
+      );
+    }
+    const closeout = appendKernelCheckpoint(context, {
+      lifecycleId: head.lifecycle_id,
+      attemptId: row.attemptId,
+      nextStage: "closeout",
+      previousKernelCheckpointId: head.kernel_checkpoint_id,
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      lifecycleStatus: "operator-attested",
+    });
+    closeLegacyTaskAsOperatorAttested(context, input.task);
+    return {
+      events: [{
+        eventType: "task.operator.attested",
+        entityType: "task",
+        entityId,
+        payload: {
+          disposition: "operator-attested",
+          from: row.lifecycleFrom,
+          to: "operator-attested",
+          attemptId: row.attemptId,
+          resultId: row.resultId,
+          command: row.evidence.command,
+          exitCode: row.evidence.exitCode,
+          verdict: row.evidence.verdict,
+          ...(row.supersededRecoveryActionId
+            ? { supersededRecoveryActionId: row.supersededRecoveryActionId }
+            : {}),
+          rationale: input.reason,
+          attestedAt,
+          closeoutKernelCheckpointId: closeout.kernelCheckpointId,
+        },
+        destinations: ["projection"],
+      }],
+      projections: [
+        {
+          projectionKey: `task.operator.attested/${entityId}`.toLowerCase(),
+          projectionKind: "task-recovery",
+          rendererVersion: "1",
+        },
+        {
+          projectionKey: `lifecycle/${entityId}`.toLowerCase(),
+          projectionKind: TASK_LIFECYCLE_PROJECTION_KIND,
+          rendererVersion: "1",
+        },
+      ],
+    };
+  });
+  return {
+    task: input.task,
+    attested: true,
+    alreadyAttested: false,
     attemptId: row.attemptId,
     resultId: row.resultId,
     routeConsumed: row.routeConsumed,

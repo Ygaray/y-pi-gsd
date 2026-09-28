@@ -15,6 +15,7 @@ import {
   createMilestoneVerdictScopeSchemaV49,
 } from "./db-milestone-validation-schema.js";
 import { createBlockerAcceptedCloseoutSchemaV50 } from "./db-blocker-accepted-closeout-schema.js";
+import { createOperatorAttestedCloseoutSchemaV57 } from "./db-operator-attested-closeout-schema.js";
 import { createHumanUatPendingSchemaV52 } from "./db-human-uat-pending-schema.js";
 import { createRunLogSchemaV54 } from "./db-run-log-schema.js";
 import { createTrackerItemSchemaV55 } from "./db-tracker-item-schema.js";
@@ -627,4 +628,8 @@ export function applyMigrationV55TrackerItem(db: DbAdapter): void {
 
 export function applyMigrationV56PlanReviewCycles(db: DbAdapter): void {
   createPlanReviewCycleSchemaV56(db);
+}
+
+export function applyMigrationV57OperatorAttestedCloseout(db: DbAdapter): void {
+  createOperatorAttestedCloseoutSchemaV57(db);
 }

@@ -99,6 +99,7 @@ import {
   applyMigrationV54RunLog,
   applyMigrationV55TrackerItem,
   applyMigrationV56PlanReviewCycles,
+  applyMigrationV57OperatorAttestedCloseout,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -107,6 +108,7 @@ import {
 } from "../db-canonical-foundation-schema.js";
 import { createConversationFoundationSchemaV33 } from "../db-conversation-foundation-schema.js";
 import { rebuildWorkflowItemLifecyclesForBlockerAccepted } from "../db-blocker-accepted-closeout-schema.js";
+import { rebuildWorkflowItemLifecyclesForOperatorAttested } from "../db-operator-attested-closeout-schema.js";
 import { createLifecycleFoundationSchemaV32 } from "../db-lifecycle-foundation-schema.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "../db-recovery-evidence-foundation-schema.js";
@@ -169,7 +171,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 56;
+export const SCHEMA_VERSION = 57;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -426,6 +428,7 @@ function initSchema(
         applyMigrationV54RunLog(db);
         applyMigrationV55TrackerItem(db);
         applyMigrationV56PlanReviewCycles(db);
+        applyMigrationV57OperatorAttestedCloseout(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -554,6 +557,14 @@ function migrateSchema(
   // trigger/index layer runs in the normal V50 step below.
   if (currentVersion < 50 && !startupTransactionOpen) {
     rebuildWorkflowItemLifecyclesForBlockerAccepted(db);
+  }
+
+  // V57 (Phase 31 / INC-2026-09-27-01) is hoisted the same way as V50: it
+  // also relaxes the lifecycle CHECK via the foreign-keys-off table rebuild,
+  // which cannot run inside a transaction. Fresh installs skip it (their V32
+  // DDL already carries the extended CHECK).
+  if (currentVersion < 57 && !startupTransactionOpen) {
+    rebuildWorkflowItemLifecyclesForOperatorAttested(db);
   }
 
   db.exec(startupTransactionOpen ? "SAVEPOINT schema_migration" : "BEGIN");
@@ -901,6 +912,20 @@ function migrateSchema(
       applyMigrationV56PlanReviewCycles(db);
       stampStateCutoverPragmas(db, 56);
       recordSchemaVersion(db, 56);
+    }
+
+    if (currentVersion < 57) {
+      // V57 -- operator-attested Task closeout (Phase 31, RELY-03,
+      // INC-2026-09-27-01): the terminal Task status enters the lifecycle
+      // CHECK (the table rebuild ran hoisted above when needed) and the
+      // transition trigger gains the disposition edges (task-only
+      // in_progress -> operator-attested closeout, and reopenable back to
+      // ready per Task 1's decision). When startupTransactionOpen is true
+      // the rebuild could not run; the schema stays functional and
+      // operator-attested writes fail closed.
+      applyMigrationV57OperatorAttestedCloseout(db);
+      stampStateCutoverPragmas(db, 57);
+      recordSchemaVersion(db, 57);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

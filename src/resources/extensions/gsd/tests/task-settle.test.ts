@@ -21,8 +21,10 @@ import {
 } from "../task-execution-domain-operation.ts";
 import {
   applyBlockerAcceptedDisposition,
+  applyOperatorAttestedDisposition,
   applyTaskSettle,
   planBlockerAcceptedDisposition,
+  planOperatorAttestedDisposition,
   planTaskSettle,
 } from "../task-settle.ts";
 import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.ts";
@@ -31,7 +33,10 @@ import {
   normalizeLegacyLifecycleStatus,
   compareLifecycleShadow,
 } from "../db/lifecycle-shadow-comparison.ts";
-import { readTaskRecoveryRoute } from "../task-recovery-domain-operation.ts";
+import {
+  readTaskRecoveryRoute,
+  recordFailureAndSelectRecovery,
+} from "../task-recovery-domain-operation.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 
 const tempDirs = new Set<string>();
@@ -723,3 +728,204 @@ function readLatestTaskAttemptSnapshotStage(): string | null {
   `);
   return head.stage ? String(head.stage) : null;
 }
+
+// ── operator-attested closeout disposition (Phase 31 / RELY-03 / INC-2026-09-27-01) ──
+//
+// Not a reuse of seedBlockerDiscoveredResidue: settleTaskAttempt alone does
+// not populate workflow_recovery_actions. This fixture additionally routes
+// the failed Attempt via recordFailureAndSelectRecovery with an agent-owner
+// "transient-execution" classification so readTaskRecoveryRoute(attemptId)
+// reads back action "retry" (recovery-policy.ts:110-112's budgetedRule).
+
+const PASSING_EVIDENCE = { command: "npm test", exitCode: 0, verdict: "pass" } as const;
+
+function seedRetryRoutedResidue(): { attemptId: string; resultId: string; recoveryActionId: string } {
+  const { attemptId } = seedRunningAttempt();
+  const settlement = settleTaskAttempt({
+    invocation: invocation("fixture/retry-settle"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "transient-execution",
+    summary: "transient executor fault; retry eligible",
+    output: { fault: "transient" },
+  });
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  const receipt = recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/retry-route"),
+    attemptId,
+    resultId: settlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "transient-execution" },
+    summary: "transient executor fault; retry eligible",
+    evidence: { detail: "transient" },
+    rationale: "agent-owner transient-execution routes to retry",
+  });
+  return { attemptId, resultId: settlement.resultId, recoveryActionId: receipt.recoveryActionId };
+}
+
+test("seedRetryRoutedResidue fixture reads back as a retry-classified settled/failed Attempt at route with no running Attempt", () => {
+  const { attemptId, resultId, recoveryActionId } = seedRetryRoutedResidue();
+  assert.ok(resultId, "fixture must produce a Result id");
+  assert.ok(recoveryActionId, "fixture must produce a recovery action id");
+
+  const route = readTaskRecoveryRoute(attemptId);
+  assert.equal(route?.action, "retry", "the routed recovery action must be retry");
+
+  const settled = readTaskAttempt(attemptId);
+  assert.equal(settled?.state, "settled", "the latest Attempt must be settled");
+  assert.equal(settled?.outcome, "failed", "the latest Attempt must be failed");
+  assert.equal(settled?.nextStage, "route", "the Kernel head must still be at the route stage");
+
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "legacy tasks.status must be in_progress",
+  );
+
+  assert.equal(
+    row(`
+      SELECT COUNT(*) AS count
+      FROM workflow_item_lifecycles lifecycle
+      JOIN workflow_execution_attempts attempt
+        ON attempt.lifecycle_id = lifecycle.lifecycle_id
+       AND attempt.project_id = lifecycle.project_id
+      WHERE lifecycle.item_kind = 'task'
+        AND lifecycle.task_id = 'T01'
+        AND attempt.attempt_state = 'running'
+    `).count,
+    0,
+    "zero running Attempts must remain",
+  );
+});
+
+test("operator-attested dry-run reports the exact transitions and mutates nothing", () => {
+  const { attemptId, resultId, recoveryActionId } = seedRetryRoutedResidue();
+  const before = row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count;
+
+  const plan = planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified the deliverable manually");
+
+  assert.equal(plan.rows.length, 1);
+  assert.equal(plan.alreadyAttested, false);
+  assert.equal(plan.rows[0].attemptId, attemptId);
+  assert.equal(plan.rows[0].resultId, resultId);
+  assert.equal(plan.rows[0].currentStatus, "in_progress");
+  assert.equal(plan.rows[0].targetStatus, "operator-attested");
+  assert.equal(plan.rows[0].lifecycleFrom, "in_progress");
+  assert.equal(plan.rows[0].routeConsumed, true);
+  assert.equal(plan.rows[0].supersededRecoveryActionId, recoveryActionId);
+  assert.deepEqual(plan.rows[0].evidence, PASSING_EVIDENCE);
+  assert.equal(
+    row("SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = 'T01'").status,
+    "in_progress",
+    "dry-run must not move the canonical lifecycle",
+  );
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "dry-run must not close the legacy Task",
+  );
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count,
+    before,
+    "dry-run must not write a Result",
+  );
+});
+
+test("operator-attested apply closes both vocabularies, matches shadow, consumes the route head, and records the evidence event", () => {
+  const { attemptId, resultId } = seedRetryRoutedResidue();
+
+  const applied = applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/apply/1"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "operator verified the deliverable manually",
+  });
+  assert.equal(applied.attested, true);
+  assert.equal(applied.alreadyAttested, false);
+  assert.equal(applied.attemptId, attemptId);
+  assert.equal(applied.resultId, resultId);
+  assert.equal(applied.routeConsumed, true);
+
+  // 1. canonical lifecycle
+  assert.equal(
+    row("SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = 'T01'").status,
+    "operator-attested",
+  );
+  // 2. legacy tasks.status
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "operator-attested",
+  );
+  // 3. isClosedStatus
+  assert.equal(isClosedStatus("operator-attested"), true);
+  // 4. shadow comparison
+  assert.equal(
+    compareLifecycleShadow("operator-attested", "operator-attested").kind,
+    "match",
+    "both vocabularies must agree so closeout reads no shadow drift",
+  );
+  // 5. route Kernel head advanced to closeout, chained off the pre-apply route head
+  assert.equal(readLatestTaskAttemptSnapshotStage(), "closeout", "the route head must be consumed");
+  const closeoutCheckpoint = row(`
+    SELECT head.previous_kernel_checkpoint_id AS previous_id, route.kernel_checkpoint_id AS route_id
+    FROM workflow_kernel_checkpoints head
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = head.lifecycle_id
+    JOIN workflow_kernel_checkpoints route
+      ON route.lifecycle_id = head.lifecycle_id AND route.next_stage = 'route'
+    WHERE lifecycle.task_id = 'T01'
+      AND head.next_stage = 'closeout'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = head.kernel_checkpoint_id
+      )
+  `);
+  assert.equal(closeoutCheckpoint.previous_id, closeoutCheckpoint.route_id);
+  // 6. exactly one task.operator.attested event carrying the evidence verbatim
+  assert.equal(
+    row(`
+      SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.operator.attested'
+    `).count,
+    1,
+  );
+  const provenance = row(`
+    SELECT payload_json FROM workflow_domain_events WHERE event_type = 'task.operator.attested'
+  `);
+  const payload = JSON.parse(String(provenance.payload_json)) as Record<string, unknown>;
+  assert.equal(payload["disposition"], "operator-attested");
+  assert.equal(payload["attemptId"], attemptId);
+  assert.equal(payload["resultId"], resultId);
+  assert.equal(payload["command"], PASSING_EVIDENCE.command);
+  assert.equal(payload["exitCode"], PASSING_EVIDENCE.exitCode);
+  assert.equal(payload["verdict"], PASSING_EVIDENCE.verdict);
+  assert.equal(payload["rationale"], "operator verified the deliverable manually");
+
+  // The failed Attempt/Result remain immutable history — no fabricated verdict.
+  const settled = readTaskAttempt(attemptId);
+  assert.equal(settled?.state, "settled");
+  assert.equal(settled?.outcome, "failed");
+  assert.equal(settled?.resultId, resultId);
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count,
+    1,
+    "the disposition must not fabricate a second Result",
+  );
+
+  // Idempotent second apply is a no-op.
+  const again = applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/apply/2"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "operator verified the deliverable manually",
+  });
+  assert.equal(again.attested, false);
+  assert.equal(again.alreadyAttested, true);
+  assert.equal(
+    row(`
+      SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.operator.attested'
+    `).count,
+    1,
+    "a repeated applied run is a no-op",
+  );
+});

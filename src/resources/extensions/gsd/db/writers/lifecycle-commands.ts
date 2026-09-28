@@ -225,10 +225,17 @@ function isValidLifecycleTransition(
     return to === "paused" || to === "completed" || to === "cancelled" ||
       // #2202: operator closeout — accept a discovered blocker instead of
       // fabricating a completion or cancelling the Task.
-      (itemKind === "task" && to === "blocker-accepted");
+      (itemKind === "task" && to === "blocker-accepted") ||
+      // Phase 31 (D-03 / RELY-03): operator closeout — the operator submits
+      // verification evidence for a retry-classified settled/failed Attempt
+      // instead of re-entering /gsd auto.
+      (itemKind === "task" && to === "operator-attested");
   }
   if (from === "paused") return to === "ready" || to === "in_progress" || to === "cancelled";
-  return (from === "completed" || from === "cancelled" || from === "blocker-accepted") && to === "ready";
+  return (
+    from === "completed" || from === "cancelled" || from === "blocker-accepted" ||
+    from === "operator-attested"
+  ) && to === "ready";
 }
 
 function requireHierarchyRow(input: LifecycleCommandInput): void {
@@ -650,6 +657,36 @@ export function closeLegacyTaskAsBlockerAccepted(
   });
   if (changes(result) !== 1) {
     throw new Error("Blocker-accepted closeout did not close exactly one legacy Task");
+  }
+}
+
+/**
+ * Close the legacy Task row as `operator-attested` (Phase 31 / RELY-03 /
+ * INC-2026-09-27-01). `gsd_slice_complete`/`gsd_complete_milestone` read
+ * legacy `tasks.status`, so the canonical-only write cannot unlock them on
+ * its own — both vocabularies move in the same Domain Operation. No SUMMARY
+ * or completion timestamp is fabricated: the Task is closed on operator
+ * attestation, not verified complete.
+ */
+export function closeLegacyTaskAsOperatorAttested(
+  context: Readonly<DomainOperationContext>,
+  identity: { milestoneId: string; sliceId: string; taskId: string },
+): void {
+  requireActiveDomainOperationContext(context);
+  requireNonBlank(identity.milestoneId, "milestoneId");
+  requireNonBlank(identity.sliceId, "sliceId");
+  requireNonBlank(identity.taskId, "taskId");
+  const result = getDb().prepare(`
+    UPDATE tasks
+    SET status = 'operator-attested'
+    WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND id = :task_id
+  `).run({
+    ":milestone_id": identity.milestoneId,
+    ":slice_id": identity.sliceId,
+    ":task_id": identity.taskId,
+  });
+  if (changes(result) !== 1) {
+    throw new Error("Operator-attested closeout did not close exactly one legacy Task");
   }
 }
 
