@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
 import type { DomainOperationContext } from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle, readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
@@ -33,6 +34,7 @@ import {
   upsertRequirement,
 } from "../gsd-db.ts";
 import { LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION } from "../legacy-import-contract.ts";
+import { rebuildRequirementsForMilestoneAttribution } from "../db-requirement-milestone-attribution-schema.ts";
 
 const tempDirs = new Set<string>();
 
@@ -311,4 +313,554 @@ test("a requirement inserted with a milestone id reads back with that milestone 
   assert.equal(found.length, 1);
   assert.equal(found[0]!.id, "REQ-77");
   assert.equal(found[0]!.milestone_id, "M-A");
+});
+
+// ---------------------------------------------------------------------------
+// Task 3: hardening against real, populated (pre-V58) databases.
+// ---------------------------------------------------------------------------
+
+const REBUILT_TABLE_NAMES = [
+  "requirements",
+  "workflow_waivers",
+  "workflow_requirement_dispositions",
+  "workflow_acceptance_criteria",
+];
+
+/** Mirrors the production capture in db-requirement-milestone-attribution-schema.ts. */
+function captureSchemaObjects(raw: DatabaseSync): Array<{ name: string; sql: string; external: boolean }> {
+  const placeholders = REBUILT_TABLE_NAMES.map((t) => `'${t}'`).join(", ");
+  const likeClauses = REBUILT_TABLE_NAMES.map((t) => `sql LIKE '%${t}%'`).join(" OR ");
+  const captured = raw.prepare(`
+    SELECT name, sql, tbl_name
+    FROM sqlite_master
+    WHERE sql IS NOT NULL
+      AND (
+        (type IN ('trigger', 'index') AND tbl_name IN (${placeholders}))
+        OR (type = 'trigger' AND tbl_name NOT IN (${placeholders}) AND (${likeClauses}))
+      )
+  `).all() as Array<{ name: string; sql: string; tbl_name: string }>;
+  return captured.map((r) => ({
+    name: r.name,
+    sql: r.sql,
+    external: !REBUILT_TABLE_NAMES.includes(r.tbl_name),
+  }));
+}
+
+/**
+ * Downgrade a freshly-created (V58-shaped) database back to its V57 shape —
+ * bare-id `requirements` PK, single-column FKs on the three child tables, no
+ * `idx_requirements_legacy_id` — so tests can seed genuinely pre-migration
+ * data and then exercise the REAL `openDatabase` upgrade path. Mirrors
+ * `db-operator-attested-closeout-schema.test.ts`'s `downgradeToV56`.
+ */
+function downgradeToV57(dbPath: string): void {
+  const raw = new DatabaseSync(dbPath);
+  const captured = captureSchemaObjects(raw);
+  raw.exec("PRAGMA foreign_keys = OFF");
+  raw.exec("PRAGMA legacy_alter_table = ON");
+  raw.exec("BEGIN");
+  try {
+    for (const obj of captured) {
+      if (obj.external) raw.exec(`DROP TRIGGER IF EXISTS ${obj.name}`);
+    }
+
+    raw.exec(`
+      CREATE TABLE requirements_v57 (
+        id TEXT PRIMARY KEY,
+        class TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        why TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        primary_owner TEXT NOT NULL DEFAULT '',
+        supporting_slices TEXT NOT NULL DEFAULT '',
+        validation TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        full_content TEXT NOT NULL DEFAULT '',
+        superseded_by TEXT DEFAULT NULL
+      );
+      INSERT INTO requirements_v57 (id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by)
+      SELECT id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by
+      FROM requirements;
+      DROP TABLE requirements;
+      ALTER TABLE requirements_v57 RENAME TO requirements;
+    `);
+
+    raw.exec(`
+      CREATE TABLE workflow_waivers_v57 (
+        waiver_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        lifecycle_id TEXT NOT NULL,
+        requirement_id TEXT DEFAULT NULL,
+        blocker_id TEXT DEFAULT NULL,
+        waiver_status TEXT NOT NULL CHECK (waiver_status IN ('active', 'revoked', 'expired')),
+        scope TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        granted_by_actor_type TEXT NOT NULL CHECK (granted_by_actor_type IN ('user', 'policy')),
+        granted_by_actor_id TEXT DEFAULT NULL,
+        granted_at TEXT NOT NULL,
+        expires_at TEXT DEFAULT NULL,
+        ended_at TEXT DEFAULT NULL,
+        operation_id TEXT NOT NULL,
+        project_revision INTEGER NOT NULL CHECK (project_revision > 0),
+        authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 0),
+        ended_operation_id TEXT DEFAULT NULL,
+        ended_project_revision INTEGER DEFAULT NULL,
+        ended_authority_epoch INTEGER DEFAULT NULL,
+        UNIQUE (waiver_id, requirement_id),
+        CHECK (granted_by_actor_type != 'user' OR granted_by_actor_id IS NOT NULL),
+        CHECK (
+          (waiver_status = 'active' AND ended_at IS NULL
+            AND ended_operation_id IS NULL AND ended_project_revision IS NULL
+            AND ended_authority_epoch IS NULL) OR
+          (waiver_status IN ('revoked', 'expired') AND ended_at IS NOT NULL
+            AND ended_operation_id IS NOT NULL AND ended_project_revision > 0
+            AND ended_authority_epoch >= 0)
+        ),
+        FOREIGN KEY (project_id) REFERENCES project_authority(project_id),
+        FOREIGN KEY (lifecycle_id, project_id)
+          REFERENCES workflow_item_lifecycles(lifecycle_id, project_id),
+        FOREIGN KEY (requirement_id) REFERENCES requirements(id),
+        FOREIGN KEY (blocker_id, lifecycle_id)
+          REFERENCES workflow_blockers(blocker_id, lifecycle_id),
+        FOREIGN KEY (operation_id, project_id, project_revision, authority_epoch)
+          REFERENCES workflow_operations(
+            operation_id, project_id, resulting_revision, resulting_authority_epoch
+          ),
+        FOREIGN KEY (ended_operation_id, project_id, ended_project_revision, ended_authority_epoch)
+          REFERENCES workflow_operations(
+            operation_id, project_id, resulting_revision, resulting_authority_epoch
+          )
+      );
+      INSERT INTO workflow_waivers_v57 (
+        waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+        waiver_status, scope, rationale, granted_by_actor_type,
+        granted_by_actor_id, granted_at, expires_at, ended_at, operation_id,
+        project_revision, authority_epoch, ended_operation_id,
+        ended_project_revision, ended_authority_epoch
+      )
+      SELECT
+        waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+        waiver_status, scope, rationale, granted_by_actor_type,
+        granted_by_actor_id, granted_at, expires_at, ended_at, operation_id,
+        project_revision, authority_epoch, ended_operation_id,
+        ended_project_revision, ended_authority_epoch
+      FROM workflow_waivers;
+      DROP TABLE workflow_waivers;
+      ALTER TABLE workflow_waivers_v57 RENAME TO workflow_waivers;
+    `);
+
+    raw.exec(`
+      CREATE TABLE workflow_requirement_dispositions_v57 (
+        disposition_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        requirement_id TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK (disposition IN ('unsatisfied', 'satisfied', 'waived')),
+        waiver_id TEXT DEFAULT NULL,
+        supersedes_disposition_id TEXT DEFAULT NULL UNIQUE,
+        rationale TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        project_revision INTEGER NOT NULL CHECK (project_revision > 0),
+        authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 0),
+        UNIQUE (disposition_id, requirement_id),
+        CHECK (
+          (disposition = 'waived' AND waiver_id IS NOT NULL) OR
+          (disposition IN ('unsatisfied', 'satisfied') AND waiver_id IS NULL)
+        ),
+        FOREIGN KEY (project_id) REFERENCES project_authority(project_id),
+        FOREIGN KEY (requirement_id) REFERENCES requirements(id),
+        FOREIGN KEY (waiver_id, requirement_id)
+          REFERENCES workflow_waivers(waiver_id, requirement_id),
+        FOREIGN KEY (supersedes_disposition_id, requirement_id)
+          REFERENCES workflow_requirement_dispositions(disposition_id, requirement_id),
+        FOREIGN KEY (operation_id, project_id, project_revision, authority_epoch)
+          REFERENCES workflow_operations(
+            operation_id, project_id, resulting_revision, resulting_authority_epoch
+          )
+      );
+      INSERT INTO workflow_requirement_dispositions_v57 (
+        disposition_id, project_id, requirement_id, disposition,
+        waiver_id, supersedes_disposition_id, rationale, created_at,
+        operation_id, project_revision, authority_epoch
+      )
+      SELECT
+        disposition_id, project_id, requirement_id, disposition,
+        waiver_id, supersedes_disposition_id, rationale, created_at,
+        operation_id, project_revision, authority_epoch
+      FROM workflow_requirement_dispositions;
+      DROP TABLE workflow_requirement_dispositions;
+      ALTER TABLE workflow_requirement_dispositions_v57 RENAME TO workflow_requirement_dispositions;
+    `);
+
+    raw.exec(`
+      CREATE TABLE workflow_acceptance_criteria_v57 (
+        criterion_id TEXT PRIMARY KEY,
+        criterion_key TEXT NOT NULL CHECK (
+          length(trim(criterion_key)) > 0 AND criterion_key = lower(trim(criterion_key))
+        ),
+        project_id TEXT NOT NULL,
+        lifecycle_id TEXT NOT NULL,
+        requirement_id TEXT DEFAULT NULL,
+        criterion_kind TEXT NOT NULL CHECK (criterion_kind IN ('technical', 'subjective_uat')),
+        evidence_class TEXT NOT NULL CHECK (
+          evidence_class IN ('command', 'runtime', 'browser', 'artifact', 'human')
+        ),
+        required INTEGER NOT NULL CHECK (required IN (0, 1)),
+        description TEXT NOT NULL CHECK (length(trim(description)) > 0),
+        supersedes_criterion_id TEXT DEFAULT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        project_revision INTEGER NOT NULL CHECK (project_revision > 0),
+        authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 0),
+        UNIQUE (criterion_id, project_id, lifecycle_id),
+        CHECK (
+          (criterion_kind = 'technical' AND evidence_class != 'human') OR
+          (criterion_kind = 'subjective_uat' AND evidence_class = 'human')
+        ),
+        FOREIGN KEY (project_id) REFERENCES project_authority(project_id),
+        FOREIGN KEY (lifecycle_id, project_id)
+          REFERENCES workflow_item_lifecycles(lifecycle_id, project_id),
+        FOREIGN KEY (requirement_id) REFERENCES requirements(id),
+        FOREIGN KEY (supersedes_criterion_id)
+          REFERENCES workflow_acceptance_criteria(criterion_id),
+        FOREIGN KEY (operation_id, project_id, project_revision, authority_epoch)
+          REFERENCES workflow_operations(
+            operation_id, project_id, resulting_revision, resulting_authority_epoch
+          )
+      );
+      INSERT INTO workflow_acceptance_criteria_v57 (
+        criterion_id, criterion_key, project_id, lifecycle_id,
+        requirement_id, criterion_kind, evidence_class, required, description,
+        supersedes_criterion_id, created_at, operation_id, project_revision,
+        authority_epoch
+      )
+      SELECT
+        criterion_id, criterion_key, project_id, lifecycle_id,
+        requirement_id, criterion_kind, evidence_class, required, description,
+        supersedes_criterion_id, created_at, operation_id, project_revision,
+        authority_epoch
+      FROM workflow_acceptance_criteria;
+      DROP TABLE workflow_acceptance_criteria;
+      ALTER TABLE workflow_acceptance_criteria_v57 RENAME TO workflow_acceptance_criteria;
+    `);
+
+    // `idx_requirements_legacy_id` (PR-2, V58) does not exist in the V57
+    // shape — its WHERE clause names `milestone_id`, which requirements no
+    // longer has after this downgrade.
+    for (const obj of captured) {
+      if (obj.name === "idx_requirements_legacy_id") continue;
+      raw.exec(obj.sql);
+    }
+
+    raw.prepare("DELETE FROM schema_version WHERE version > 57").run();
+    raw.exec("COMMIT");
+  } catch (error) {
+    raw.exec("ROLLBACK");
+    throw error;
+  } finally {
+    raw.exec("PRAGMA foreign_keys = ON");
+    raw.exec("PRAGMA legacy_alter_table = OFF");
+  }
+  raw.close();
+}
+
+function rawProjectId(raw: DatabaseSync): string {
+  const found = raw.prepare(
+    "SELECT project_id FROM project_authority WHERE singleton = 1",
+  ).get() as { project_id: string } | undefined;
+  assert.ok(found);
+  return String(found.project_id);
+}
+
+function rawSeedOperations(raw: DatabaseSync, projectId: string, revisions: number[]): void {
+  const inserts = revisions.map((revision) => `
+    INSERT INTO workflow_operations (
+      operation_id, project_id, operation_type, idempotency_key,
+      expected_revision, expected_authority_epoch,
+      resulting_revision, resulting_authority_epoch,
+      actor_type, source_transport, request_hash, created_at
+    ) VALUES (
+      'op-v57-seed-${revision}', '${projectId}', 'attempt.claim', 'seed/v57/op/${revision}',
+      ${revision - 1}, 0, ${revision}, 0,
+      'test', 'test', 'sha256:${"0".repeat(64)}',
+      '2026-09-28T00:00:${String(revision).padStart(2, "0")}.000Z'
+    );
+  `).join("\n");
+  raw.exec(inserts);
+}
+
+/**
+ * Seed a full, bare-id (pre-V58) hierarchy under `milestoneId`/`sliceId`: a
+ * requirement plus one row in each of the three child tables, all pointing
+ * at that one requirement — the "real, populated database" Task 3 hardens
+ * the migration against.
+ */
+function rawSeedV57Fixture(
+  raw: DatabaseSync,
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+  requirementId: string,
+  milestoneStatus: string,
+): void {
+  const projectId = rawProjectId(raw);
+  const revBase = rawNextRevision(raw);
+  rawSeedOperations(raw, projectId, [revBase, revBase + 1, revBase + 2, revBase + 3]);
+
+  raw.exec(`
+    INSERT INTO milestones (id, title, status, created_at)
+    VALUES ('${milestoneId}', 'Milestone ${milestoneId}', '${milestoneStatus}', '2026-09-28T00:00:00.000Z');
+    INSERT INTO slices (milestone_id, id, title, status, created_at)
+    VALUES ('${milestoneId}', '${sliceId}', 'Slice ${sliceId}', 'complete', '2026-09-28T00:00:00.000Z');
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('${milestoneId}', '${sliceId}', '${taskId}', 'Task ${taskId}', 'complete');
+    INSERT INTO workflow_item_lifecycles (
+      lifecycle_id, project_id, item_kind, milestone_id, slice_id, task_id,
+      lifecycle_status, state_version, created_at, updated_at,
+      last_operation_id, last_project_revision, last_authority_epoch
+    ) VALUES (
+      'lc-${requirementId}', '${projectId}', 'task', '${milestoneId}', '${sliceId}', '${taskId}',
+      'completed', 1, '2026-09-28T00:00:00.000Z', '2026-09-28T00:00:00.000Z',
+      'op-v57-seed-${revBase}', ${revBase}, 0
+    );
+    INSERT INTO requirements (id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by)
+    VALUES ('${requirementId}', 'must', 'active', 'Requirement ${requirementId}', 'why', 'test', '${sliceId}', '${sliceId}', 'test', '', '${requirementId}', NULL);
+    INSERT INTO workflow_waivers (
+      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_status, scope, rationale, granted_by_actor_type,
+      granted_by_actor_id, granted_at, expires_at, ended_at, operation_id,
+      project_revision, authority_epoch
+    ) VALUES (
+      'wv-${requirementId}', '${projectId}', 'lc-${requirementId}', '${requirementId}', NULL,
+      'active', 'task:${milestoneId}/${sliceId}/${taskId}', 'seed', 'policy',
+      NULL, '2026-09-28T00:00:00.000Z', NULL, NULL, 'op-v57-seed-${revBase + 1}',
+      ${revBase + 1}, 0
+    );
+    INSERT INTO workflow_requirement_dispositions (
+      disposition_id, project_id, requirement_id, disposition,
+      waiver_id, supersedes_disposition_id, rationale, created_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      'disp-${requirementId}', '${projectId}', '${requirementId}', 'unsatisfied',
+      NULL, NULL, 'seed', '2026-09-28T00:00:00.000Z',
+      'op-v57-seed-${revBase + 2}', ${revBase + 2}, 0
+    );
+    INSERT INTO workflow_acceptance_criteria (
+      criterion_id, criterion_key, project_id, lifecycle_id,
+      requirement_id, criterion_kind, evidence_class, required, description,
+      supersedes_criterion_id, created_at, operation_id, project_revision,
+      authority_epoch
+    ) VALUES (
+      'crit-${requirementId}', '${`crit-${requirementId}`.toLowerCase()}', '${projectId}', 'lc-${requirementId}',
+      '${requirementId}', 'technical', 'command', 1, 'seed criterion',
+      NULL, '2026-09-28T00:00:00.000Z', 'op-v57-seed-${revBase + 3}', ${revBase + 3}, 0
+    );
+  `);
+}
+
+function rawNextRevision(raw: DatabaseSync): number {
+  const found = raw.prepare("SELECT MAX(resulting_revision) AS v FROM workflow_operations").get() as
+    | { v: number | null }
+    | undefined;
+  return Number(found?.v ?? 0) + 1;
+}
+
+function rawCounts(raw: DatabaseSync): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const name of REBUILT_TABLE_NAMES) {
+    out[name] = Number((raw.prepare(`SELECT COUNT(*) AS c FROM ${name}`).get() as { c: number }).c);
+  }
+  return out;
+}
+
+// Test 6 (row fidelity): a database seeded with requirements, waivers,
+// dispositions, and acceptance criteria at version 57 has identical row
+// counts in all four tables after migrating to 58, and a spot-checked row's
+// non-milestone column values are unchanged. Also confirms Assumption A3
+// (RESEARCH): the hoisted, foreign-keys-off rebuild is exercised here with
+// real child rows present under normal foreign-key enforcement.
+test("Test 6: migrating a populated V57 database preserves every row and non-milestone field", () => {
+  const dbPath = freshDbPath("gsd-requirement-milestone-attribution-fidelity-");
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+
+  downgradeToV57(dbPath);
+
+  const raw = new DatabaseSync(dbPath);
+  rawSeedV57Fixture(raw, "M-SHIPPED", "S01", "T01", "REQ-FIDELITY", "shipped");
+  const before = rawCounts(raw);
+  raw.close();
+
+  assert.equal(openDatabase(dbPath), true);
+
+  const after: Record<string, number> = {};
+  for (const name of REBUILT_TABLE_NAMES) {
+    after[name] = Number(row(`SELECT COUNT(*) AS c FROM ${name}`)["c"]);
+  }
+  assert.deepEqual(after, before);
+
+  const spotCheck = row("SELECT description, status FROM requirements WHERE id = 'REQ-FIDELITY'");
+  assert.equal(spotCheck["description"], "Requirement REQ-FIDELITY");
+  assert.equal(spotCheck["status"], "active");
+});
+
+// Test 7 (Pitfall NEW-2): the active, non-terminal milestone's own
+// pre-migration requirement rows carry its id, not NULL; a shipped
+// milestone's requirement stays NULL. The payoff: getRequirementsForMilestone
+// (which captureMilestoneArchiveSnapshot now calls) lists the active
+// milestone's own pre-migration requirement.
+test("Test 7: the single active milestone's pre-migration requirement is carved out; a shipped milestone's is not", () => {
+  const dbPath = freshDbPath("gsd-requirement-milestone-attribution-carveout-");
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+
+  downgradeToV57(dbPath);
+
+  const raw = new DatabaseSync(dbPath);
+  rawSeedV57Fixture(raw, "M-ACTIVE", "S01", "T01", "REQ-ACTIVE", "active");
+  rawSeedV57Fixture(raw, "M-SHIPPED", "S02", "T02", "REQ-SHIPPED", "shipped");
+  raw.close();
+
+  assert.equal(openDatabase(dbPath), true);
+
+  const activeRow = row("SELECT milestone_id FROM requirements WHERE id = 'REQ-ACTIVE'");
+  assert.equal(activeRow["milestone_id"], "M-ACTIVE");
+  const shippedRow = row("SELECT milestone_id FROM requirements WHERE id = 'REQ-SHIPPED'");
+  assert.equal(shippedRow["milestone_id"], null);
+
+  const payoff = getRequirementsForMilestone("M-ACTIVE");
+  assert.deepEqual(payoff.map((r) => r.id), ["REQ-ACTIVE"]);
+});
+
+// Test 8 (RD-01 triggers intact): after migration, each of the three child
+// tables still raises on UPDATE and on DELETE of an existing row, and the
+// sqlite_master entry for each names the composite foreign key onto
+// requirements(milestone_id, id).
+test("Test 8: the tamper-evident triggers and composite foreign keys survive the rebuild", () => {
+  const dbPath = freshDbPath("gsd-requirement-milestone-attribution-triggers-");
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+
+  downgradeToV57(dbPath);
+
+  const raw = new DatabaseSync(dbPath);
+  rawSeedV57Fixture(raw, "M-TRIG", "S01", "T01", "REQ-TRIG", "active");
+  raw.close();
+
+  assert.equal(openDatabase(dbPath), true);
+
+  for (const name of [
+    "workflow_waivers",
+    "workflow_requirement_dispositions",
+    "workflow_acceptance_criteria",
+  ]) {
+    const sql = String(row(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${name}'`,
+    )["sql"] ?? "");
+    assert.match(sql, /FOREIGN KEY \(milestone_id, requirement_id\) REFERENCES requirements\(milestone_id, id\)/);
+  }
+
+  // `trg_workflow_waiver_transition` fires first (it treats the resulting
+  // no-op `waiver_status` as an invalid transition target), ahead of
+  // `trg_workflow_waiver_grant_immutable` — either message proves the row
+  // rejects the UPDATE.
+  assert.throws(
+    () => db().prepare("UPDATE workflow_waivers SET rationale = 'mutated' WHERE waiver_id = 'wv-REQ-TRIG'").run(),
+    /immutable|invalid workflow waiver transition/,
+  );
+  assert.throws(
+    () => db().prepare("DELETE FROM workflow_waivers WHERE waiver_id = 'wv-REQ-TRIG'").run(),
+    /durable history/,
+  );
+  assert.throws(
+    () => db().prepare("UPDATE workflow_requirement_dispositions SET rationale = 'mutated' WHERE disposition_id = 'disp-REQ-TRIG'").run(),
+    /immutable/,
+  );
+  assert.throws(
+    () => db().prepare("DELETE FROM workflow_requirement_dispositions WHERE disposition_id = 'disp-REQ-TRIG'").run(),
+    /immutable/,
+  );
+  assert.throws(
+    () => db().prepare("UPDATE workflow_acceptance_criteria SET description = 'mutated' WHERE criterion_id = 'crit-REQ-TRIG'").run(),
+    /immutable/,
+  );
+  assert.throws(
+    () => db().prepare("DELETE FROM workflow_acceptance_criteria WHERE criterion_id = 'crit-REQ-TRIG'").run(),
+    /immutable/,
+  );
+});
+
+// Test 9 (idempotency): running the rebuild a second time against an
+// already-migrated database is a no-op — row counts and each table's
+// sqlite_master SQL are unchanged.
+test("Test 9: rebuildRequirementsForMilestoneAttribution is idempotent against an already-migrated database", () => {
+  const dbPath = freshDbPath("gsd-requirement-milestone-attribution-idempotent-");
+  assert.equal(openDatabase(dbPath), true);
+
+  insertRequirement({
+    id: "REQ-IDEMPOTENT", class: "must", status: "active",
+    description: "desc", why: "", source: "test",
+    primary_owner: "", supporting_slices: "", validation: "", notes: "",
+    full_content: "", superseded_by: null, milestone_id: "M-A",
+  });
+
+  const beforeSql: Record<string, string> = {};
+  for (const name of REBUILT_TABLE_NAMES) {
+    beforeSql[name] = String(row(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${name}'`)["sql"]);
+  }
+  const beforeCounts: Record<string, number> = {};
+  for (const name of REBUILT_TABLE_NAMES) {
+    beforeCounts[name] = Number(row(`SELECT COUNT(*) AS c FROM ${name}`)["c"]);
+  }
+
+  rebuildRequirementsForMilestoneAttribution(db());
+  rebuildRequirementsForMilestoneAttribution(db());
+
+  for (const name of REBUILT_TABLE_NAMES) {
+    const afterSql = String(row(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${name}'`)["sql"]);
+    assert.equal(afterSql, beforeSql[name], `${name} sqlite_master SQL must be unchanged`);
+    const afterCount = Number(row(`SELECT COUNT(*) AS c FROM ${name}`)["c"]);
+    assert.equal(afterCount, beforeCounts[name], `${name} row count must be unchanged`);
+  }
+});
+
+// Test 10 (PR-2): two legacy rows sharing one id and both having a NULL
+// milestone_id cannot coexist; a second such insert is rejected by
+// idx_requirements_legacy_id. Separately, the same id under two real,
+// different milestone ids inserts fine — the index does not defeat SC-3.
+test("Test 10: the legacy-id partial unique index rejects duplicate NULL-milestone rows without defeating cross-milestone reuse", () => {
+  const dbPath = freshDbPath("gsd-requirement-milestone-attribution-legacy-index-");
+  assert.equal(openDatabase(dbPath), true);
+
+  insertRequirement({
+    id: "LEG-01", class: "functional", status: "active",
+    description: "first legacy row", why: "", source: "test",
+    primary_owner: "", supporting_slices: "", validation: "", notes: "",
+    full_content: "", superseded_by: null,
+  });
+  assert.throws(
+    () => insertRequirement({
+      id: "LEG-01", class: "functional", status: "active",
+      description: "second legacy row", why: "", source: "test",
+      primary_owner: "", supporting_slices: "", validation: "", notes: "",
+      full_content: "", superseded_by: null,
+    }),
+    /UNIQUE constraint failed|idx_requirements_legacy_id/,
+  );
+
+  insertRequirement({
+    id: "LEG-02", class: "functional", status: "active",
+    description: "M-A", why: "", source: "test",
+    primary_owner: "", supporting_slices: "", validation: "", notes: "",
+    full_content: "", superseded_by: null, milestone_id: "M-A",
+  });
+  insertRequirement({
+    id: "LEG-02", class: "functional", status: "active",
+    description: "M-B", why: "", source: "test",
+    primary_owner: "", supporting_slices: "", validation: "", notes: "",
+    full_content: "", superseded_by: null, milestone_id: "M-B",
+  });
+  const leg02Rows = rows("SELECT milestone_id FROM requirements WHERE id = 'LEG-02' ORDER BY milestone_id");
+  assert.equal(leg02Rows.length, 2);
 });

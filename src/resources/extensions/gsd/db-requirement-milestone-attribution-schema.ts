@@ -32,6 +32,8 @@
 // legacy rows share one id and silently break `INSERT OR REPLACE`'s dedup.
 
 import type { DbAdapter } from "./db-adapter.js";
+import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
+import { logWarning } from "./workflow-logger.js";
 
 export const REQUIREMENTS_TABLE_DDL = `
   CREATE TABLE IF NOT EXISTS {NAME} (
@@ -231,22 +233,6 @@ function captureAttachedSchemaObjects(db: DbAdapter): CapturedSchemaObject[] {
   }));
 }
 
-/**
- * Rebuild `requirements` onto composite `PRIMARY KEY (milestone_id, id)` and
- * widen the three referencing audit tables onto composite foreign keys
- * (RD-01 Option 2 / D-01). Runs SQLite's prescribed foreign-keys-off table
- * rebuild — the pragma cannot change inside a transaction, so callers MUST
- * invoke this before opening the migration transaction. Fresh installs skip
- * this entirely: `migrateSchema` short-circuits before the hoisted call
- * below even runs, because a fresh database is already stamped at
- * SCHEMA_VERSION by the time `migrateSchema` is reached.
- *
- * Order matters: `requirements` is rebuilt FIRST, so each child's new
- * composite foreign key resolves against the already-rebuilt parent by the
- * time that child table is (re)created. All four rebuilds share ONE
- * foreign-keys-off transaction, so the parent's momentarily-stale-shaped
- * children are never subject to enforcement mid-sequence.
- */
 const REQUIREMENTS_COLUMNS = [
   "milestone_id", "id", "class", "status", "description", "why", "source",
   "primary_owner", "supporting_slices", "validation", "notes", "full_content",
@@ -279,6 +265,16 @@ const WORKFLOW_ACCEPTANCE_CRITERIA_COLUMNS = [
  * for the new `milestone_id` column), drop `name`, and rename `_v58` onto
  * `name`. Caller owns the surrounding foreign-keys-off transaction.
  */
+function countRows(db: DbAdapter, name: string): number {
+  const result = db.prepare(`SELECT COUNT(*) AS c FROM ${name}`).get() as Record<string, unknown> | undefined;
+  return Number(result?.["c"] ?? 0);
+}
+
+/**
+ * Create `{name}_v58` from `ddl`, copy every row from `name` (binding NULL
+ * for the new `milestone_id` column), drop `name`, and rename `_v58` onto
+ * `name`. Caller owns the surrounding foreign-keys-off transaction.
+ */
 function rebuildTable(db: DbAdapter, name: string, ddl: string, columns: readonly string[]): void {
   const newName = `${name}_v58`;
   const selectColumns = columns.map((c) => (c === "milestone_id" ? "NULL" : c)).join(", ");
@@ -292,12 +288,104 @@ function rebuildTable(db: DbAdapter, name: string, ddl: string, columns: readonl
   db.exec(`ALTER TABLE ${newName} RENAME TO ${name}`);
 }
 
+/**
+ * Pitfall NEW-2 (Task 3, D-02 narrow exception): after the rebuild leaves
+ * every `requirements` row NULL, re-attribute the SINGLE currently-active
+ * (non-terminal, non-parked) milestone's own pre-migration rows to itself —
+ * otherwise that milestone's own in-flight requirements silently vanish
+ * from its future ship snapshot the moment it ships. D-02's prohibition on
+ * re-deriving attribution via slice-id matching does not apply here: D-02
+ * forbids it because the heuristic is ambiguous when several milestones
+ * could claim a row, and at migration time there is at most one candidate.
+ * If zero or more than one non-terminal milestone exists, skip the
+ * carve-out entirely (a wrong attribution is worse than an absent one) and
+ * log a warning so the skip is observable.
+ *
+ * Deliberately does NOT call `getActiveMilestoneIdFromDb()`: that reads the
+ * module-global database handle, which is not installed during a migration,
+ * and it returns a summary object rather than a bare id.
+ */
+function applyActiveMilestoneCarveOut(db: DbAdapter): void {
+  const candidates = db.prepare(
+    `SELECT id FROM milestones WHERE status NOT IN (${TERMINAL_STATUS_SQL}, 'parked')`,
+  ).all() as Array<Record<string, unknown>>;
+  if (candidates.length !== 1) {
+    logWarning(
+      "db",
+      `V58 active-milestone carve-out skipped: found ${candidates.length} non-terminal, non-parked ` +
+        "milestone(s) (must be exactly 1) — all pre-migration requirement rows stay NULL",
+    );
+    return;
+  }
+  const activeMilestoneId = String(candidates[0]!["id"]);
+  const sliceRows = db.prepare("SELECT id FROM slices WHERE milestone_id = ?").all(activeMilestoneId) as Array<
+    Record<string, unknown>
+  >;
+  const sliceIds = new Set(sliceRows.map((r) => String(r["id"])));
+  if (sliceIds.size === 0) return;
+
+  const candidateRequirements = db.prepare(
+    "SELECT id, primary_owner, supporting_slices FROM requirements WHERE milestone_id IS NULL",
+  ).all() as Array<Record<string, unknown>>;
+  const claim = db.prepare("UPDATE requirements SET milestone_id = :milestone_id WHERE id = :id AND milestone_id IS NULL");
+  for (const requirement of candidateRequirements) {
+    const primaryOwner = String(requirement["primary_owner"] ?? "");
+    const supportingSlices = String(requirement["supporting_slices"] ?? "")
+      .split(/[,\s]+/)
+      .filter((id) => id.length > 0);
+    const matches = sliceIds.has(primaryOwner) || supportingSlices.some((id) => sliceIds.has(id));
+    if (matches) {
+      claim.run({ ":milestone_id": activeMilestoneId, ":id": String(requirement["id"]) });
+    }
+  }
+}
+
+/**
+ * Rebuild `requirements` onto composite `PRIMARY KEY (milestone_id, id)` and
+ * widen the three referencing audit tables onto composite foreign keys
+ * (RD-01 Option 2 / D-01). Runs SQLite's prescribed foreign-keys-off table
+ * rebuild — the pragma cannot change inside a transaction, so callers MUST
+ * invoke this before opening the migration transaction. Fresh installs skip
+ * this entirely: `migrateSchema` short-circuits before the hoisted call
+ * below even runs, because a fresh database is already stamped at
+ * SCHEMA_VERSION by the time `migrateSchema` is reached.
+ *
+ * Order matters: `requirements` is rebuilt FIRST, so each child's new
+ * composite foreign key resolves against the already-rebuilt parent by the
+ * time that child table is (re)created. All four rebuilds share ONE
+ * foreign-keys-off transaction, so the parent's momentarily-stale-shaped
+ * children are never subject to enforcement mid-sequence.
+ *
+ * Task 3 hardening: a row-count parity check on every table that exists
+ * here throws before COMMIT if the copy dropped or duplicated any row — the
+ * pre-existing `backupDatabaseBeforeMigration` already snapshotted the file
+ * before this runs, so a thrown parity error leaves the operator with a
+ * recoverable copy rather than a half-rebuilt database.
+ */
 export function rebuildRequirementsForMilestoneAttribution(db: DbAdapter): void {
   const requirementsSql = tableSql(db, "requirements");
   if (typeof requirementsSql !== "string") return; // not created yet
   if (requirementsSql.includes("milestone_id")) return; // already migrated (idempotent)
 
   const captured = captureAttachedSchemaObjects(db);
+  const childSpecs = [
+    { name: "workflow_waivers", ddl: WORKFLOW_WAIVERS_TABLE_DDL, columns: WORKFLOW_WAIVERS_COLUMNS },
+    {
+      name: "workflow_requirement_dispositions",
+      ddl: WORKFLOW_REQUIREMENT_DISPOSITIONS_TABLE_DDL,
+      columns: WORKFLOW_REQUIREMENT_DISPOSITIONS_COLUMNS,
+    },
+    {
+      name: "workflow_acceptance_criteria",
+      ddl: WORKFLOW_ACCEPTANCE_CRITERIA_TABLE_DDL,
+      columns: WORKFLOW_ACCEPTANCE_CRITERIA_COLUMNS,
+    },
+  ] as const;
+  const existingChildren = childSpecs.filter((child) => tableSql(db, child.name) !== undefined);
+
+  const beforeCounts = new Map<string, number>();
+  beforeCounts.set("requirements", countRows(db, "requirements"));
+  for (const child of existingChildren) beforeCounts.set(child.name, countRows(db, child.name));
 
   db.exec("PRAGMA foreign_keys = OFF");
   db.exec("PRAGMA legacy_alter_table = ON");
@@ -316,22 +404,21 @@ export function rebuildRequirementsForMilestoneAttribution(db: DbAdapter): void 
     // ladder's own createXSchemaVN step creates it later, already in the
     // final composite-FK shape (its DDL is sourced from these same shared
     // templates), so there is nothing to rebuild.
-    for (const child of [
-      { name: "workflow_waivers", ddl: WORKFLOW_WAIVERS_TABLE_DDL, columns: WORKFLOW_WAIVERS_COLUMNS },
-      {
-        name: "workflow_requirement_dispositions",
-        ddl: WORKFLOW_REQUIREMENT_DISPOSITIONS_TABLE_DDL,
-        columns: WORKFLOW_REQUIREMENT_DISPOSITIONS_COLUMNS,
-      },
-      {
-        name: "workflow_acceptance_criteria",
-        ddl: WORKFLOW_ACCEPTANCE_CRITERIA_TABLE_DDL,
-        columns: WORKFLOW_ACCEPTANCE_CRITERIA_COLUMNS,
-      },
-    ] as const) {
-      if (tableSql(db, child.name) === undefined) continue;
+    for (const child of existingChildren) {
       rebuildTable(db, child.name, child.ddl, child.columns);
     }
+
+    const afterCounts = new Map<string, number>();
+    afterCounts.set("requirements", countRows(db, "requirements"));
+    for (const child of existingChildren) afterCounts.set(child.name, countRows(db, child.name));
+    for (const [name, before] of beforeCounts) {
+      const after = afterCounts.get(name);
+      if (after !== before) {
+        throw new Error(`V58 rebuild row-count mismatch on ${name}: before=${before} after=${after}`);
+      }
+    }
+
+    applyActiveMilestoneCarveOut(db);
 
     db.exec(REQUIREMENTS_LEGACY_ID_INDEX_DDL);
 
