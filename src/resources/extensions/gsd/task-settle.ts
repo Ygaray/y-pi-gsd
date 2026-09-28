@@ -1044,6 +1044,7 @@ export function applyOperatorAttestedDisposition(input: {
         "plan; retry the operation",
       );
     }
+    const supersededRecoveryActionId = route.recoveryActionId;
     const closeout = appendKernelCheckpoint(context, {
       lifecycleId: head.lifecycle_id,
       attemptId: row.attemptId,
@@ -1072,8 +1073,8 @@ export function applyOperatorAttestedDisposition(input: {
           command: row.evidence.command,
           exitCode: row.evidence.exitCode,
           verdict: row.evidence.verdict,
-          ...(row.supersededRecoveryActionId
-            ? { supersededRecoveryActionId: row.supersededRecoveryActionId }
+          ...(supersededRecoveryActionId
+            ? { supersededRecoveryActionId }
             : {}),
           rationale: input.reason,
           attestedAt,
