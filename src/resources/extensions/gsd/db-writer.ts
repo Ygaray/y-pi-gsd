@@ -386,10 +386,11 @@ export async function saveRequirementToDb(
            WHERE LOWER(TRIM(description)) = LOWER(TRIM(:description))
              AND LOWER(COALESCE(status, 'active')) = 'active'
              AND superseded_by IS NULL
-           ORDER BY id
+             AND (milestone_id IS :milestone_id OR milestone_id IS NULL)
+           ORDER BY (milestone_id IS :milestone_id) DESC, id
            LIMIT 1`,
         )
-        .get({ ':description': fields.description });
+        .get({ ':description': fields.description, ':milestone_id': milestoneId });
       const row = adapter
         .prepare('SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) as max_num FROM requirements')
         .get();
