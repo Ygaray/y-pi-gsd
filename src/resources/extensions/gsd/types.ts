@@ -647,6 +647,13 @@ export interface Requirement {
   notes: string; // additional notes
   full_content: string; // full requirement text
   superseded_by: string | null; // ID of superseding requirement, or null
+  // Schema-level milestone attribution (Phase 33, RELY-05, D-01/V58).
+  // Deliberately OPTIONAL (not required like the fields above): 26+ existing
+  // call sites across the codebase construct Requirement literals without
+  // this field, and none are in this plan's scope (33-02/33-03 own threading
+  // the remaining write sites). Omitting it binds NULL at the DB layer,
+  // which is the correct value for legacy/un-threaded rows per D-02/PR-1.
+  milestone_id?: string | null;
 }
 
 // ─── Parallel Orchestration Types ────────────────────────────────────────

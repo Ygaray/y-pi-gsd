@@ -2,6 +2,7 @@
 // File Purpose: Additive v34 recovery, verification, acceptance, and remediation schema.
 
 import type { DbAdapter } from "./db-adapter.js";
+import { WORKFLOW_ACCEPTANCE_CRITERIA_TABLE_DDL } from "./db-requirement-milestone-attribution-schema.js";
 
 /**
  * V34 records durable recovery allocations and immutable proof facts without
@@ -320,43 +321,15 @@ export function createRecoveryEvidenceFoundationSchemaV34(db: DbAdapter): void {
     BEGIN
       SELECT RAISE(ABORT, 'recovery actions are immutable');
     END;
+  `);
 
-    CREATE TABLE IF NOT EXISTS workflow_acceptance_criteria (
-      criterion_id TEXT PRIMARY KEY,
-      criterion_key TEXT NOT NULL CHECK (
-        length(trim(criterion_key)) > 0 AND criterion_key = lower(trim(criterion_key))
-      ),
-      project_id TEXT NOT NULL,
-      lifecycle_id TEXT NOT NULL,
-      requirement_id TEXT DEFAULT NULL,
-      criterion_kind TEXT NOT NULL CHECK (criterion_kind IN ('technical', 'subjective_uat')),
-      evidence_class TEXT NOT NULL CHECK (
-        evidence_class IN ('command', 'runtime', 'browser', 'artifact', 'human')
-      ),
-      required INTEGER NOT NULL CHECK (required IN (0, 1)),
-      description TEXT NOT NULL CHECK (length(trim(description)) > 0),
-      supersedes_criterion_id TEXT DEFAULT NULL UNIQUE,
-      created_at TEXT NOT NULL,
-      operation_id TEXT NOT NULL,
-      project_revision INTEGER NOT NULL CHECK (project_revision > 0),
-      authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 0),
-      UNIQUE (criterion_id, project_id, lifecycle_id),
-      CHECK (
-        (criterion_kind = 'technical' AND evidence_class != 'human') OR
-        (criterion_kind = 'subjective_uat' AND evidence_class = 'human')
-      ),
-      FOREIGN KEY (project_id) REFERENCES project_authority(project_id),
-      FOREIGN KEY (lifecycle_id, project_id)
-        REFERENCES workflow_item_lifecycles(lifecycle_id, project_id),
-      FOREIGN KEY (requirement_id) REFERENCES requirements(id),
-      FOREIGN KEY (supersedes_criterion_id)
-        REFERENCES workflow_acceptance_criteria(criterion_id),
-      FOREIGN KEY (operation_id, project_id, project_revision, authority_epoch)
-        REFERENCES workflow_operations(
-          operation_id, project_id, resulting_revision, resulting_authority_epoch
-        )
-    );
+  // V58 (Phase 33, RELY-05, RD-01 Option 2): composite FK onto
+  // requirements(milestone_id, id), sourced from the shared template so a
+  // fresh install and a migrated database produce byte-identical
+  // `sqlite_master` SQL for this table.
+  db.exec(WORKFLOW_ACCEPTANCE_CRITERIA_TABLE_DDL.replace("{NAME}", "workflow_acceptance_criteria"));
 
+  db.exec(`
     CREATE TRIGGER IF NOT EXISTS trg_workflow_criterion_supersession
     BEFORE INSERT ON workflow_acceptance_criteria
     WHEN (NEW.supersedes_criterion_id IS NULL AND EXISTS (

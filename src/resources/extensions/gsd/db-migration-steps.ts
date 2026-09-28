@@ -16,6 +16,7 @@ import {
 } from "./db-milestone-validation-schema.js";
 import { createBlockerAcceptedCloseoutSchemaV50 } from "./db-blocker-accepted-closeout-schema.js";
 import { createOperatorAttestedCloseoutSchemaV57 } from "./db-operator-attested-closeout-schema.js";
+import { REQUIREMENTS_LEGACY_ID_INDEX_DDL } from "./db-requirement-milestone-attribution-schema.js";
 import { createHumanUatPendingSchemaV52 } from "./db-human-uat-pending-schema.js";
 import { createRunLogSchemaV54 } from "./db-run-log-schema.js";
 import { createTrackerItemSchemaV55 } from "./db-tracker-item-schema.js";
@@ -27,7 +28,7 @@ import { createConversationFoundationSchemaV33 } from "./db-conversation-foundat
 import { createLifecycleFoundationSchemaV32 } from "./db-lifecycle-foundation-schema.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "./db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "./db-recovery-evidence-foundation-schema.js";
-import { ensureColumn } from "./db-schema-metadata.js";
+import { columnExists, ensureColumn } from "./db-schema-metadata.js";
 
 export function applyMigrationV2Artifacts(db: DbAdapter): void {
   db.exec(`
@@ -632,4 +633,27 @@ export function applyMigrationV56PlanReviewCycles(db: DbAdapter): void {
 
 export function applyMigrationV57OperatorAttestedCloseout(db: DbAdapter): void {
   createOperatorAttestedCloseoutSchemaV57(db);
+}
+
+/**
+ * V58 (Phase 33, RELY-05, TRACK-002, RD-01): the heavy lifting — the
+ * composite-PK/composite-FK table rebuild across all four tables — already
+ * ran in the HOISTED `rebuildRequirementsForMilestoneAttribution` call
+ * before this transactional ladder opened (PRAGMA foreign_keys cannot
+ * change inside a transaction). Unlike the V57 precedent, that hoisted call
+ * captures and recreates EVERY attached trigger and index itself (not just
+ * external ones), so there is no separate own-table trigger/index step left
+ * to do here.
+ *
+ * This step is a defensive no-op guard for the nested-transaction edge case
+ * (`startupTransactionOpen = true`) where the hoisted rebuild could not run:
+ * only create the legacy-id partial index if the column it references
+ * already exists, so a not-yet-rebuilt database's schema stays functional
+ * rather than throwing `no such column: milestone_id`. A later, non-nested
+ * open completes the rebuild.
+ */
+export function applyMigrationV58RequirementMilestoneId(db: DbAdapter): void {
+  if (columnExists(db, "requirements", "milestone_id")) {
+    db.exec(REQUIREMENTS_LEGACY_ID_INDEX_DDL);
+  }
 }

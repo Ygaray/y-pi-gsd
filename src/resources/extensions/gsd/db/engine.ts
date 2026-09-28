@@ -100,6 +100,7 @@ import {
   applyMigrationV55TrackerItem,
   applyMigrationV56PlanReviewCycles,
   applyMigrationV57OperatorAttestedCloseout,
+  applyMigrationV58RequirementMilestoneId,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -109,6 +110,7 @@ import {
 import { createConversationFoundationSchemaV33 } from "../db-conversation-foundation-schema.js";
 import { rebuildWorkflowItemLifecyclesForBlockerAccepted } from "../db-blocker-accepted-closeout-schema.js";
 import { rebuildWorkflowItemLifecyclesForOperatorAttested } from "../db-operator-attested-closeout-schema.js";
+import { rebuildRequirementsForMilestoneAttribution } from "../db-requirement-milestone-attribution-schema.js";
 import { createLifecycleFoundationSchemaV32 } from "../db-lifecycle-foundation-schema.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "../db-recovery-evidence-foundation-schema.js";
@@ -171,7 +173,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 57;
+export const SCHEMA_VERSION = 58;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -429,6 +431,7 @@ function initSchema(
         applyMigrationV55TrackerItem(db);
         applyMigrationV56PlanReviewCycles(db);
         applyMigrationV57OperatorAttestedCloseout(db);
+        applyMigrationV58RequirementMilestoneId(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -565,6 +568,15 @@ function migrateSchema(
   // DDL already carries the extended CHECK).
   if (currentVersion < 57 && !startupTransactionOpen) {
     rebuildWorkflowItemLifecyclesForOperatorAttested(db);
+  }
+
+  // V58 (Phase 33 / RELY-05 / TRACK-002) is hoisted the same way as V50/V57:
+  // widening `requirements` onto a composite PRIMARY KEY (and the three
+  // referencing audit tables onto composite foreign keys) requires SQLite's
+  // foreign-keys-off table rebuild, which cannot run inside a transaction.
+  // Fresh installs skip it — their DDL already carries the composite shape.
+  if (currentVersion < 58 && !startupTransactionOpen) {
+    rebuildRequirementsForMilestoneAttribution(db);
   }
 
   db.exec(startupTransactionOpen ? "SAVEPOINT schema_migration" : "BEGIN");
@@ -926,6 +938,16 @@ function migrateSchema(
       applyMigrationV57OperatorAttestedCloseout(db);
       stampStateCutoverPragmas(db, 57);
       recordSchemaVersion(db, 57);
+    }
+
+    if (currentVersion < 58) {
+      // V58 -- schema-level requirement-to-milestone attribution (Phase 33,
+      // RELY-05, TRACK-002): the table rebuild ran hoisted above when
+      // needed. This step is a defensive no-op guard for the nested-
+      // transaction case where the hoisted rebuild could not run.
+      applyMigrationV58RequirementMilestoneId(db);
+      stampStateCutoverPragmas(db, 58);
+      recordSchemaVersion(db, 58);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

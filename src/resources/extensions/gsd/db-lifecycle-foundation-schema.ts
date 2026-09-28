@@ -2,6 +2,10 @@
 // File Purpose: Additive v32 lifecycle, Attempt, Result, disposition, Waiver, and Blocker schema.
 
 import type { DbAdapter } from "./db-adapter.js";
+import {
+  WORKFLOW_REQUIREMENT_DISPOSITIONS_TABLE_DDL,
+  WORKFLOW_WAIVERS_TABLE_DDL,
+} from "./db-requirement-milestone-attribution-schema.js";
 
 /**
  * The v32 tables are shadow canonical state only. Existing hierarchy status,
@@ -496,53 +500,11 @@ export function createLifecycleFoundationSchemaV32(db: DbAdapter): void {
     END
   `);
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workflow_waivers (
-      waiver_id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      lifecycle_id TEXT NOT NULL,
-      requirement_id TEXT DEFAULT NULL,
-      blocker_id TEXT DEFAULT NULL,
-      waiver_status TEXT NOT NULL CHECK (waiver_status IN ('active', 'revoked', 'expired')),
-      scope TEXT NOT NULL,
-      rationale TEXT NOT NULL,
-      granted_by_actor_type TEXT NOT NULL CHECK (granted_by_actor_type IN ('user', 'policy')),
-      granted_by_actor_id TEXT DEFAULT NULL,
-      granted_at TEXT NOT NULL,
-      expires_at TEXT DEFAULT NULL,
-      ended_at TEXT DEFAULT NULL,
-      operation_id TEXT NOT NULL,
-      project_revision INTEGER NOT NULL CHECK (project_revision > 0),
-      authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 0),
-      ended_operation_id TEXT DEFAULT NULL,
-      ended_project_revision INTEGER DEFAULT NULL,
-      ended_authority_epoch INTEGER DEFAULT NULL,
-      UNIQUE (waiver_id, requirement_id),
-      CHECK (granted_by_actor_type != 'user' OR granted_by_actor_id IS NOT NULL),
-      CHECK (
-        (waiver_status = 'active' AND ended_at IS NULL
-          AND ended_operation_id IS NULL AND ended_project_revision IS NULL
-          AND ended_authority_epoch IS NULL) OR
-        (waiver_status IN ('revoked', 'expired') AND ended_at IS NOT NULL
-          AND ended_operation_id IS NOT NULL AND ended_project_revision > 0
-          AND ended_authority_epoch >= 0)
-      ),
-      FOREIGN KEY (project_id) REFERENCES project_authority(project_id),
-      FOREIGN KEY (lifecycle_id, project_id)
-        REFERENCES workflow_item_lifecycles(lifecycle_id, project_id),
-      FOREIGN KEY (requirement_id) REFERENCES requirements(id),
-      FOREIGN KEY (blocker_id, lifecycle_id)
-        REFERENCES workflow_blockers(blocker_id, lifecycle_id),
-      FOREIGN KEY (operation_id, project_id, project_revision, authority_epoch)
-        REFERENCES workflow_operations(
-          operation_id, project_id, resulting_revision, resulting_authority_epoch
-        ),
-      FOREIGN KEY (ended_operation_id, project_id, ended_project_revision, ended_authority_epoch)
-        REFERENCES workflow_operations(
-          operation_id, project_id, resulting_revision, resulting_authority_epoch
-        )
-    )
-  `);
+  // V58 (Phase 33, RELY-05, RD-01 Option 2): composite FK onto
+  // requirements(milestone_id, id), sourced from the shared template so a
+  // fresh install and a migrated database produce byte-identical
+  // `sqlite_master` SQL for this table.
+  db.exec(WORKFLOW_WAIVERS_TABLE_DDL.replace("{NAME}", "workflow_waivers"));
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_waiver_active_blocker
     ON workflow_waivers(blocker_id)
@@ -606,36 +568,9 @@ export function createLifecycleFoundationSchemaV32(db: DbAdapter): void {
     END
   `);
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workflow_requirement_dispositions (
-      disposition_id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      requirement_id TEXT NOT NULL,
-      disposition TEXT NOT NULL CHECK (disposition IN ('unsatisfied', 'satisfied', 'waived')),
-      waiver_id TEXT DEFAULT NULL,
-      supersedes_disposition_id TEXT DEFAULT NULL UNIQUE,
-      rationale TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      operation_id TEXT NOT NULL,
-      project_revision INTEGER NOT NULL CHECK (project_revision > 0),
-      authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 0),
-      UNIQUE (disposition_id, requirement_id),
-      CHECK (
-        (disposition = 'waived' AND waiver_id IS NOT NULL) OR
-        (disposition IN ('unsatisfied', 'satisfied') AND waiver_id IS NULL)
-      ),
-      FOREIGN KEY (project_id) REFERENCES project_authority(project_id),
-      FOREIGN KEY (requirement_id) REFERENCES requirements(id),
-      FOREIGN KEY (waiver_id, requirement_id)
-        REFERENCES workflow_waivers(waiver_id, requirement_id),
-      FOREIGN KEY (supersedes_disposition_id, requirement_id)
-        REFERENCES workflow_requirement_dispositions(disposition_id, requirement_id),
-      FOREIGN KEY (operation_id, project_id, project_revision, authority_epoch)
-        REFERENCES workflow_operations(
-          operation_id, project_id, resulting_revision, resulting_authority_epoch
-        )
-    )
-  `);
+  // V58 (Phase 33, RELY-05, RD-01 Option 2): composite FK onto
+  // requirements(milestone_id, id), sourced from the shared template.
+  db.exec(WORKFLOW_REQUIREMENT_DISPOSITIONS_TABLE_DDL.replace("{NAME}", "workflow_requirement_dispositions"));
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_workflow_requirement_disposition_history
     ON workflow_requirement_dispositions(requirement_id, project_revision, disposition_id)

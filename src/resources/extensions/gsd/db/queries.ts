@@ -341,6 +341,24 @@ export function getActiveRequirements(): Requirement[] {
   return rows.map(rowToActiveRequirement);
 }
 
+/**
+ * Requirements scoped to ONE milestone by the schema-level `milestone_id`
+ * column (Phase 33, RELY-05, D-04) — the read-side cutover that replaces
+ * `captureMilestoneArchiveSnapshot`'s retired `primary_owner`/
+ * `supporting_slices`-vs-slice-id matching (which bled across milestones
+ * that happen to reuse a slice id, SC-3). Mirrors `getMilestoneSlices`'
+ * parameterized-`WHERE` shape. Deliberately additive: `getActiveRequirements`
+ * and `getRequirementCounts` stay project-wide (NEW-6) — they back the
+ * project-wide REQUIREMENTS.md regeneration and status counts.
+ */
+export function getRequirementsForMilestone(milestoneId: string): Requirement[] {
+  if (!getDbOrNull()!) return [];
+  const rows = getDbOrNull()!.prepare(
+    "SELECT * FROM requirements WHERE milestone_id = :mid",
+  ).all({ ":mid": milestoneId });
+  return rows.map(rowToRequirement);
+}
+
 export function getRequirementCounts(): {
   active: number;
   validated: number;

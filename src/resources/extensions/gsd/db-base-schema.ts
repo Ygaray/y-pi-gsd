@@ -3,6 +3,11 @@
 
 import type { DbAdapter } from "./db-adapter.js";
 import { createRequiredSchemaObjects } from "./db-required-schema.js";
+import { columnExists } from "./db-schema-metadata.js";
+import {
+  REQUIREMENTS_LEGACY_ID_INDEX_DDL,
+  REQUIREMENTS_TABLE_DDL,
+} from "./db-requirement-milestone-attribution-schema.js";
 
 export interface BaseSchemaHooks {
   tryCreateMemoriesFts(db: DbAdapter): boolean;
@@ -33,22 +38,10 @@ export function createBaseSchemaObjects(db: DbAdapter, hooks: BaseSchemaHooks): 
     )
   `);
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS requirements (
-      id TEXT PRIMARY KEY,
-      class TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT '',
-      description TEXT NOT NULL DEFAULT '',
-      why TEXT NOT NULL DEFAULT '',
-      source TEXT NOT NULL DEFAULT '',
-      primary_owner TEXT NOT NULL DEFAULT '',
-      supporting_slices TEXT NOT NULL DEFAULT '',
-      validation TEXT NOT NULL DEFAULT '',
-      notes TEXT NOT NULL DEFAULT '',
-      full_content TEXT NOT NULL DEFAULT '',
-      superseded_by TEXT DEFAULT NULL
-    )
-  `);
+  // V58 (Phase 33, RELY-05, TRACK-002): composite PRIMARY KEY (milestone_id, id)
+  // sourced from the shared template so a fresh install and a migrated
+  // database produce byte-identical `sqlite_master` SQL for this table.
+  db.exec(REQUIREMENTS_TABLE_DDL.replace("{NAME}", "requirements"));
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS artifacts (
@@ -403,6 +396,16 @@ export function createBaseSchemaObjects(db: DbAdapter, hooks: BaseSchemaHooks): 
   db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(milestone_id, slice_id, status)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_slices_active ON slices(milestone_id, status)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status)");
+  // PR-2 (Phase 33, V58): preserves single-id uniqueness for legacy
+  // (NULL-milestone) requirement rows now that the PK is composite. Guarded:
+  // `createBaseSchemaObjects` runs on EVERY open (not just fresh installs),
+  // so a pre-V58 database reopened here still has the bare-id `requirements`
+  // shape at this point — the hoisted rebuild widens it later, inside
+  // `migrateSchema`. Creating this index unconditionally would throw
+  // `no such column: milestone_id` against that not-yet-rebuilt table.
+  if (columnExists(db, "requirements", "milestone_id")) {
+    db.exec(REQUIREMENTS_LEGACY_ID_INDEX_DDL);
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_quality_gates_pending ON quality_gates(milestone_id, slice_id, status)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_verification_evidence_task ON verification_evidence(milestone_id, slice_id, task_id)");
   hooks.ensureVerificationEvidenceDedupIndex(db);

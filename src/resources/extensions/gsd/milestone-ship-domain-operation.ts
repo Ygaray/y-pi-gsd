@@ -9,7 +9,7 @@ import {
   type DomainOperationRequest,
 } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
-import { getActiveRequirements, getMilestone, getMilestoneSlices } from "./db/queries.js";
+import { getMilestone, getMilestoneSlices, getRequirementsForMilestone } from "./db/queries.js";
 import {
   describeMilestoneShipBlockers,
   readMilestoneShipAuthorization,
@@ -125,29 +125,13 @@ function captureMilestoneArchiveSnapshot(
     throw new MilestoneLifecycleValidationError(`milestone not found: ${milestoneId}`);
   }
   const slices = getMilestoneSlices(milestoneId);
-  // `requirements` has no milestone column (schema-level gap) — getActiveRequirements()
-  // reads the project-wide `active_requirements` view. Scope down to only the
-  // requirements that actually belong to THIS milestone's slices (by
-  // `primary_owner` or any id listed in `supporting_slices`), so shipping one
-  // milestone does not permanently bake every other in-flight milestone's
-  // active requirements into this milestone's immutable archive snapshot.
-  //
-  // KNOWN RESIDUAL LIMITATION: `slices.id` is only unique per-milestone
-  // (`PRIMARY KEY (milestone_id, id)`, e.g. every milestone's first slice is
-  // conventionally "S01"), and `requirements` records no milestone at all.
-  // If two milestones are concurrently active and happen to reuse the same
-  // slice id, a requirement scoped to that id cannot be disambiguated by
-  // string matching alone and may still be included or excluded incorrectly.
-  // Closing that gap fully requires a schema-level milestone scoping column
-  // on `requirements` populated at creation time — out of scope for this fix.
-  const sliceIds = new Set(slices.map((slice) => slice.id));
-  const requirements = getActiveRequirements().filter((requirement) => (
-    sliceIds.has(requirement.primary_owner)
-    || requirement.supporting_slices
-      .split(/[,\s]+/)
-      .filter((id) => id.length > 0)
-      .some((id) => sliceIds.has(id))
-  ));
+  // Phase 33 / RELY-05 / D-04 read cutover: `requirements` now carries a
+  // schema-level `milestone_id` column (V58), so the snapshot scopes by that
+  // column directly instead of matching `primary_owner`/`supporting_slices`
+  // against this milestone's slice ids. That string-matching approach bled
+  // across milestones that happened to reuse a slice id (SC-3) — closed now
+  // that attribution lives in the schema, not re-derived by string matching.
+  const requirements = getRequirementsForMilestone(milestoneId);
   return {
     milestone: {
       id: milestone.id,

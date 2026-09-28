@@ -222,12 +222,18 @@ export function grantPlanReconciliationWaiver(
     SELECT id FROM requirements WHERE id = :id
   `).get({ ":id": requirementId }) as Record<string, unknown> | undefined;
   if (!requirement) {
+    // RD-01 / Pitfall NEW-1: this synthetic requirement's milestone_id must
+    // be bound to the slice's own milestone — otherwise the workflow_waivers
+    // insert below (which now carries a composite FK onto
+    // requirements(milestone_id, id)) throws `foreign key mismatch` the
+    // first time this path runs post-V58.
     getDb().prepare(`
-      INSERT INTO requirements (id, class, status, description, source)
-      VALUES (:id, 'cancellation', 'waived', :description, 'plan-slice')
+      INSERT INTO requirements (id, class, status, description, source, milestone_id)
+      VALUES (:id, 'cancellation', 'waived', :description, 'plan-slice', :milestone_id)
     `).run({
       ":id": requirementId,
       ":description": `Omission of task ${taskId} from slice ${slice.milestoneId}/${slice.sliceId} authorized by plan-slice reconciliation`,
+      ":milestone_id": slice.milestoneId,
     });
   }
   const scope = `task:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
@@ -252,12 +258,12 @@ export function grantPlanReconciliationWaiver(
   const waiverId = randomUUID();
   getDb().prepare(`
     INSERT INTO workflow_waivers (
-      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_id, project_id, lifecycle_id, milestone_id, requirement_id, blocker_id,
       waiver_status, scope, rationale, granted_by_actor_type,
       granted_by_actor_id, granted_at, expires_at,
       operation_id, project_revision, authority_epoch
     ) VALUES (
-      :waiver_id, :project_id, :lifecycle_id, :requirement_id, NULL,
+      :waiver_id, :project_id, :lifecycle_id, :milestone_id, :requirement_id, NULL,
       'active', :scope, :rationale, 'policy',
       NULL, :granted_at, NULL,
       :operation_id, :project_revision, :authority_epoch
@@ -266,6 +272,7 @@ export function grantPlanReconciliationWaiver(
     ":waiver_id": waiverId,
     ":project_id": context.projectId,
     ":lifecycle_id": lifecycleId,
+    ":milestone_id": slice.milestoneId,
     ":requirement_id": requirementId,
     ":scope": scope,
     ":rationale": `Plan-slice reconciliation omitted task ${taskId} from slice ${slice.milestoneId}/${slice.sliceId}; the omission is authorized for slice completion`,

@@ -118,8 +118,8 @@ export function insertDecision(d: Omit<Decision, "seq">): void {
 export function insertRequirement(r: Requirement): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
-    `INSERT INTO requirements (id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by)
-     VALUES (:id, :class, :status, :description, :why, :source, :primary_owner, :supporting_slices, :validation, :notes, :full_content, :superseded_by)`,
+    `INSERT INTO requirements (id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by, milestone_id)
+     VALUES (:id, :class, :status, :description, :why, :source, :primary_owner, :supporting_slices, :validation, :notes, :full_content, :superseded_by, :milestone_id)`,
   ).run({
     ":id": r.id,
     ":class": r.class,
@@ -133,6 +133,7 @@ export function insertRequirement(r: Requirement): void {
     ":notes": r.notes,
     ":full_content": r.full_content,
     ":superseded_by": r.superseded_by,
+    ":milestone_id": r.milestone_id ?? null,
   }));
 }
 
@@ -174,8 +175,8 @@ export function upsertDecision(d: Omit<Decision, "seq">): void {
 export function upsertRequirement(r: Requirement): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
-    `INSERT OR REPLACE INTO requirements (id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by)
-     VALUES (:id, :class, :status, :description, :why, :source, :primary_owner, :supporting_slices, :validation, :notes, :full_content, :superseded_by)`,
+    `INSERT OR REPLACE INTO requirements (id, class, status, description, why, source, primary_owner, supporting_slices, validation, notes, full_content, superseded_by, milestone_id)
+     VALUES (:id, :class, :status, :description, :why, :source, :primary_owner, :supporting_slices, :validation, :notes, :full_content, :superseded_by, :milestone_id)`,
   ).run({
     ":id": r.id,
     ":class": r.class,
@@ -189,6 +190,7 @@ export function upsertRequirement(r: Requirement): void {
     ":notes": r.notes,
     ":full_content": r.full_content,
     ":superseded_by": r.superseded_by ?? null,
+    ":milestone_id": r.milestone_id ?? null,
   }));
 }
 

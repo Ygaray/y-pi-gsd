@@ -153,6 +153,9 @@ function makeBase(): string {
     notes: "",
     full_content: "REQ-01",
     superseded_by: null,
+    // Phase 33 / RELY-05 / D-04: the archive snapshot now scopes by this
+    // schema-level column, not by primary_owner/supporting_slices matching.
+    milestone_id: "M001",
   });
 
   // Adopt the milestone lifecycle to "ready" first, under its own fence — the

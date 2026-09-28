@@ -42,6 +42,7 @@ export function rowToRequirement(row: DbRow): Requirement {
     notes: row["notes"] as string,
     full_content: row["full_content"] as string,
     superseded_by: (row["superseded_by"] as string) ?? null,
+    milestone_id: (row["milestone_id"] as string) ?? null,
   };
 }
 

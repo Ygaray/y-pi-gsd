@@ -190,6 +190,9 @@ function makeShippableMilestone(milestoneId: string, opts: FixtureOptions = {}):
     notes: "",
     full_content: requirementId,
     superseded_by: null,
+    // Phase 33 / RELY-05 / D-04: the archive snapshot now scopes by this
+    // schema-level column, not by primary_owner/supporting_slices matching.
+    milestone_id: milestoneId,
   });
 
   // Adopt the milestone lifecycle to "ready" first, under its own fence — the
@@ -363,6 +366,11 @@ function requirementFixture(id: string, status: string): Parameters<typeof inser
     notes: "",
     full_content: id,
     superseded_by: null,
+    // Phase 33 / RELY-05 / D-01: both call sites re-upsert "REQ-M001" against
+    // milestone M001 — the composite PK means an upsert with a different (or
+    // omitted, i.e. NULL) milestone_id would INSERT a second row instead of
+    // replacing this one.
+    milestone_id: "M001",
   };
 }
 
@@ -586,16 +594,14 @@ test("two shipped milestones each produce their own archive artifact, no key or 
 
 test("shipping one milestone while a second, unrelated milestone's requirement is active excludes it from the snapshot", () => {
   makeBase();
-  // A second, unstarted/mid-flight milestone with its OWN active requirement,
-  // scoped to a slice id that belongs only to that other milestone — exactly
-  // the CR-02 scenario ("requirements belonging to milestones that are still
-  // unstarted or mid-flight" leaking into M001's immutable archive). Proves
-  // the snapshot filter narrows to M001's own slice roster instead of
-  // embedding every project-wide active requirement (`requirements` has no
-  // milestone column in the schema, so scoping happens via
-  // primary_owner/supporting_slices membership against the shipping
-  // milestone's own slice ids — see the filter's own comment for the
-  // residual limitation when slice ids collide across milestones).
+  // A second, unstarted/mid-flight milestone with its OWN active requirement
+  // — exactly the CR-02 scenario ("requirements belonging to milestones that
+  // are still unstarted or mid-flight" leaking into M001's immutable
+  // archive). Phase 33 / RELY-05 / D-04: the snapshot now scopes by the
+  // schema-level `milestone_id` column directly, not by matching
+  // primary_owner/supporting_slices against the shipping milestone's slice
+  // ids — closing the residual limitation the old filter had when slice ids
+  // collided across milestones (SC-3).
   insertMilestone({ id: "M002", title: "Second, unrelated milestone", status: "active" });
   insertSlice({ id: "S99", milestoneId: "M002", title: "Unrelated slice", status: "active" });
   insertRequirement({
@@ -611,6 +617,7 @@ test("shipping one milestone while a second, unrelated milestone's requirement i
     notes: "",
     full_content: "REQ-M002",
     superseded_by: null,
+    milestone_id: "M002",
   });
 
   recordPassingCertify("M001");
