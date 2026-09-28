@@ -707,7 +707,9 @@ test("writer creates parents first, patches only named fields, and rolls back a 
     rowInstruction("create", "milestone", "M009", "milestones", { id: "M009" }, {
       id: "M009", title: "Must roll back",
     }, "early-create"),
-    rowInstruction("update", "requirement", "R-MISSING", "requirements", { id: "R-MISSING" }, {
+    // Phase 33: requirement identity is composite (milestone_id, id); null
+    // targets the legacy/no-milestone row, which still doesn't exist here.
+    rowInstruction("update", "requirement", "R-MISSING", "requirements", { milestone_id: null, id: "R-MISSING" }, {
       description: "No matching row",
     }, "late-update"),
   ]);
@@ -745,7 +747,9 @@ test("writer rolls back decision memory and dependency mutations when a later fa
       dependsOnSliceIds: ["S02"],
       changeIds: ["rollback-dependencies"],
     },
-    rowInstruction("update", "requirement", "R-MISSING", "requirements", { id: "R-MISSING" }, {
+    // Phase 33: requirement identity is composite (milestone_id, id); null
+    // targets the legacy/no-milestone row, which still doesn't exist here.
+    rowInstruction("update", "requirement", "R-MISSING", "requirements", { milestone_id: null, id: "R-MISSING" }, {
       description: "Late failure",
     }, "rollback-late-failure"),
   ]);

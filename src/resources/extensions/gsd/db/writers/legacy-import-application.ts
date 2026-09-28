@@ -58,7 +58,7 @@ const ROW_DEFINITIONS: Readonly<Record<LegacyImportApplicationRowInstruction["ta
   milestone: definition("milestones", ["id"], LEGACY_IMPORT_TARGET_ADAPTERS.milestone.fields),
   slice: definition("slices", ["milestone_id", "id"], LEGACY_IMPORT_TARGET_ADAPTERS.slice.fields),
   task: definition("tasks", ["milestone_id", "slice_id", "id"], LEGACY_IMPORT_TARGET_ADAPTERS.task.fields),
-  requirement: definition("requirements", ["id"], LEGACY_IMPORT_TARGET_ADAPTERS.requirement.fields),
+  requirement: definition("requirements", ["milestone_id", "id"], LEGACY_IMPORT_TARGET_ADAPTERS.requirement.fields),
   artifact: definition("artifacts", ["path"], LEGACY_IMPORT_TARGET_ADAPTERS.artifact.fields),
   assessment: definition(
     "assessments",
@@ -343,9 +343,16 @@ function sortedEntries(record: SqlRecord): Array<[string, SqlValue]> {
 
 function whereClause(identity: SqlRecord, params: Record<string, unknown>): string {
   return sortedEntries(identity).map(([field, value], index) => {
+    // A null identity value (Phase 33: a requirement's null milestone_id,
+    // matching a legacy pre-migration row) renders as literal `IS NULL`
+    // rather than a bound `= :name` comparison. node:sqlite (unlike
+    // better-sqlite3) throws "Unknown named parameter" on a bound param that
+    // never appears in the SQL text, so the param must be omitted entirely
+    // when unused — not just left unreferenced.
+    if (value === null) return `${field} IS NULL`;
     const name = `:identity_${index}`;
     params[name] = value;
-    return value === null ? `${field} IS NULL` : `${field} = ${name}`;
+    return `${field} = ${name}`;
   }).join(" AND ");
 }
 

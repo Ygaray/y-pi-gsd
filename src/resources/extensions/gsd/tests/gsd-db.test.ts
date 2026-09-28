@@ -270,7 +270,7 @@ describe('gsd-db', () => {
       superseded_by: null,
     });
 
-    const r = getRequirementById('R007');
+    const r = getRequirementById('R007', null);
     assert.ok(r !== null, 'should find inserted requirement');
     assert.deepStrictEqual(r?.id, 'R007', 'requirement id');
     assert.deepStrictEqual(r?.class, 'functional', 'requirement class');
@@ -279,7 +279,7 @@ describe('gsd-db', () => {
     assert.deepStrictEqual(r?.superseded_by, null, 'superseded_by should be null');
 
     // Non-existent
-    const missing = getRequirementById('R999');
+    const missing = getRequirementById('R999', null);
     assert.deepStrictEqual(missing, null, 'non-existent requirement returns null');
 
     closeDatabase();
@@ -481,7 +481,7 @@ describe('gsd-db', () => {
     assert.deepStrictEqual(active[0]?.id, 'R002', 'only R002 should be active');
 
     // R001 still in raw table
-    const r1 = getRequirementById('R001');
+    const r1 = getRequirementById('R001', null);
     assert.ok(r1 !== null, 'superseded requirement still in raw table');
 
     closeDatabase();
@@ -1046,7 +1046,7 @@ describe('gsd-db', () => {
     const d = getDecisionById('D001');
     assert.deepStrictEqual(d, null, 'getDecisionById returns null when DB closed');
 
-    const r = getRequirementById('R001');
+    const r = getRequirementById('R001', null);
     assert.deepStrictEqual(r, null, 'getRequirementById returns null when DB closed');
 
     const ad = getActiveDecisions();

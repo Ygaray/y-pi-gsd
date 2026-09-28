@@ -7,7 +7,21 @@ export interface LegacyImportTargetAdapter {
   rowSet: LegacyImportBaseRowSet;
   identity:
     | { kind: "scalar"; fields: readonly [string] }
-    | { kind: "hierarchy"; fields: readonly [string, string] | readonly [string, string, string] }
+    | {
+        kind: "hierarchy";
+        fields: readonly [string, string] | readonly [string, string, string];
+        // Fields in this set may be encoded as an empty key segment, which
+        // resolves to SQL NULL rather than the empty string. Requirements
+        // predating Phase 33's milestone_id column (and requirements
+        // imported from a genuinely milestone-less legacy layout, e.g.
+        // `.gsd/REQUIREMENTS.md`) have no milestone to name in the target
+        // key — mirrors the `IS`-null-safe comparison used elsewhere in
+        // this phase for the same legacy-null-milestone case (D-02).
+        // Omitted (slice/task) means every segment stays required exactly
+        // as before — this is strictly additive, never a loosening for the
+        // hierarchy kinds that must always resolve to a real parent.
+        nullableFields?: ReadonlySet<string>;
+      }
     | { kind: "assessment"; fields: readonly ["milestone_id", "slice_id", "task_id", "scope"] };
   fields: ReadonlySet<string>;
   metadata: ReadonlySet<string>;
@@ -64,9 +78,13 @@ export const LEGACY_IMPORT_TARGET_ADAPTERS = {
   },
   requirement: {
     rowSet: "requirements",
-    identity: { kind: "scalar", fields: ["id"] },
+    identity: {
+      kind: "hierarchy",
+      fields: ["milestone_id", "id"],
+      nullableFields: new Set(["milestone_id"]),
+    },
     fields: new Set([
-      "id", "class", "status", "description", "why", "source", "primary_owner",
+      "milestone_id", "id", "class", "status", "description", "why", "source", "primary_owner",
       "supporting_slices", "validation", "notes", "full_content", "superseded_by",
     ]),
     metadata: new Set(["title"]),
@@ -120,16 +138,23 @@ export function legacyImportTargetIdentity(
       fields: new Set(adapter.identity.fields),
     };
   }
-  const parts = key.split("/").map(requireCanonicalKeyPart);
   if (adapter.identity.kind === "hierarchy") {
-    if (parts.length !== adapter.identity.fields.length) {
+    const rawParts = key.split("/");
+    if (rawParts.length !== adapter.identity.fields.length) {
       throw new Error("legacy import hierarchy target key has the wrong depth");
     }
+    const nullableFields = adapter.identity.nullableFields;
+    const parts = rawParts.map((part, index) => {
+      const field = adapter.identity.fields[index]!;
+      if (part.length === 0 && nullableFields?.has(field)) return null;
+      return requireCanonicalKeyPart(part);
+    });
     return {
       identity: Object.fromEntries(adapter.identity.fields.map((field, index) => [field, parts[index]!])),
       fields: new Set(adapter.identity.fields),
     };
   }
+  const parts = key.split("/").map(requireCanonicalKeyPart);
   if (parts.length < 2 || parts.length > 4) {
     throw new Error("legacy import assessment target key has the wrong depth");
   }

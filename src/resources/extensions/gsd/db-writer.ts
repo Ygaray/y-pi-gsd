@@ -17,7 +17,7 @@ import { saveFile } from './files.js';
 import { recordCompatProjectionWrite } from './compat/compat-marker.js';
 import { GSDError, GSD_STALE_STATE, GSD_IO_ERROR } from './errors.js';
 import { logWarning, logError } from './workflow-logger.js';
-import { invalidateStateCache } from './state.js';
+import { getActiveMilestoneId, invalidateStateCache } from './state.js';
 import { clearPathCache } from './paths.js';
 import { clearParseCache } from './files.js';
 import type { MilestoneScope, GsdWorkspace } from './workspace.js';
@@ -368,6 +368,13 @@ export async function saveRequirementToDb(
   try {
     const db = await import('./gsd-db.js');
 
+    // Resolved before the transaction: getActiveMilestoneId is async and the
+    // transaction callback below must be synchronous. Lock-aware (D-03) —
+    // NOT the sync getActiveMilestoneIdFromDb, which ignores
+    // GSD_MILESTONE_LOCK and would misattribute under parallel workers.
+    // null (no active milestone) stores NULL rather than inventing one.
+    const milestoneId = await getActiveMilestoneId(basePath);
+
     // Atomic ID assignment + insert inside a transaction.
     const txResult = db.transaction(() => {
       const adapter = db._getAdapter();
@@ -406,6 +413,7 @@ export async function saveRequirementToDb(
         notes: fields.notes ?? (existingRow?.['notes'] as string | undefined) ?? '',
         full_content: (existingRow?.['full_content'] as string | undefined) ?? '',
         superseded_by: (existingRow?.['superseded_by'] as string | null | undefined) ?? null,
+        milestone_id: milestoneId,
       };
 
       db.upsertRequirement(requirement);
@@ -755,7 +763,11 @@ export async function updateRequirementInDb(
   try {
     const db = await import('./gsd-db.js');
 
-    const existing = db.getRequirementById(id);
+    // Lock-aware (D-03), resolved before the read-modify-write so the read
+    // (getRequirementById) and the write (upsertRequirement) target the same
+    // milestone's row — the read-modify-write cycle this fixes (Pitfall NEW-3).
+    const milestoneId = await getActiveMilestoneId(basePath);
+    const existing = db.getRequirementById(id, milestoneId);
 
     const base: Requirement = existing ?? {
       id,
@@ -770,6 +782,7 @@ export async function updateRequirementInDb(
       notes: '',
       full_content: '',
       superseded_by: null,
+      milestone_id: milestoneId,
     };
 
     // Merge updates into existing (or skeleton)
@@ -777,6 +790,7 @@ export async function updateRequirementInDb(
       ...base,
       ...updates,
       id: base.id, // ID cannot be changed
+      milestone_id: base.milestone_id, // milestone attribution cannot be changed via update
     };
 
     db.upsertRequirement(merged);

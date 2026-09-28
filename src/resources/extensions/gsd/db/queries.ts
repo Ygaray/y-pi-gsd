@@ -328,9 +328,20 @@ export function getActiveDecisions(): Decision[] {
   return rows.map(rowToActiveDecision);
 }
 
-export function getRequirementById(id: string): Requirement | null {
+/**
+ * Fetch one requirement row scoped by milestone (Phase 33, RELY-05, Pitfall
+ * NEW-3). Once `id` is no longer globally unique, a bare-id lookup with no
+ * `ORDER BY` is non-deterministic — SQLite gives no ordering guarantee, so it
+ * could return either milestone's row. `milestoneId` may be `null` to match
+ * a legacy pre-migration row (`IS`, not `=`, so NULL-to-NULL compares equal).
+ * The `ORDER BY` makes repeated calls over the same data deterministic even
+ * in the (should-never-happen) case of more than one matching row.
+ */
+export function getRequirementById(id: string, milestoneId: string | null): Requirement | null {
   if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare("SELECT * FROM requirements WHERE id = ?").get(id);
+  const row = getDbOrNull()!.prepare(
+    "SELECT * FROM requirements WHERE id = :id AND milestone_id IS :milestone_id ORDER BY id LIMIT 1",
+  ).get({ ":id": id, ":milestone_id": milestoneId });
   if (!row) return null;
   return rowToRequirement(row);
 }

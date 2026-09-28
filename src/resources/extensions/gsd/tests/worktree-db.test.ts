@@ -140,7 +140,7 @@ test("copyWorktreeDb copies DB file and data is queryable", (t) => {
   assert.ok(d !== null, "decision queryable in copied DB");
   assert.equal(d?.choice, "node:sqlite", "decision data preserved in copy");
 
-  const r = getRequirementById("R001");
+  const r = getRequirementById("R001", null);
   assert.ok(r !== null, "requirement queryable in copied DB");
   assert.equal(r?.description, "Must store decisions", "requirement data preserved in copy");
 });
@@ -260,7 +260,7 @@ test("reconcileWorktreeDb merges new requirements from worktree into main", (t) 
   const result = reconcileWorktreeDb(mainDb, wtDb);
 
   assert.ok(result.requirements > 0, "requirements merged count > 0");
-  const r2 = getRequirementById("R002");
+  const r2 = getRequirementById("R002", null);
   assert.ok(r2 !== null, "R002 from worktree now in main");
   assert.equal(r2?.description, "Must be fast", "R002 data correct after merge");
 });

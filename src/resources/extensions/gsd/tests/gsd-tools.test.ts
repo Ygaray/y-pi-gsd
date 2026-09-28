@@ -150,7 +150,7 @@ describe('gsd-tools', () => {
         tmpDir,
       );
 
-      const updated = getRequirementById('R001');
+      const updated = getRequirementById('R001', null);
       assert.ok(updated !== null, 'R001 should still exist');
       assert.deepStrictEqual(updated!.status, 'validated', 'Status should be updated');
       assert.deepStrictEqual(updated!.validation, 'Unit tests pass', 'Validation should be updated');
@@ -168,7 +168,7 @@ describe('gsd-tools', () => {
 
       // Updating non-existent requirement upserts (creates it) — see #2919
       await updateRequirementInDb('R999', { status: 'deferred' }, tmpDir);
-      const upserted = getRequirementById('R999');
+      const upserted = getRequirementById('R999', null);
       assert.ok(upserted !== null, 'R999 should be created by upsert');
       assert.deepStrictEqual(upserted!.status, 'deferred', 'Upserted requirement should have the updated status');
 
@@ -318,7 +318,7 @@ describe('gsd-tools', () => {
       assert.deepStrictEqual(result.id, 'R001', 'First requirement should be R001');
 
       // Verify DB row exists
-      const row = getRequirementById('R001');
+      const row = getRequirementById('R001', null);
       assert.ok(row !== null, 'Requirement R001 should exist in DB');
       assert.deepStrictEqual(row!.class, 'functional', 'Class should match');
       assert.deepStrictEqual(row!.description, 'Must support dark mode', 'Description should match');
@@ -400,7 +400,7 @@ describe('gsd-tools', () => {
         tmpDir,
       );
 
-      const created = getRequirementById('R025');
+      const created = getRequirementById('R025', null);
       assert.ok(created !== null, 'R025 should be created by upsert');
       assert.deepStrictEqual(created!.status, 'validated', 'Status should be set');
       assert.deepStrictEqual(created!.validation, 'Integration tests pass', 'Validation should be set');

@@ -249,7 +249,10 @@ function identityWhere(identity: Readonly<Record<string, unknown>>): {
 } {
   const entries = Object.entries(identity);
   return {
-    clause: entries.map(([field]) => `${field} = :${field}`).join(" AND "),
+    // `IS` (not `=`) so a null identity field — e.g. a legacy requirement's
+    // milestone_id (Phase 33, D-02) — matches correctly; SQL `= NULL` never
+    // matches, even the row that produced this exact identity.
+    clause: entries.map(([field]) => `${field} IS :${field}`).join(" AND "),
     params: Object.fromEntries(entries.map(([field, value]) => [`:${field}`, value])),
   };
 }
