@@ -22,6 +22,7 @@ const SCHEMA_BOUNDARY_RELATIVE_PATHS = [
   "read-cli-schema-too-new.test.ts",
   "graph-build-version-gate.test.ts",
   "headless-query-db-open.test.ts",
+  "stale-dist-guard.test.ts",
 ] as const;
 
 function resolveBoundaryFile(relativePath: string): string {
