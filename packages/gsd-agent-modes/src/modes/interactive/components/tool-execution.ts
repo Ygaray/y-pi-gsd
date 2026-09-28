@@ -66,6 +66,12 @@ const RUNNING_COMPACT_RENDER_INTERVAL_MS = 1000;
 // above from truncate.js — 2000 lines / 50KB), which is the capture-time hard
 // truncation ceiling for tool output itself, not a UX default. Reusing the
 // capture ceiling here would mean almost nothing ever collapses.
+// IN-01 (Phase 29 code review): pi-coding-agent/src/core/settings-manager.ts's
+// getToolCollapseThresholdLines()/getToolCollapseThresholdBytes() hardcode
+// their own 40/4096 fallbacks independently of these constants (importing a
+// gsd-agent-modes constant into a vendored pi-coding-agent file would widen
+// the patch surface in scripts/pi-upstream.json) — if either default changes,
+// check the other file too.
 export const DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_LINES = 40;
 export const DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_BYTES = 4096;
 

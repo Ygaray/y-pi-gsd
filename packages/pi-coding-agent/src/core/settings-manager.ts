@@ -1039,6 +1039,12 @@ export class SettingsManager {
 		this.save();
 	}
 
+	// IN-01 (Phase 29 code review): these 40/4096 fallbacks are duplicated from
+	// gsd-agent-modes/.../tool-execution.ts's DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_LINES/
+	// _MAX_BYTES rather than importing them — importing a gsd-agent-modes constant
+	// into this vendored/patched pi-coding-agent file would widen the patch
+	// surface documented in scripts/pi-upstream.json. If either default changes,
+	// check the other file too.
 	getToolCollapseThresholdLines(): number {
 		const lines = this.settings.terminal?.toolCollapseThresholdLines;
 		if (typeof lines !== "number" || !Number.isFinite(lines)) {
