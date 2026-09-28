@@ -1,48 +1,17 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const require_ = createRequire(import.meta.url);
+const { native, isNativeAddonLoaded } = require_("../../dist/native.js");
 
-// Load the native addon directly
-const addonDir = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "..",
-  "native",
-  "addon",
-);
-const platformTag = `${process.platform}-${process.arch}`;
-const candidates = [
-  path.join(addonDir, `gsd_engine.${platformTag}.node`),
-  path.join(addonDir, "gsd_engine.dev.node"),
-];
-
-let native;
-for (const candidate of candidates) {
-  try {
-    native = require(candidate);
-    break;
-  } catch {
-    // try next
-  }
-}
-
-if (!native) {
-  console.error(
-    "Native addon not found. Run `npm run build:native -w @gsd/native` first.",
-  );
-  process.exit(1);
-}
+const addonSkip = isNativeAddonLoaded()
+  ? undefined
+  : "native addon not loadable: no local native/addon build and no resolvable @opengsd/engine-<platform> package";
 
 // ── visibleWidth ───────────────────────────────────────────────────────
 
-describe("visibleWidth", () => {
+describe("visibleWidth", { skip: addonSkip }, () => {
   test("plain ASCII text", () => {
     assert.equal(native.visibleWidth("hello"), 5);
   });
@@ -86,7 +55,7 @@ describe("visibleWidth", () => {
 
 // ── wrapTextWithAnsi ───────────────────────────────────────────────────
 
-describe("wrapTextWithAnsi", () => {
+describe("wrapTextWithAnsi", { skip: addonSkip }, () => {
   test("wraps plain text at word boundary", () => {
     const lines = native.wrapTextWithAnsi("hello world", 5);
     assert.equal(lines.length, 2);
@@ -167,7 +136,7 @@ describe("wrapTextWithAnsi", () => {
 
 // ── truncateToWidth ────────────────────────────────────────────────────
 
-describe("truncateToWidth", () => {
+describe("truncateToWidth", { skip: addonSkip }, () => {
   test("returns original when fits", () => {
     const result = native.truncateToWidth("hello", 10, 0, false);
     assert.equal(result, "hello");
@@ -237,7 +206,7 @@ describe("truncateToWidth", () => {
 
 // ── sliceWithWidth ─────────────────────────────────────────────────────
 
-describe("sliceWithWidth", () => {
+describe("sliceWithWidth", { skip: addonSkip }, () => {
   test("slices from start", () => {
     const result = native.sliceWithWidth("hello world", 0, 5, false);
     assert.equal(result.text, "hello");
@@ -276,7 +245,7 @@ describe("sliceWithWidth", () => {
 
 // ── extractSegments ────────────────────────────────────────────────────
 
-describe("extractSegments", () => {
+describe("extractSegments", { skip: addonSkip }, () => {
   test("extracts before and after segments", () => {
     const result = native.extractSegments(
       "hello world test",
@@ -302,7 +271,7 @@ describe("extractSegments", () => {
 
 // ── sanitizeText ───────────────────────────────────────────────────────
 
-describe("sanitizeText", () => {
+describe("sanitizeText", { skip: addonSkip }, () => {
   test("strips ANSI codes", () => {
     assert.equal(native.sanitizeText("\x1b[31mhello\x1b[0m"), "hello");
   });
