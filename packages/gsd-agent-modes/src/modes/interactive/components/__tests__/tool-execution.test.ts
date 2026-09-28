@@ -1032,3 +1032,104 @@ describe("ToolExecutionComponent size-based auto-collapse (TUI-05)", () => {
 		);
 	});
 });
+
+// TUI-05 (Phase 29, Plan 02): D-03's error exemption plus the streaming and
+// idempotency guarantees around the size branch. Oversized error results must
+// never collapse (a failing tool's diagnostic text is never hidden), a
+// streaming row (no result yet) must be untouched by the size branch, and the
+// decision must be recomputed per render from the current result rather than
+// latched onto any prior state.
+describe("ToolExecutionComponent size-based auto-collapse: D-03 error exemption and streaming/idempotency (TUI-05)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	const oversizedText = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+	const smallText = "line 1\nline 2\nline 3";
+
+	function buildComponent(toolName = "mcp__demo__do_thing", args: Record<string, unknown> = { ok: true }) {
+		return new ToolExecutionComponent(toolName, args, {}, undefined, { requestRender() {} } as any);
+	}
+
+	test("an oversized isError result renders more than one row and carries no hidden-strip status text", () => {
+		const component = buildComponent();
+		component.setExpanded(true); // default-seeded
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: true });
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		assert.ok(rendered.split("\n").length > 1);
+
+		// Source the hidden-strip marker phrase from a known collapsed non-error
+		// row rather than hardcoding it twice.
+		const collapsedControl = buildComponent("mcp__demo__control", { ok: true });
+		collapsedControl.setExpanded(true);
+		collapsedControl.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		const hiddenStripMarker = stripAnsi(collapsedControl.render(120).join("\n")).match(/output hidden.*ctrl\+o expand/)?.[0];
+		assert.ok(hiddenStripMarker, "collapsed control row must carry the hidden-strip marker");
+		assert.doesNotMatch(rendered, new RegExp(hiddenStripMarker!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
+	test("getDisplayedLineCount(120) for an oversized error row is greater than 1", () => {
+		const component = buildComponent();
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: true });
+		assert.ok(component.getDisplayedLineCount(120) > 1);
+	});
+
+	test("a bash tool with an oversized error result renders more than one row", () => {
+		const component = buildComponent("bash", { command: "cat bigfile" });
+		component.setExpanded(true);
+		component.updateResult({
+			content: [{ type: "text", text: oversizedText }],
+			isError: true,
+			details: { cwd: "/tmp/project" },
+		});
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+	});
+
+	test("a streaming row (no result yet) is untouched by the size branch, and starts collapsing once an oversized result arrives", () => {
+		const component = buildComponent();
+		component.setExpanded(true);
+		const beforeResult = stripAnsi(component.render(120).join("\n"));
+		// No result yet: this is the running/partial card, not the one-row hidden
+		// strip — the size branch must contribute nothing on a row with no result.
+		assert.ok(beforeResult.split("\n").length >= 1);
+		assert.doesNotMatch(beforeResult, /output hidden/);
+
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+	});
+
+	test("re-update ordering: small then oversized collapses; oversized then small expands", () => {
+		const smallThenOversized = buildComponent();
+		smallThenOversized.setExpanded(true);
+		smallThenOversized.updateResult({ content: [{ type: "text", text: smallText }], isError: false });
+		smallThenOversized.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(stripAnsi(smallThenOversized.render(120).join("\n")).split("\n").length, 1);
+
+		const oversizedThenSmall = buildComponent();
+		oversizedThenSmall.setExpanded(true);
+		oversizedThenSmall.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		oversizedThenSmall.updateResult({ content: [{ type: "text", text: smallText }], isError: false });
+		assert.ok(stripAnsi(oversizedThenSmall.render(120).join("\n")).split("\n").length > 1);
+	});
+
+	test("idempotency: two consecutive renders of the same oversized row are deeply equal and mutate no row state", () => {
+		const component = buildComponent();
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+
+		const first = component.render(120);
+		const second = component.render(120);
+		assert.deepEqual(first, second);
+
+		const countBefore = component.getDisplayedLineCount(120);
+		component.render(120);
+		const countAfter = component.getDisplayedLineCount(120);
+		assert.equal(countBefore, countAfter);
+
+		// A render must not flip the row into the operator-sourced state — a
+		// subsequent default-sourced setExpanded(true) still collapses.
+		component.setExpanded(true);
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+	});
+});
