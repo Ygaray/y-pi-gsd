@@ -668,6 +668,17 @@ export function completeSliceHierarchy(
       // completion proof is minted and slice closeout still requires every
       // verdict-backed task to carry its own passing proof.
       completedTaskIds.push(taskId);
+    } else if (legacyStatus === "operator-attested" && state.lifecycleStatus === "operator-attested") {
+      // Phase 31 / RELY-03 / INC-2026-09-27-01: the Task was closed on
+      // operator attestation recorded in the task.operator.attested event
+      // (a structured {command, exitCode: 0, verdict: "pass"} evidence
+      // object — see task-settle.ts). Terminal in both vocabularies, but
+      // deliberately NOT verdict-gated completion: no completion proof is
+      // minted or demanded here, preserving the verified-vs-attested audit
+      // distinction (D-03). Every genuinely verdict-backed Task in this
+      // Slice still carries its own passing proof through the `completed`
+      // branch above.
+      completedTaskIds.push(taskId);
     } else if (legacyStatus === "cancelled" && state.lifecycleStatus === "cancelled") {
       if (!hasCurrentCancellationAuthorization(lifecycleId, completedAt)) {
         throw new SliceLifecycleValidationError(
