@@ -445,7 +445,7 @@ describe('db-writer', () => {
       }, tmpDir);
 
       // Verify DB state
-      const updated = getRequirementById('R001');
+      const updated = getRequirementById('R001', null);
       assert.ok(!!updated, 'requirement still exists after update');
       assert.deepStrictEqual(updated?.status, 'validated', 'status updated in DB');
       assert.deepStrictEqual(updated?.validation, 'S01 — all tests pass', 'validation updated in DB');
@@ -477,7 +477,7 @@ describe('db-writer', () => {
     try {
       // Previously threw; now upserts a skeleton requirement with the provided updates
       await updateRequirementInDb('R999', { status: 'validated' }, tmpDir);
-      const created = getRequirementById('R999');
+      const created = getRequirementById('R999', null);
       assert.ok(created !== null, 'R999 should be created by upsert');
       assert.deepStrictEqual(created!.status, 'validated', 'Upserted requirement should have validated status');
       assert.deepStrictEqual(created!.id, 'R999', 'Upserted requirement should keep the provided ID');
@@ -529,7 +529,7 @@ describe('db-writer', () => {
       }, tmpDir);
 
       // R005 should have the requested update only; disk projection content is ignored.
-      const r005 = getRequirementById('R005');
+      const r005 = getRequirementById('R005', null);
       assert.ok(r005, 'R005 should exist');
       assert.equal(r005!.status, 'validated', 'status should be updated');
       assert.equal(r005!.validation, 'S02 — auth flow verified', 'validation should be updated');
@@ -538,10 +538,10 @@ describe('db-writer', () => {
       assert.ok(!r005!.full_content?.includes('authentication'), 'full content should not be imported');
 
       // Other requirements in the projection are not seeded.
-      const r007 = getRequirementById('R007');
+      const r007 = getRequirementById('R007', null);
       assert.equal(r007, null, 'R007 should not be imported from REQUIREMENTS.md');
 
-      const r001 = getRequirementById('R001');
+      const r001 = getRequirementById('R001', null);
       assert.equal(r001, null, 'R001 should not be imported from REQUIREMENTS.md');
     } finally {
       closeDatabase();

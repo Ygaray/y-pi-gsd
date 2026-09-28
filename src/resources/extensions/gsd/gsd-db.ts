@@ -2067,10 +2067,20 @@ export function deleteDecisionById(id: string): void {
   transaction(() => getDbOrNull()!.prepare("DELETE FROM decisions WHERE id = :id").run({ ":id": id }));
 }
 
-/** Delete a requirement row by id. Used by db-writer.ts rollback on disk-write failure. */
-export function deleteRequirementById(id: string): void {
+/**
+ * Delete a requirement row by (milestoneId, id). Used by db-writer.ts
+ * rollback on disk-write failure. Scoped by milestone (Pitfall NEW-8, Phase
+ * 33) even though no production caller exists today — a bare-id delete would
+ * remove every milestone's row sharing that id once the PK is composite,
+ * which is the wrong contract to leave for a future caller to discover the
+ * hard way. `milestoneId` may be `null` to target a legacy row (`IS`, not
+ * `=`, for NULL-safe matching).
+ */
+export function deleteRequirementById(id: string, milestoneId: string | null): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare("DELETE FROM requirements WHERE id = :id").run({ ":id": id }));
+  transaction(() => getDbOrNull()!.prepare(
+    "DELETE FROM requirements WHERE id = :id AND milestone_id IS :milestone_id",
+  ).run({ ":id": id, ":milestone_id": milestoneId }));
 }
 
 /** Delete an artifact row by path. Used by db-writer.ts rollback on disk-write failure. */

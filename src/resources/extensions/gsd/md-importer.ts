@@ -159,6 +159,11 @@ export function parseRequirementsSections(content: string): Requirement[] {
         notes: currentReq.notes ?? '',
         full_content: currentReq.full_content ?? '',
         superseded_by: currentReq.superseded_by ?? null,
+        // Test-only path (see file header) — no milestone context is ever
+        // available here, so this resolves to null rather than threading
+        // the production-grade lock-aware resolver behind a test-only entry
+        // point (Phase 33, D-02's legacy-null-milestone fallback).
+        milestone_id: currentReq.milestone_id ?? null,
       });
     }
     currentReq = null;

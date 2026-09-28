@@ -292,7 +292,7 @@ test('md-importer: migrateFromMarkdown orchestrator', () => {
     assert.deepStrictEqual(d001?.superseded_by, 'D010', 'D001 superseded_by should be D010');
 
     // Verify requirements queryable
-    const r001 = getRequirementById('R001');
+    const r001 = getRequirementById('R001', null);
     assert.ok(!!r001, 'R001 should be queryable');
     assert.deepStrictEqual(r001?.status, 'active', 'R001 status from DB');
 
@@ -416,7 +416,7 @@ test('md-importer: round-trip fidelity', () => {
     assert.deepStrictEqual(d002?.choice, '.gsd/gsd.db', 'D002 choice round-trip');
     assert.deepStrictEqual(d002?.rationale, 'Derived state', 'D002 rationale round-trip');
 
-    const r002 = getRequirementById('R002');
+    const r002 = getRequirementById('R002', null);
     assert.deepStrictEqual(r002?.class, 'failure-visibility', 'R002 class round-trip');
     assert.deepStrictEqual(r002?.description, 'Falls back to markdown if SQLite unavailable', 'R002 description round-trip');
     assert.deepStrictEqual(r002?.why, 'Must not break on exotic platforms', 'R002 why round-trip');
