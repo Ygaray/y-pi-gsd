@@ -161,6 +161,59 @@ test("saveRequirementToDb stores a null milestone_id when no milestone is active
   assert.equal(found!.milestone_id, null);
 });
 
+// Test 3b (CR-01/WR-02 regression): two CONCURRENTLY ACTIVE milestones (not
+// one active + one terminal) each save a requirement with the exact same
+// description. Before CR-01's scoping fix, saveRequirementToDb's duplicate
+// lookup matched globally, so the second save would silently reuse the
+// first milestone's row id and inherit its primary_owner/supporting_slices
+// fallback values. After the fix, the second save must mint its own,
+// distinct id under its own milestone, and must not inherit any field from
+// the other milestone's row.
+test("saveRequirementToDb does not cross-attribute a description collision between two concurrently active milestones", async () => {
+  const basePath = makeBasePath("M-ONE", "M-TWO");
+  insertMilestone({ id: "M-ONE", title: "Milestone One", status: "active" });
+  insertMilestone({ id: "M-TWO", title: "Milestone Two", status: "active" });
+
+  process.env.GSD_MILESTONE_LOCK = "M-ONE";
+  const first = await saveRequirementToDb({
+    class: "functional",
+    description: "Shared description across milestones",
+    why: "First milestone's reason",
+    source: "user",
+    primary_owner: "S01",
+    supporting_slices: "S01",
+  }, basePath);
+
+  process.env.GSD_MILESTONE_LOCK = "M-TWO";
+  const second = await saveRequirementToDb({
+    class: "functional",
+    description: "Shared description across milestones",
+    why: "Second milestone's own, different reason",
+    source: "user",
+    // Deliberately omit primary_owner/supporting_slices so the stale-fallback
+    // path (WR-02) would kick in if CR-01's scoping regressed.
+  }, basePath);
+
+  assert.notEqual(second.id, first.id, "the two milestones' requirements must not collapse onto the same row");
+
+  const firstRow = getRequirementById(first.id, "M-ONE");
+  const secondRow = getRequirementById(second.id, "M-TWO");
+  assert.ok(firstRow, "milestone one's requirement should still exist under its own milestone");
+  assert.ok(secondRow, "milestone two's requirement should exist under its own milestone");
+  assert.equal(firstRow!.milestone_id, "M-ONE");
+  assert.equal(secondRow!.milestone_id, "M-TWO");
+  assert.equal(secondRow!.why, "Second milestone's own, different reason");
+  // The omitted fields on the second save must NOT have inherited milestone
+  // one's values — they should fall back to the field's own default, not a
+  // stale cross-milestone value.
+  assert.equal(secondRow!.primary_owner, "", "must not inherit primary_owner from the other milestone's row");
+  assert.equal(secondRow!.supporting_slices, "", "must not inherit supporting_slices from the other milestone's row");
+
+  // Milestone one's row must be completely untouched by the second save.
+  assert.equal(firstRow!.primary_owner, "S01");
+  assert.equal(firstRow!.supporting_slices, "S01");
+});
+
 // Test 4 (Pitfall NEW-3): two milestones hold a requirement with the same id
 // and different descriptions. updateRequirementInDb under the active
 // milestone modifies only that milestone's row; the other milestone's row is
