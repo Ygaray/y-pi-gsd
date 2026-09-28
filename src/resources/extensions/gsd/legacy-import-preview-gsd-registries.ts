@@ -420,7 +420,10 @@ function interpretRequirements(
       addLegacyImportCandidate(
         candidates,
         file,
-        { kind: "requirement", key: id },
+        // `.gsd/REQUIREMENTS.md` predates milestone attribution entirely —
+        // no milestone is ever in scope here. The empty leading key segment
+        // resolves to milestone_id NULL (D-02's legacy fallback).
+        { kind: "requirement", key: `/${id}` },
         {
           id,
           description: section.description,
@@ -452,7 +455,7 @@ function interpretRequirements(
     addLegacyImportCandidate(
       candidates,
       file,
-      { kind: "requirement", key: id },
+      { kind: "requirement", key: `/${id}` },
       {
         id,
         class: value("class"),

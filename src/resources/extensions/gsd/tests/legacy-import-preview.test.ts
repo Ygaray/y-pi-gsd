@@ -1088,7 +1088,10 @@ describe("legacy preview task classification", () => {
         ["create", "assessment", "M702/S01/run-uat"],
         ["create", "milestone", "M702"],
         ["create", "milestone-status", "M702"],
-        ["create", "requirement", "R701"],
+        // Phase 33: `.gsd/REQUIREMENTS.md` carries no milestone context, so
+        // the requirement target key's leading segment is empty (null
+        // milestone_id, D-02's legacy fallback) rather than a bare id.
+        ["create", "requirement", "/R701"],
         ["create", "slice", "M702/S01"],
         ["preserve", "legacy-knowledge-source", ".gsd/KNOWLEDGE.md"],
         ["preserve", "legacy-workflow-definition", ".gsd/workflows/capstone.yaml"],

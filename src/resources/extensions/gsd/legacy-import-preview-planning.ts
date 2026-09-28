@@ -259,7 +259,11 @@ function interpretRequirements(file: SourceFile, candidates: PendingCandidate[],
     const status = section.flatMap((candidate) => /^-\s*Status:\s*(.+)$/iu.exec(candidate.text)?.[1] ?? [])[0] ?? "pending";
     const description = section.flatMap((candidate) => /^-\s*Description:\s*(.+)$/iu.exec(candidate.text)?.[1] ?? [])[0] ?? "";
     const rawStart = headings.length === 1 ? 0 : line.start;
-    addCandidate(candidates, file, { kind: "requirement", key: match[1] }, {
+    // Root-level `.planning/REQUIREMENTS.md` has no milestone context — the
+    // leading empty key segment resolves to milestone_id NULL (Phase 33,
+    // D-02's legacy-null-milestone fallback), matching every other
+    // pre-migration requirement row rather than inventing a milestone.
+    addCandidate(candidates, file, { kind: "requirement", key: `/${match[1]}` }, {
       id: match[1], title: match[2].trim(), description: description.trim(), status: status.trim(),
     }, "planning-requirement", rawStart, end);
   });
@@ -906,7 +910,9 @@ function interpretMilestoneFiles(
         );
       }
       for (const { line, row } of requirementRows) {
-        addCandidate(candidates, requirements, { kind: "requirement", key: row[1] }, {
+        // This milestone-scoped `${legacyMilestone}-REQUIREMENTS.md` has a
+        // real milestone in scope, unlike the root-level flat case above.
+        addCandidate(candidates, requirements, { kind: "requirement", key: `${milestoneId}/${row[1]}` }, {
           id: row[1], status: "validated", text: row[2].trim(),
         }, "milestone-requirement-row", line.start, line.end);
       }
