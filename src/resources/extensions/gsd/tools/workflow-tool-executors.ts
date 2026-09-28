@@ -72,8 +72,10 @@ import {
 import { internalExecutionInvocation } from "../execution-invocation.js";
 import {
   applyBlockerAcceptedDisposition,
+  applyOperatorAttestedDisposition,
   applyTaskSettle,
   planBlockerAcceptedDisposition,
+  planOperatorAttestedDisposition,
   planTaskSettle,
 } from "../task-settle.js";
 import type { CompleteSliceParams, EscalationOption } from "../types.js";
@@ -960,8 +962,14 @@ export interface TaskSettleExecutorParams {
   reason: string;
   apply?: boolean;
   reconcileLifecycle?: boolean;
-  /** #2202: operator closeout disposition for a discovered blocker. */
-  settleDisposition?: "blocker-accepted";
+  /**
+   * #2202: operator closeout disposition for a discovered blocker.
+   * Phase 31 (RELY-03): 'operator-attested' closes a Task on structured
+   * operator-submitted verification evidence.
+   */
+  settleDisposition?: "blocker-accepted" | "operator-attested";
+  /** Required when settleDisposition is 'operator-attested'; forwarded unexamined (D-03). */
+  evidence?: Record<string, DomainJsonValue>;
 }
 export type ReopenSliceExecutorParams = ReopenSliceParams;
 export type SkipSliceExecutorParams = SkipSliceParams;
@@ -1362,17 +1370,87 @@ export async function executeTaskSettle(
   const unit = `${task.milestoneId}/${task.sliceId}/${task.taskId}`;
   const settleOptions = { reconcileLifecycle: params.reconcileLifecycle === true };
   const blockerAccepted = params.settleDisposition === "blocker-accepted";
-  if (blockerAccepted && settleOptions.reconcileLifecycle) {
+  const operatorAttested = params.settleDisposition === "operator-attested";
+  // Generic on presence, not equality against a specific literal (RESEARCH.md
+  // pitfall 7, T-31-13): any non-null/undefined settleDisposition is mutually
+  // exclusive with reconcileLifecycle, so a future disposition literal never
+  // needs a new arm added here.
+  if (params.settleDisposition != null && settleOptions.reconcileLifecycle) {
     return {
       content: [{
         type: "text",
-        text: "Error settling task attempt: settleDisposition 'blocker-accepted' and reconcileLifecycle are mutually exclusive — blocker-accepted closes the Task terminal without adopting ready/completed.",
+        text: `Error settling task attempt: settleDisposition '${params.settleDisposition}' and reconcileLifecycle are mutually exclusive — a disposition closes the Task terminal without adopting ready/completed.`,
       }],
       details: { operation: "task_settle", error: "conflicting-disposition" },
       isError: true,
     };
   }
   try {
+    if (operatorAttested) {
+      if (!params.apply) {
+        const plan = planOperatorAttestedDisposition(task, params.evidence ?? null, params.reason);
+        if (plan.alreadyAttested) {
+          return {
+            content: [{ type: "text", text: `gsd_task_settle (dry run): ${unit} is already closed as operator-attested — nothing to do.` }],
+            details: { operation: "task_settle", dryRun: true, settleDisposition: "operator-attested", rows: [], alreadyAttested: true },
+          };
+        }
+        const row = plan.rows[0];
+        const lines = [
+          `  lifecycle ${row.lifecycleFrom} → operator-attested (terminal; legacy tasks.status ${row.currentStatus} → operator-attested)`,
+          `  attempt ${row.attemptId} Result ${row.resultId} preserved as history — route Kernel head consumed with a closeout decision`,
+          `  recovery action ${row.supersededRecoveryActionId ?? "(none)"} superseded`,
+        ];
+        return {
+          content: [{
+            type: "text",
+            text: `gsd_task_settle (dry run) — operator-attested disposition, no changes made:\n${lines.join("\n")}\nRe-run with apply: true to attest.`,
+          }],
+          details: {
+            operation: "task_settle",
+            dryRun: true,
+            settleDisposition: "operator-attested",
+            rows: plan.rows,
+          },
+        };
+      }
+      const result = applyOperatorAttestedDisposition({
+        invocation,
+        task,
+        evidence: params.evidence ?? null,
+        reason: params.reason,
+      });
+      if (result.alreadyAttested) {
+        return {
+          content: [{ type: "text", text: `gsd_task_settle: ${unit} is already closed as operator-attested — nothing to do.` }],
+          details: {
+            operation: "task_settle",
+            dryRun: false,
+            settleDisposition: "operator-attested",
+            attested: false,
+            alreadyAttested: true,
+          },
+        };
+      }
+      return {
+        content: [{
+          type: "text",
+          text:
+            `${unit} closed on operator attestation: Task is closed on operator attestation; the attestation evidence ` +
+            `is recorded on the event log. Attempt ${result.attemptId} and its failed Result remain history and the ` +
+            "route head is consumed (no re-route).",
+        }],
+        details: {
+          operation: "task_settle",
+          dryRun: false,
+          settleDisposition: "operator-attested",
+          attested: true,
+          attemptId: result.attemptId,
+          resultId: result.resultId,
+          routeConsumed: result.routeConsumed,
+        },
+      };
+    }
     if (blockerAccepted) {
       if (!params.apply) {
         const plan = planBlockerAcceptedDisposition(task, params.reason);

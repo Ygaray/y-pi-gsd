@@ -56,9 +56,16 @@ import {
   executeSliceComplete as executeSliceCompleteWithInvocation,
   executeSliceReopen as executeSliceReopenWithInvocation,
   executeSkipSlice as executeSkipSliceWithInvocation,
+  executeTaskSettle,
   executeValidateMilestone,
   executeUatResultSave,
 } from "../tools/workflow-tool-executors.ts";
+import {
+  claimTaskAttempt,
+  settleTaskAttempt,
+} from "../task-execution-domain-operation.ts";
+import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
+import { _taskSettleSchemaForTest } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
 import { internalExecutionInvocation, type ExecutionInvocation } from "../execution-invocation.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
@@ -4493,4 +4500,245 @@ test("executeSummarySave CONTEXT HARD BLOCK clears after write-gate state file i
     closeDatabase();
     cleanup(base);
   }
+});
+
+// ─── Phase 31 / RELY-03: gsd_task_settle operator-attested disposition ───
+//
+// Not a reuse of task-settle.test.ts's seedRetryRoutedResidue: fixtures are
+// not importable across test files (31-01's interface note). This mirrors
+// that fixture's shape exactly, adapted to this file's makeTmpBase()/
+// openTestDb() harness.
+
+const TASK_SETTLE_OPERATOR_ATTESTED_PASSING_EVIDENCE = {
+  command: "npm test",
+  exitCode: 0,
+  verdict: "pass",
+} as const;
+
+function seedTaskSettleOperatorAttestedResidue(): {
+  attemptId: string;
+  resultId: string;
+  recoveryActionId: string;
+} {
+  const db = _getAdapter();
+  if (!db) throw new Error("DB not open");
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  db.exec(`
+    INSERT INTO milestones (id, title, status, created_at)
+    VALUES ('M001', 'Settle', 'active', '2026-07-13T00:00:00.000Z');
+    INSERT INTO slices (milestone_id, id, title, status, created_at)
+    VALUES ('M001', 'S01', 'Settle operation', 'active', '2026-07-13T00:00:00.000Z');
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('M001', 'S01', 'T01', 'Settle atomically', 'pending');
+    INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status,
+      project_root_realpath
+    ) VALUES (
+      'worker-1', 'test-host', 1, '2026-07-13T00:00:00.000Z', 'test',
+      '2026-07-13T00:00:00.000Z', 'active', '/tmp/project'
+    );
+    INSERT INTO milestone_leases (
+      milestone_id, worker_id, fencing_token, acquired_at, expires_at, status
+    ) VALUES (
+      'M001', 'worker-1', 7, '2026-07-13T00:00:00.000Z',
+      '2099-07-13T00:00:00.000Z', 'held'
+    );
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'dispatch-trace-1', 'dispatch-turn-1', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 1, '2026-07-13T00:00:00.000Z'
+    );
+  `);
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.task.ready",
+    idempotencyKey: "fixture/task-settle-operator-attested/task-ready",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { taskId: "T01" },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      lifecycleStatus: "ready",
+    });
+    return {
+      events: [{
+        eventType: "test.task.ready",
+        entityType: "task",
+        entityId: "M001/S01/T01",
+        payload: {},
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/task-settle-operator-attested/m001/s01/t01",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  const dispatchRow = db.prepare("SELECT id FROM unit_dispatches").get() as { id: number | bigint };
+  const claim = claimTaskAttempt({
+    invocation: internalExecutionInvocation("test/task-settle-operator-attested/claim"),
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: Number(dispatchRow.id),
+  });
+  const settlement = settleTaskAttempt({
+    invocation: internalExecutionInvocation("test/task-settle-operator-attested/settle"),
+    attemptId: claim.attemptId,
+    outcome: "failed",
+    failureClass: "transient-execution",
+    summary: "transient executor fault; retry eligible",
+    output: { fault: "transient" },
+  });
+  db.prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  const receipt = recordFailureAndSelectRecovery({
+    invocation: internalExecutionInvocation("test/task-settle-operator-attested/route"),
+    attemptId: claim.attemptId,
+    resultId: settlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "transient-execution" },
+    summary: "transient executor fault; retry eligible",
+    evidence: { detail: "transient" },
+    rationale: "agent-owner transient-execution routes to retry",
+  });
+  return {
+    attemptId: claim.attemptId,
+    resultId: settlement.resultId,
+    recoveryActionId: receipt.recoveryActionId,
+  };
+}
+
+function taskSettleLifecycleStatus(): string | undefined {
+  const db = _getAdapter();
+  if (!db) throw new Error("DB not open");
+  const row = db.prepare(
+    "SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = 'T01'",
+  ).get() as { status?: string } | undefined;
+  return row?.status;
+}
+
+test("executeTaskSettle operator-attested dry-run reports the transitions and mutates nothing", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    seedTaskSettleOperatorAttestedResidue();
+
+    const result = await executeTaskSettle({
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      reason: "operator verified the deliverable manually",
+      settleDisposition: "operator-attested",
+      evidence: TASK_SETTLE_OPERATOR_ATTESTED_PASSING_EVIDENCE,
+    }, base, internalExecutionInvocation("test/task-settle-operator-attested/dry-run"));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.dryRun, true);
+    assert.equal(result.details.settleDisposition, "operator-attested");
+    assert.equal((result.details.rows as unknown[]).length, 1);
+    assert.equal(taskSettleLifecycleStatus(), "in_progress", "dry-run must not move the canonical lifecycle");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeTaskSettle operator-attested apply closes the Task terminal", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    seedTaskSettleOperatorAttestedResidue();
+
+    const result = await executeTaskSettle({
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      reason: "operator verified the deliverable manually",
+      apply: true,
+      settleDisposition: "operator-attested",
+      evidence: TASK_SETTLE_OPERATOR_ATTESTED_PASSING_EVIDENCE,
+    }, base, internalExecutionInvocation("test/task-settle-operator-attested/apply"));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.attested, true);
+    assert.equal(taskSettleLifecycleStatus(), "operator-attested");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeTaskSettle refuses operator-attested combined with reconcileLifecycle", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    seedTaskSettleOperatorAttestedResidue();
+
+    const result = await executeTaskSettle({
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      reason: "operator verified the deliverable manually",
+      reconcileLifecycle: true,
+      settleDisposition: "operator-attested",
+      evidence: TASK_SETTLE_OPERATOR_ATTESTED_PASSING_EVIDENCE,
+    }, base, internalExecutionInvocation("test/task-settle-operator-attested/conflict"));
+
+    assert.equal(result.isError, true);
+    assert.equal(result.details.error, "conflicting-disposition");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeTaskSettle operator-attested refuses inadequate evidence from the domain layer, not a wrapper check", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    seedTaskSettleOperatorAttestedResidue();
+
+    const result = await executeTaskSettle({
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      reason: "operator verified the deliverable manually",
+      settleDisposition: "operator-attested",
+      evidence: { command: "npm test", exitCode: 0, verdict: "fail" },
+    }, base, internalExecutionInvocation("test/task-settle-operator-attested/bad-evidence"));
+
+    assert.equal(result.isError, true);
+    assert.match(String(result.content[0].text), /verdict/);
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("packages/mcp-server's taskSettleSchema preserves settleDisposition and evidence through the zod parse", () => {
+  const parsed = _taskSettleSchemaForTest.parse({
+    projectDir: "/tmp/project",
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    reason: "operator verified the deliverable manually",
+    settleDisposition: "operator-attested",
+    evidence: { command: "npm test", exitCode: 0, verdict: "pass" },
+  });
+
+  assert.equal(parsed.settleDisposition, "operator-attested");
+  assert.deepEqual(parsed.evidence, { command: "npm test", exitCode: 0, verdict: "pass" });
 });

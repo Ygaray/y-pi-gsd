@@ -458,6 +458,9 @@ type WorkflowToolExecutors = {
       taskId: string;
       reason: string;
       apply?: boolean;
+      reconcileLifecycle?: boolean;
+      settleDisposition?: "blocker-accepted" | "operator-attested";
+      evidence?: Record<string, unknown>;
     },
     basePath: string,
     invocation: ExecutionInvocation,
@@ -2572,6 +2575,13 @@ const taskRecoveryResumeParams = {
 };
 const taskRecoveryResumeSchema = z.object(taskRecoveryResumeParams);
 
+// NOTE (Phase 31 / RELY-03): `taskSettleParams` here and the TypeBox schema in
+// `bootstrap/db-tools.ts` are two independent argument schemas for the same
+// `gsd_task_settle` tool and must be widened together — an argument present
+// in one and absent from the other is silently dropped by this file's zod
+// parse (`parseWorkflowArgs`) rather than rejected. That silent-strip defect
+// previously affected `blocker-accepted`; this widening closes it for both
+// dispositions.
 const taskSettleParams = {
   projectDir: projectDirParam,
   milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M001)"),
@@ -2582,8 +2592,22 @@ const taskSettleParams = {
   reconcileLifecycle: z.boolean().optional().describe(
     "After settling or an interrupted Attempt, adopt ready/completed; after a succeeded Attempt, adopt completed. Preserve SUMMARYs",
   ),
+  settleDisposition: z.enum(["blocker-accepted", "operator-attested"]).optional().describe(
+    "#2202 operator closeout: 'blocker-accepted' closes a Task whose latest Attempt failed as " +
+    "blocker-discovered at the route stage. 'operator-attested' (Phase 31 / RELY-03) closes a Task " +
+    "whose latest Attempt failed as retry-classified at the route stage, given the evidence " +
+    "parameter. Both are terminal closeouts, mutually exclusive with reconcileLifecycle.",
+  ),
+  evidence: unknownRecord.refine(
+    (value) => Object.keys(value).length > 0,
+    "evidence must be a non-empty object",
+  ).optional().describe(
+    "Required when settleDisposition is 'operator-attested': structured attestation with three " +
+    "fields — command (non-blank), exitCode (must be exactly 0), and verdict (must be exactly \"pass\")",
+  ),
 };
 const taskSettleSchema = z.object(taskSettleParams);
+export const _taskSettleSchemaForTest = taskSettleSchema;
 
 const sliceReopenParams = {
   projectDir: projectDirParam,
@@ -3800,7 +3824,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_task_settle",
-    "Operator tool: settle a Task's orphaned running Attempt as interrupted. Dry-run by default — prints the exact rows it would change; mutation requires apply: true. Optional reconcileLifecycle adopts ready/completed to match tasks.status without deleting SUMMARYs.",
+    "Operator tool: settle a Task's orphaned running Attempt as interrupted. Dry-run by default — prints the exact rows it would change; mutation requires apply: true. Optional reconcileLifecycle adopts ready/completed to match tasks.status without deleting SUMMARYs. settleDisposition also supports the terminal closeouts 'blocker-accepted' and 'operator-attested' (the latter requires the evidence parameter).",
     taskSettleParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(taskSettleSchema, args);

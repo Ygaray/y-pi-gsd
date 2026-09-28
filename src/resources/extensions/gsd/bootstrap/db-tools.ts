@@ -2809,7 +2809,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		description:
 			"Operator tool: settle a Task's orphaned running Attempt as interrupted after a manual repair. " +
 			"Dry-run by default — prints the exact rows it would change; mutation requires apply: true. " +
-			"Human-gated: never called by auto mode.",
+			"Human-gated: never called by auto mode. settleDisposition also supports the terminal closeouts " +
+			"'blocker-accepted' and 'operator-attested'.",
 		promptSnippet:
 			"Settle an orphaned running Task Attempt (dry-run first, apply: true to mutate)",
 		promptGuidelines: [
@@ -2818,6 +2819,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"A second apply is a no-op — the tool is idempotent.",
 			"reconcileLifecycle adopts ready/completed after an interrupted Attempt, or completed after a succeeded Attempt, without deleting SUMMARYs.",
 			"settleDisposition 'blocker-accepted' closes a Task whose latest Attempt failed as blocker-discovered at the route stage: terminal closeout, blocker provenance recorded, then replan with gsd_replan_slice — never re-executes the Task and fabricates no success evidence.",
+			"settleDisposition 'operator-attested' closes a Task whose latest Attempt failed as retry-classified at the route stage, given a structured evidence object: terminal closeout, distinguishable in the DB from a verified completion, never re-executes the Task. Requires the evidence parameter.",
 		],
 		parameters: Type.Object(
 			{
@@ -2840,11 +2842,22 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					}),
 				),
 				settleDisposition: Type.Optional(
-					Type.Union([
-						Type.Literal("blocker-accepted"),
-					], {
+					StringEnum(["blocker-accepted", "operator-attested"], {
 						description:
-							"#2202 operator closeout: accept a discovered blocker and close the Task terminal (no rerun, no fabricated success). Requires the latest Attempt settled failed/blocker-discovered at the route stage and no running Attempt. Mutually exclusive with reconcileLifecycle. Then replan the slice with this task as blockerTaskId.",
+							"#2202 operator closeout: accept a discovered blocker and close the Task terminal (no rerun, no fabricated success). Requires the latest Attempt settled failed/blocker-discovered at the route stage and no running Attempt. Mutually exclusive with reconcileLifecycle. Then replan the slice with this task as blockerTaskId. " +
+							"'operator-attested' (Phase 31 / RELY-03): closes a Task whose latest Attempt settled failed at " +
+							"the route stage with a retry-classified recovery action, given the structured evidence " +
+							"parameter. Terminal closeout, distinguishable from a verified 'completed' Task. Mutually " +
+							"exclusive with reconcileLifecycle.",
+					}),
+				),
+				evidence: Type.Optional(
+					Type.Record(Type.String(), Type.Unknown(), {
+						minProperties: 1,
+						description:
+							"Required when settleDisposition is 'operator-attested': structured attestation with " +
+							"three fields — command (the verification command actually run, non-blank), exitCode " +
+							"(must be exactly the integer 0), and verdict (must be exactly \"pass\").",
 					}),
 				),
 			},
