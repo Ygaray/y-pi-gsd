@@ -1263,3 +1263,219 @@ test("operator-attested's non-retry refusal is raised by the exported domain fun
   assert.ok(thrown, "the direct domain-layer call must throw");
   assert.match(thrown.message, /^gsd_task_settle: operator-attested requires the routed recovery action/);
 });
+
+// ── operator-attested evidence-refusal net, dry-run purity, idempotency, ───
+// ── and the dry-run-to-apply race (Phase 31 Plan 04, RELY-03) ──────────────
+
+/**
+ * Table-driven evidence refusals (Tests H-P): each row supplies one
+ * inadequate evidence shape and the regex its refusal must match. Adding a
+ * future required field is one row, not a new test body.
+ */
+const EVIDENCE_REFUSAL_CASES: ReadonlyArray<{
+  readonly name: string;
+  readonly evidence: DomainJsonValue;
+  readonly pattern: RegExp;
+}> = [
+  { name: "null evidence (Test H)", evidence: null, pattern: /evidence must be a non-empty object/ },
+  { name: "array evidence (Test I)", evidence: [], pattern: /evidence must be a non-empty object/ },
+  { name: "non-object primitive evidence (Test J)", evidence: 42, pattern: /evidence must be a non-empty object/ },
+  { name: "empty object evidence (Test K)", evidence: {}, pattern: /evidence must be a non-empty object/ },
+  {
+    name: "blank command (Test L)",
+    evidence: { command: "   ", exitCode: 0, verdict: "pass" },
+    pattern: /operator-attested requires evidence\.command to be a non-blank string/,
+  },
+  {
+    name: "missing command key (Test M)",
+    evidence: { exitCode: 0, verdict: "pass" },
+    pattern: /operator-attested requires evidence\.command to be a non-blank string/,
+  },
+  {
+    name: "non-zero integer exitCode (Test N)",
+    evidence: { command: "npm test", exitCode: 1, verdict: "pass" },
+    pattern: /operator-attested requires evidence\.exitCode to be exactly the integer 0; found 1\b/,
+  },
+  {
+    name: "non-integer exitCode (Test O)",
+    evidence: { command: "npm test", exitCode: 0.5, verdict: "pass" },
+    pattern: /operator-attested requires evidence\.exitCode to be exactly the integer 0; found 0\.5/,
+  },
+  {
+    name: "non-numeric exitCode (Test O)",
+    evidence: { command: "npm test", exitCode: "0", verdict: "pass" },
+    pattern: /operator-attested requires evidence\.exitCode to be exactly the integer 0; found "0"/,
+  },
+  {
+    name: "verdict fail (Test P)",
+    evidence: { command: "npm test", exitCode: 0, verdict: "fail" },
+    pattern: /operator-attested requires evidence\.verdict to be exactly "pass"; found fail/,
+  },
+  {
+    name: "verdict wrong type (Test P)",
+    evidence: { command: "npm test", exitCode: 0, verdict: 1 },
+    pattern: /operator-attested requires evidence\.verdict to be exactly "pass"; found 1\b/,
+  },
+];
+
+for (const evidenceCase of EVIDENCE_REFUSAL_CASES) {
+  test(`operator-attested refuses ${evidenceCase.name}, naming the offending field`, () => {
+    seedRetryRoutedResidue();
+    const before = taskStateSnapshot("T01");
+    assert.throws(
+      () => planOperatorAttestedDisposition(TASK, evidenceCase.evidence, "operator verified manually"),
+      evidenceCase.pattern,
+    );
+    assertUnchangedTaskState("T01", before);
+  });
+}
+
+test("operator-attested still refuses inadequate evidence on an already-attested Task, proving the evidence validator runs ahead of the already-attested short-circuit (Test Q)", () => {
+  seedRetryRoutedResidue();
+  applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/ordering/apply"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "operator verified the deliverable manually",
+  });
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "operator-attested",
+    "fixture precondition: the Task must already be closed under this disposition",
+  );
+  assert.throws(
+    () => planOperatorAttestedDisposition(
+      TASK,
+      { command: "npm test", exitCode: 1, verdict: "pass" },
+      "operator verified manually",
+    ),
+    /evidence\.exitCode to be exactly the integer 0/,
+    "an already-closed Task must not let inadequate evidence ride the already-attested no-op past the gate",
+  );
+});
+
+/** Six-field before/after snapshot for the dry-run-purity and idempotency tests. */
+function fullDispositionSnapshot(taskId: string) {
+  const state = taskStateSnapshot(taskId);
+  return {
+    attemptCount: Number(row("SELECT COUNT(*) AS count FROM workflow_execution_attempts").count),
+    lifecycleStatus: state.lifecycleStatus,
+    legacyStatus: state.legacyStatus,
+    headAttemptId: state.headAttemptId,
+    headNextStage: state.headNextStage,
+    eventCount: Number(row("SELECT COUNT(*) AS count FROM workflow_domain_events").count),
+  };
+}
+
+test("operator-attested dry-run plan with adequate evidence writes nothing, across a six-field snapshot (Test R)", () => {
+  seedRetryRoutedResidue();
+  const before = fullDispositionSnapshot("T01");
+  const plan = planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually");
+  assert.equal(plan.rows.length, 1, "the plan must still report the eligible transition");
+  const after = fullDispositionSnapshot("T01");
+  assert.deepEqual(after, before, "a dry-run plan must write nothing at all");
+});
+
+test("operator-attested second apply after a successful first is a clean no-op writing no second event (Test S)", () => {
+  seedRetryRoutedResidue();
+  applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/idempotent/apply-1"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "operator verified manually",
+  });
+  const afterFirst = fullDispositionSnapshot("T01");
+  const again = applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/idempotent/apply-2"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "operator verified manually",
+  });
+  assert.equal(again.attested, false);
+  assert.equal(again.alreadyAttested, true);
+  assert.deepEqual(
+    fullDispositionSnapshot("T01"),
+    afterFirst,
+    "a repeated apply must leave the terminal state exactly as the first call left it",
+  );
+});
+
+/**
+ * Test T (TOCTOU). Both legs move the Task's CURRENT governing Attempt
+ * forward via a genuine retry claim rather than mutating the original
+ * Attempt's already-immutable recovery action in place --
+ * recordFailureAndSelectRecovery cannot re-route the SAME Attempt's SAME
+ * Result twice (requireRoutableResult refuses with "Task Result already has
+ * a recovery observation", confirmed empirically).
+ *
+ * Leg 1: a retry Attempt claimed between the dry-run plan and the apply
+ * moves the route head off the planned Attempt; apply's own fresh internal
+ * re-plan (not a stale value carried from the earlier dry-run call) catches
+ * this via the running-Attempt guard before any write.
+ *
+ * Leg 2: a second Attempt claimed, settled, and routed to a non-retry action
+ * between plan and apply is caught by the recovery-action guard, naming the
+ * non-retry action found. Both legs assert the Task remains un-closed
+ * afterward -- a refusal that half-wrote is the actual danger.
+ */
+test("operator-attested apply refuses when the route head or the recovery action changed since the dry-run plan (Test T)", () => {
+  // Leg 1: the route head moves to a claimed retry Attempt.
+  const { attemptId: legOneFirstAttemptId } = seedRetryRoutedResidue();
+  const legOnePlan = planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually");
+  assert.equal(legOnePlan.rows.length, 1);
+  claimRetryAttempt(legOneFirstAttemptId, 2);
+  assert.throws(
+    () => applyOperatorAttestedDisposition({
+      invocation: invocation("operator-attested/toctou/leg1"),
+      task: TASK,
+      evidence: PASSING_EVIDENCE,
+      reason: "operator verified manually",
+    }),
+    /operator-attested requires no running Attempt/,
+  );
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "leg 1: the Task must remain un-closed after the refused apply",
+  );
+
+  // Leg 2 (fresh fixture): the recovery action governing the Task's current
+  // Attempt changes to a non-retry value between plan and apply.
+  closeDatabase();
+  const { attemptId: legTwoFirstAttemptId } = seedRetryRoutedResidue();
+  const legTwoPlan = planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually");
+  assert.equal(legTwoPlan.rows.length, 1);
+  const legTwoSecondAttemptId = claimRetryAttempt(legTwoFirstAttemptId, 2);
+  const legTwoSettlement = settleTaskAttempt({
+    invocation: invocation("fixture/toctou-leg2-settle"),
+    attemptId: legTwoSecondAttemptId,
+    outcome: "failed",
+    failureClass: "tool-schema",
+    summary: "tool schema mismatch on retry",
+    output: { fault: "tool-schema" },
+  });
+  recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/toctou-leg2-route"),
+    attemptId: legTwoSecondAttemptId,
+    resultId: legTwoSettlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "tool-schema" },
+    summary: "tool schema mismatch on retry",
+    evidence: { detail: "tool-schema" },
+    rationale: "routes the retry Attempt to a non-retry action",
+  });
+  assert.throws(
+    () => applyOperatorAttestedDisposition({
+      invocation: invocation("operator-attested/toctou/leg2"),
+      task: TASK,
+      evidence: PASSING_EVIDENCE,
+      reason: "operator verified manually",
+    }),
+    /requires the routed recovery action for Attempt .* to be "retry"; found repair/,
+  );
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "leg 2: the Task must remain un-closed after the refused apply",
+  );
+});
