@@ -6,9 +6,12 @@ import { existsSync, readFileSync } from "node:fs";
 import stripAnsi from "strip-ansi";
 import { isImageLine, resetCapabilitiesCache, setCapabilities, setCellDimensions } from "@gsd/pi-tui";
 import {
+	_resetToolBodyAutoCollapseThresholds,
 	_resetUnnamedToolEvents,
 	_unnamedToolEvents,
 	coerceToolNameForDisplay,
+	getToolBodyAutoCollapseThresholds,
+	setToolBodyAutoCollapseThresholds,
 	ToolExecutionComponent,
 	ToolPhaseSummaryComponent,
 	UNNAMED_TOOL_DESCRIPTOR,
@@ -881,6 +884,141 @@ describe("ToolExecutionComponent inline image (Kitty) rendering", () => {
 			rendered,
 			/first[\s\S]*?\n\s*\n\s*\n\s*\nsecond/,
 			"plain text should still have consecutive blank rows collapsed",
+		);
+	});
+});
+
+// TUI-05 (Phase 29, Plan 01): size-based auto-collapse. A tool-call row whose
+// raw result content exceeds a line or byte threshold defaults to the existing
+// one-line hidden strip, exactly as if the user had pressed ctrl+o — but an
+// explicit ctrl+o (operator-sourced setExpanded) always wins over the size
+// default, in both directions (D-01/D-02/SC-1/SC-2/SC-3).
+describe("tool body auto-collapse thresholds (TUI-05 accessor)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	test("defaults to 40 lines / 4096 bytes when nothing is configured", () => {
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 40, bytes: 4096 });
+	});
+
+	test("a partial update leaves the other threshold untouched", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 5 });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 5, bytes: 4096 });
+	});
+
+	test("clamps a non-positive lines value to 1", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 0 });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 1, bytes: 4096 });
+	});
+
+	test("ignores a non-finite or undefined lines value and leaves the current value untouched", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 5 });
+		setToolBodyAutoCollapseThresholds({ lines: Number.NaN });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 5, bytes: 4096 });
+		setToolBodyAutoCollapseThresholds({ lines: undefined });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 5, bytes: 4096 });
+	});
+
+	test("_resetToolBodyAutoCollapseThresholds restores both defaults", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 5, bytes: 10 });
+		_resetToolBodyAutoCollapseThresholds();
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 40, bytes: 4096 });
+	});
+});
+
+describe("ToolExecutionComponent size-based auto-collapse (TUI-05)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	const oversizedText = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+
+	test("an oversized non-error result seeded from the default renders exactly one row with the hidden-strip status text", () => {
+		const rendered = renderTool(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{ content: [{ type: "text", text: oversizedText }], isError: false },
+		);
+		assert.equal(rendered.split("\n").length, 1);
+		assert.match(rendered, /output hidden/);
+		assert.match(rendered, /ctrl\+o expand/);
+	});
+
+	test("getDisplayedLineCount(120) returns exactly 1 for a size-collapsed default-seeded row", () => {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(component.getDisplayedLineCount(120), 1);
+	});
+
+	test("a body under threshold renders fully expanded, byte-identical to today's output", () => {
+		const smallText = "line 1\nline 2\nline 3";
+		const rendered = renderTool(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{ content: [{ type: "text", text: smallText }], isError: false },
+		);
+		assert.ok(rendered.split("\n").length > 1);
+		assert.match(rendered, /line 1/);
+		assert.match(rendered, /line 3/);
+	});
+
+	test("a bash tool with an oversized result renders exactly one row through the command-card path", () => {
+		const rendered = renderTool(
+			"bash",
+			{ command: "cat bigfile" },
+			{ content: [{ type: "text", text: oversizedText }], isError: false, details: { cwd: "/tmp/project" } },
+		);
+		assert.equal(rendered.split("\n").length, 1);
+		assert.match(rendered, /output hidden/);
+	});
+
+	test("an operator-sourced setExpanded escapes the size default in both directions", () => {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true); // inherits the global startup default
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+
+		component.setExpanded(true, "user");
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+
+		component.setExpanded(false, "user");
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+
+		component.setExpanded(true, "user");
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+	});
+
+	test("an operator-expanded oversized row is never snapped back by a later default-sourced seed", () => {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		component.setExpanded(true, "user");
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+
+		component.setExpanded(true); // startup-seed shape, no source argument
+		assert.ok(
+			stripAnsi(component.render(120).join("\n")).split("\n").length > 1,
+			"an explicit ctrl+o expand must not be snapped back by a later default-sourced seed",
 		);
 	});
 });
