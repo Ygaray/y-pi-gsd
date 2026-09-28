@@ -13,7 +13,12 @@ import type { InteractiveModeDelegateHost } from "./interactive-mode-delegate-ho
 import { MIME_BY_EXT, matchesImageSignature } from "./interactive-mode-class-constants.js";
 
 interface Expandable {
-	setExpanded(expanded: boolean): void;
+	// The optional source parameter distinguishes an explicit ctrl+o broadcast
+	// ("user") from an inherited startup default (TUI-05, D-02). A narrower
+	// single-argument implementation (bash-execution.ts, collapsible-message.ts)
+	// stays structurally assignable — an implementation with fewer parameters
+	// satisfies a wider interface.
+	setExpanded(expanded: boolean, source?: "default" | "user"): void;
 }
 
 function isExpandable(obj: unknown): obj is Expandable {
@@ -372,7 +377,9 @@ export function setToolsExpanded(host: InteractiveModeDelegateHost, expanded: bo
 		host.toolOutputExpanded = expanded;
 		for (const child of host.chatContainer.children) {
 			if (isExpandable(child)) {
-				child.setExpanded(expanded);
+				// TUI-05/D-02: tag this broadcast as operator-sourced so a
+				// size-auto-collapsed row's explicit ctrl+o always wins.
+				child.setExpanded(expanded, "user");
 			}
 		}
 		host.ui.requestRender();

@@ -46,6 +46,10 @@ function renderTool(
 		details?: Record<string, unknown>;
 	},
 	toolDefinition?: { label?: string; renderCall?: (...args: any[]) => any; renderResult?: (...args: any[]) => any },
+	// TUI-05: "user" simulates an explicit ctrl+o expand, for fixtures whose
+	// intent is "this body renders expanded" even when it's larger than the
+	// size auto-collapse threshold (see the read-truncation test below).
+	expandSource: "default" | "user" = "default",
 ): string {
 	const component = new ToolExecutionComponent(
 		toolName,
@@ -54,7 +58,7 @@ function renderTool(
 		toolDefinition as any,
 		{ requestRender() {} } as any,
 	);
-	component.setExpanded(true);
+	component.setExpanded(true, expandSource);
 	if (result) component.updateResult(result);
 	return stripAnsi(component.render(120).join("\n"));
 }
@@ -370,11 +374,17 @@ describe("ToolExecutionComponent", () => {
 	});
 
 	test("truncates expanded read output lines to the display cap", () => {
+		// TUI-05: this fixture is intentionally larger than the size auto-collapse
+		// threshold (52 lines > 40) — its intent is "renders expanded, capped at
+		// READ_TUI_EXPANDED_MAX_LINES", so it seeds an explicit operator expand
+		// (simulating ctrl+o) rather than the default-inherited path.
 		const output = Array.from({ length: READ_TUI_EXPANDED_MAX_LINES + 2 }, (_, index) => `line-${index + 1}`).join("\n");
 		const rendered = renderTool(
 			"read",
 			{ path: "big.txt" },
 			{ content: [{ type: "text", text: output }], isError: false },
+			undefined,
+			"user",
 		);
 
 		assert.match(rendered, /line-1/);
