@@ -24,6 +24,29 @@ const __dirname_ = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname_, '..', '..')
 const BUILD_SCRIPT = join(REPO_ROOT, 'native', 'scripts', 'build.js')
 
+// Regex-parses a `<declarationName> = { "k": "v", ... };` object literal out
+// of raw file source text, WITHOUT importing/requiring the file. build.js in
+// particular runs its cargo-presence gate (including possible
+// `process.exit()` calls) unconditionally at module scope the moment it is
+// loaded — it is designed to be invoked as a script, not imported — so
+// extracting its map via source text (the same technique already used below
+// for native.ts) is required to compare it safely in-process.
+function extractPlatformPackageMap(content, declarationName) {
+	const startIdx = content.indexOf(declarationName)
+	assert.ok(startIdx !== -1, `${declarationName} declaration not found`)
+	const endIdx = content.indexOf('};', startIdx)
+	assert.ok(endIdx !== -1, `closing "};" not found after ${declarationName} declaration`)
+	const region = content.slice(startIdx, endIdx)
+
+	const pairPattern = /"([^"]+)":\s*"([^"]+)"/g
+	const extracted = {}
+	let match
+	while ((match = pairPattern.exec(region)) !== null) {
+		extracted[match[1]] = match[2]
+	}
+	return extracted
+}
+
 function withTempDir(callback) {
 	const dir = mkdtempSync(join(tmpdir(), 'gsd-native-gate-'))
 	try {
@@ -112,23 +135,28 @@ test('hasNativeAddon is exactly the disjunction of its two sources', () => {
 
 test('PLATFORM_PACKAGE_MAP matches native.ts platformPackageMap (drift guard)', () => {
 	const nativeTsPath = join(REPO_ROOT, 'packages', 'native', 'src', 'native.ts')
-	const content = readFileSync(nativeTsPath, 'utf8')
-	const startIdx = content.indexOf('platformPackageMap')
-	assert.ok(startIdx !== -1, 'platformPackageMap declaration not found in native.ts')
-	const endIdx = content.indexOf('};', startIdx)
-	assert.ok(endIdx !== -1, 'closing "};" not found after platformPackageMap declaration')
-	const region = content.slice(startIdx, endIdx)
-
-	const pairPattern = /"([^"]+)":\s*"([^"]+)"/g
-	const extracted = {}
-	let match
-	while ((match = pairPattern.exec(region)) !== null) {
-		extracted[match[1]] = match[2]
-	}
+	const extracted = extractPlatformPackageMap(readFileSync(nativeTsPath, 'utf8'), 'platformPackageMap')
 
 	// A silently-emptied regex match must not pass the deepEqual vacuously.
 	assert.equal(Object.keys(extracted).length, 5, 'expected exactly 5 platform-map entries')
 	assert.deepEqual(PLATFORM_PACKAGE_MAP, extracted)
+
+	// build.js's independent copy is intentionally NOT imported here: it runs
+	// its cargo-presence gate unconditionally at module scope (including
+	// possible process.exit() calls) the instant it is loaded, so importing
+	// it just to read this constant would execute the real build/skip logic
+	// as a side effect of running the test suite. Source-text extraction
+	// (same technique as native.ts above) reads the map without loading it.
+	const buildJsPath = join(REPO_ROOT, 'native', 'scripts', 'build.js')
+	const buildJsExtracted = extractPlatformPackageMap(
+		readFileSync(buildJsPath, 'utf8'),
+		'PLATFORM_PACKAGE_MAP',
+	)
+	assert.deepEqual(
+		buildJsExtracted,
+		extracted,
+		'build.js PLATFORM_PACKAGE_MAP has drifted from native.ts',
+	)
 })
 
 // ── Spawn-based tests (POSIX-only: shell stub + emptied-PATH fixtures) ─────
