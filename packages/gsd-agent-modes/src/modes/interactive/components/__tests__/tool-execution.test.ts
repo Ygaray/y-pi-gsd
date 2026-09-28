@@ -1133,3 +1133,80 @@ describe("ToolExecutionComponent size-based auto-collapse: D-03 error exemption 
 		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
 	});
 });
+
+// TUI-05 (Phase 29, Plan 03): threshold boundary and measurement-precision
+// coverage — each threshold trips independently (OR, never AND), byte
+// measurement counts real UTF-8 bytes rather than UTF-16 code units, and a
+// configured 0 clamps to 1.
+describe("ToolExecutionComponent size-based auto-collapse: boundary and precision (TUI-05)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	function renderRowLineCount(text: string): number {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text }], isError: false });
+		return stripAnsi(component.render(120).join("\n")).split("\n").length;
+	}
+
+	test("exactly 40 lines stays expanded; exactly 41 lines collapses (default thresholds)", () => {
+		const exactly40 = Array.from({ length: 40 }, (_, i) => `l${i}`).join("\n");
+		const exactly41 = Array.from({ length: 41 }, (_, i) => `l${i}`).join("\n");
+		assert.ok(renderRowLineCount(exactly40) > 1, "exactly 40 lines must stay expanded");
+		assert.equal(renderRowLineCount(exactly41), 1, "41 lines must collapse");
+	});
+
+	test("exactly 4096 bytes stays expanded; 4097 bytes collapses (single line, default thresholds)", () => {
+		const exactly4096 = "a".repeat(4096);
+		const exactly4097 = "a".repeat(4097);
+		assert.equal(Buffer.byteLength(exactly4096, "utf8"), 4096);
+		assert.equal(Buffer.byteLength(exactly4097, "utf8"), 4097);
+		assert.ok(renderRowLineCount(exactly4096) > 1, "exactly 4096 bytes must stay expanded");
+		assert.equal(renderRowLineCount(exactly4097), 1, "4097 bytes must collapse");
+	});
+
+	test("a 1-line 10000-byte body collapses on the byte threshold alone", () => {
+		const body = "a".repeat(10000);
+		assert.equal(body.split("\n").length, 1);
+		assert.equal(renderRowLineCount(body), 1);
+	});
+
+	test("a 100-line, well-under-4096-byte body collapses on the line threshold alone", () => {
+		const body = Array.from({ length: 100 }, (_, i) => `l${i}`).join("\n");
+		assert.ok(Buffer.byteLength(body, "utf8") < 4096);
+		assert.equal(renderRowLineCount(body), 1);
+	});
+
+	test("byte measurement counts real UTF-8 bytes, not UTF-16 code units", () => {
+		// "€" is a 3-byte UTF-8 character: 2000 of them is 6000 bytes (over 4096),
+		// single line (no newlines) so the line threshold never fires.
+		const multiByte = "€".repeat(2000);
+		const ascii = "a".repeat(2000);
+		assert.equal(Buffer.byteLength(multiByte, "utf8"), 6000);
+		assert.equal(Buffer.byteLength(ascii, "utf8"), 2000);
+		assert.equal(renderRowLineCount(multiByte), 1, "6000 UTF-8 bytes must collapse");
+		assert.ok(renderRowLineCount(ascii) > 1, "2000 ASCII bytes (under 4096) must stay expanded");
+	});
+
+	test("a configured lines threshold applies independently of the byte default", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 2 });
+		const threeLines = "a\nb\nc";
+		const twoLines = "a\nb";
+		assert.equal(renderRowLineCount(threeLines), 1, "3 lines over a configured limit of 2 must collapse");
+		assert.ok(renderRowLineCount(twoLines) > 1, "2 lines at a configured limit of 2 must stay expanded");
+	});
+
+	test("a configured lines threshold of 0 clamps to 1", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 0 });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds().lines, 1);
+		assert.equal(renderRowLineCount("a\nb"), 1, "2 lines over a clamped limit of 1 must collapse");
+		assert.ok(renderRowLineCount("a") > 1, "1 line at a clamped limit of 1 must stay expanded");
+	});
+});
