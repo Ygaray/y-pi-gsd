@@ -8,11 +8,14 @@ import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import {
   applyBlockerAcceptedDisposition,
+  applyOperatorAttestedDisposition,
   applyTaskSettle,
   planBlockerAcceptedDisposition,
+  planOperatorAttestedDisposition,
   planTaskSettle,
   type TaskSettleTask,
 } from "./task-settle.js";
+import type { DomainJsonValue } from "./db/domain-operation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 
 function parseTaskSettleArgs(args: string): {
@@ -21,16 +24,24 @@ function parseTaskSettleArgs(args: string): {
   apply: boolean;
   reconcileLifecycle: boolean;
   blockerAccepted: boolean;
+  operatorAttested: boolean;
+  /** Raw --evidence value, unparsed. Parsing (and its error reporting) belongs to the handler. */
+  evidenceRaw: string | null;
 } | null {
   const apply = /(?:^|\s)--apply(?:\s|$)/.test(args);
   const reconcileLifecycle = /(?:^|\s)--reconcile-lifecycle(?:\s|$)/.test(args);
   const blockerAccepted = /(?:^|\s)--blocker-accepted(?:\s|$)/.test(args);
+  const operatorAttested = /(?:^|\s)--operator-attested(?:\s|$)/.test(args);
   const reasonMatch = args.match(/--reason\s+"([^"]+)"|--reason\s+'([^']+)'|--reason\s+(\S+)/);
+  const evidenceMatch = args.match(/--evidence\s+"([^"]+)"|--evidence\s+'([^']+)'|--evidence\s+(\S+)/);
+  const evidenceRaw = evidenceMatch?.[1] ?? evidenceMatch?.[2] ?? evidenceMatch?.[3] ?? null;
   const positional = args
     .replace(/--apply/g, "")
     .replace(/--reconcile-lifecycle/g, "")
     .replace(/--blocker-accepted/g, "")
+    .replace(/--operator-attested/g, "")
     .replace(/--reason\s+"[^"]*"|\s--reason\s+'[^']*'|--reason\s+\S+/g, "")
+    .replace(/--evidence\s+"[^"]*"|\s--evidence\s+'[^']*'|--evidence\s+\S+/g, "")
     .trim()
     .split(/\s+/)
     .filter(Boolean);
@@ -44,6 +55,8 @@ function parseTaskSettleArgs(args: string): {
     apply,
     reconcileLifecycle,
     blockerAccepted,
+    operatorAttested,
+    evidenceRaw,
   };
 }
 
@@ -65,17 +78,25 @@ export async function handleTaskSettle(
   const parsed = parseTaskSettleArgs(args);
   if (!parsed) {
     ctx.ui.notify(
-      'Usage: /gsd task settle <M001/S01/T01> --reason "why" [--apply] [--reconcile-lifecycle] [--blocker-accepted]\n' +
-      "Dry-run by default: prints the exact Attempt, lifecycle, or blocker-accepted rows it would change. " +
+      'Usage: /gsd task settle <M001/S01/T01> --reason "why" [--apply] [--reconcile-lifecycle] ' +
+      '[--blocker-accepted] [--operator-attested --evidence \'{"command":"...","exitCode":0,"verdict":"pass"}\']\n' +
+      "Dry-run by default: prints the exact Attempt, lifecycle, or disposition rows it would change. " +
       "--apply performs the settle. --blocker-accepted closes a Task whose latest Attempt failed as " +
-      "blocker-discovered at the route stage (no rerun; then replan the slice).",
+      "blocker-discovered at the route stage (no rerun; then replan the slice). --operator-attested closes a " +
+      "Task whose latest Attempt failed as retry-classified at the route stage, given the required --evidence " +
+      "JSON object (fields: command, exitCode, verdict).",
       "warning",
     );
     return;
   }
-  if (parsed.blockerAccepted && parsed.reconcileLifecycle) {
+  const dispositionFlag = parsed.blockerAccepted
+    ? "--blocker-accepted"
+    : parsed.operatorAttested
+    ? "--operator-attested"
+    : null;
+  if (dispositionFlag && parsed.reconcileLifecycle) {
     ctx.ui.notify(
-      "gsd task settle: --blocker-accepted and --reconcile-lifecycle are mutually exclusive.",
+      `gsd task settle: ${dispositionFlag} and --reconcile-lifecycle are mutually exclusive.`,
       "error",
     );
     return;
@@ -86,6 +107,60 @@ export async function handleTaskSettle(
   }
   const unit = `${parsed.task.milestoneId}/${parsed.task.sliceId}/${parsed.task.taskId}`;
   try {
+    if (parsed.operatorAttested) {
+      if (parsed.evidenceRaw === null) {
+        ctx.ui.notify(
+          "gsd task settle: --operator-attested requires --evidence with a JSON object " +
+          '(fields: command, exitCode, verdict), e.g. --evidence \'{"command":"npm test","exitCode":0,"verdict":"pass"}\'.',
+          "error",
+        );
+        return;
+      }
+      let evidence: DomainJsonValue;
+      try {
+        evidence = JSON.parse(parsed.evidenceRaw) as DomainJsonValue;
+      } catch (parseError) {
+        ctx.ui.notify(
+          `gsd task settle: --evidence is not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+          "error",
+        );
+        return;
+      }
+      if (!parsed.apply) {
+        const plan = planOperatorAttestedDisposition(parsed.task, evidence, parsed.reason);
+        if (plan.alreadyAttested) {
+          ctx.ui.notify(`gsd task settle (dry run): ${unit} is already closed as operator-attested — nothing to do.`, "info");
+          return;
+        }
+        const row = plan.rows[0];
+        ctx.ui.notify(
+          `gsd task settle (dry run) — operator-attested disposition, no changes made:\n` +
+          `  lifecycle ${row.lifecycleFrom} → operator-attested (legacy tasks.status ${row.currentStatus} → operator-attested)\n` +
+          `  attempt ${row.attemptId} Result ${row.resultId} preserved; route Kernel head consumed with a closeout decision\n` +
+          `  recovery action ${row.supersededRecoveryActionId ?? "(none)"} superseded\n` +
+          "Re-run with --apply to attest.",
+          "info",
+        );
+        return;
+      }
+      const result = applyOperatorAttestedDisposition({
+        invocation: cliInvocation(),
+        task: parsed.task,
+        evidence,
+        reason: parsed.reason,
+      });
+      if (result.alreadyAttested) {
+        ctx.ui.notify(`gsd task settle: ${unit} is already closed as operator-attested — nothing to do.`, "info");
+        return;
+      }
+      ctx.ui.notify(
+        `${unit} closed on operator attestation: Task is closed on operator attestation; the attestation ` +
+        `evidence is recorded on the event log. Attempt ${result.attemptId} and its failed Result remain ` +
+        "history and the route head is consumed (no re-route).",
+        "info",
+      );
+      return;
+    }
     if (parsed.blockerAccepted) {
       if (!parsed.apply) {
         const plan = planBlockerAcceptedDisposition(parsed.task, parsed.reason);
