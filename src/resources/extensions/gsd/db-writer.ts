@@ -11,6 +11,7 @@
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import type { Decision, Requirement } from './types.js';
+import { rowToRequirement } from './db-decision-requirement-rows.js';
 import { summarizeRequirementsCoverage } from './requirements-backlog.js';
 import { resolveGsdRootFile } from './paths.js';
 import { saveFile } from './files.js';
@@ -427,20 +428,7 @@ export async function saveRequirementToDb(
     let allRequirements: Requirement[] = [];
     if (adapter) {
       const rows = adapter.prepare('SELECT * FROM requirements ORDER BY id').all();
-      allRequirements = rows.map(row => ({
-        id: row['id'] as string,
-        class: row['class'] as string,
-        status: row['status'] as string,
-        description: row['description'] as string,
-        why: row['why'] as string,
-        source: row['source'] as string,
-        primary_owner: row['primary_owner'] as string,
-        supporting_slices: row['supporting_slices'] as string,
-        validation: row['validation'] as string,
-        notes: row['notes'] as string,
-        full_content: row['full_content'] as string,
-        superseded_by: (row['superseded_by'] as string) ?? null,
-      }));
+      allRequirements = rows.map(rowToRequirement);
     }
 
     const nonSuperseded = allRequirements.filter(r => r.superseded_by == null);
@@ -801,20 +789,7 @@ export async function updateRequirementInDb(
     let allRequirements: Requirement[] = [];
     if (adapter) {
       const rows = adapter.prepare('SELECT * FROM requirements ORDER BY id').all();
-      allRequirements = rows.map(row => ({
-        id: row['id'] as string,
-        class: row['class'] as string,
-        status: row['status'] as string,
-        description: row['description'] as string,
-        why: row['why'] as string,
-        source: row['source'] as string,
-        primary_owner: row['primary_owner'] as string,
-        supporting_slices: row['supporting_slices'] as string,
-        validation: row['validation'] as string,
-        notes: row['notes'] as string,
-        full_content: row['full_content'] as string,
-        superseded_by: (row['superseded_by'] as string) ?? null,
-      }));
+      allRequirements = rows.map(rowToRequirement);
     }
 
     // Filter to non-superseded for the markdown file
