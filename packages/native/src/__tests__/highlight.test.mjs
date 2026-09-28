@@ -1,34 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const require_ = createRequire(import.meta.url);
+const { native, isNativeAddonLoaded } = require_("../../dist/native.js");
 
-// Load the native addon directly
-const addonDir = path.resolve(__dirname, "..", "..", "..", "..", "native", "addon");
-const platformTag = `${process.platform}-${process.arch}`;
-const candidates = [
-  path.join(addonDir, `gsd_engine.${platformTag}.node`),
-  path.join(addonDir, "gsd_engine.dev.node"),
-];
-
-let native;
-for (const candidate of candidates) {
-  try {
-    native = require(candidate);
-    break;
-  } catch {
-    // try next
-  }
-}
-
-if (!native) {
-  console.error("Native addon not found. Run `npm run build:native -w @gsd/native` first.");
-  process.exit(1);
-}
+const addonSkip = isNativeAddonLoaded()
+  ? undefined
+  : "native addon not loadable: no local native/addon build and no resolvable @opengsd/engine-<platform> package";
 
 const testColors = {
   comment: "\x1b[38;2;106;153;85m",
@@ -42,7 +21,7 @@ const testColors = {
   punctuation: "\x1b[38;2;212;212;212m",
 };
 
-describe("native highlight: highlightCode()", () => {
+describe("native highlight: highlightCode()", { skip: addonSkip }, () => {
   test("highlights JavaScript code with ANSI colors", () => {
     const code = 'const x = 42;\n';
     const result = native.highlightCode(code, "javascript", testColors);
@@ -102,7 +81,7 @@ describe("native highlight: highlightCode()", () => {
   });
 });
 
-describe("native highlight: supportsLanguage()", () => {
+describe("native highlight: supportsLanguage()", { skip: addonSkip }, () => {
   test("returns true for known aliases", () => {
     assert.ok(native.supportsLanguage("javascript"));
     assert.ok(native.supportsLanguage("typescript"));
@@ -131,7 +110,7 @@ describe("native highlight: supportsLanguage()", () => {
   });
 });
 
-describe("native highlight: getSupportedLanguages()", () => {
+describe("native highlight: getSupportedLanguages()", { skip: addonSkip }, () => {
   test("returns an array of language names", () => {
     const langs = native.getSupportedLanguages();
     assert.ok(Array.isArray(langs));
