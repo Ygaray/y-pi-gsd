@@ -303,8 +303,13 @@ export function reconcileWorktreeDb(
       }
 
       if (hasWtRequirements) {
+        // Phase 33 (RELY-05, Pitfall NEW-4): join on milestone as well as id,
+        // using IS (not =) so legacy null-milestone rows on both sides still
+        // compare equal. Without the milestone half, two different
+        // milestones' requirements that happen to share an id would report a
+        // false conflict here (or merge across milestones below).
         const reqConf = adapter.prepare(
-          `SELECT m.id FROM requirements m INNER JOIN wt.requirements w ON m.id = w.id WHERE m.description != w.description OR m.status != w.status OR m.notes != w.notes OR m.superseded_by IS NOT w.superseded_by`,
+          `SELECT m.id, m.milestone_id FROM requirements m INNER JOIN wt.requirements w ON m.id = w.id AND m.milestone_id IS w.milestone_id WHERE m.description != w.description OR m.status != w.status OR m.notes != w.notes OR m.superseded_by IS NOT w.superseded_by`,
         ).all();
         for (const row of reqConf) conflicts.push(`requirement ${(row as Record<string, unknown>)["id"]}: modified in both`);
       }
@@ -371,13 +376,16 @@ export function reconcileWorktreeDb(
         }
 
         if (hasWtRequirements) {
+          // Phase 33 (RELY-05): milestone_id is now part of the composite
+          // PK, so INSERT OR REPLACE keys on (milestone_id, id) and can no
+          // longer overwrite a different milestone's same-id row.
           merged.requirements = countChanges(adapter.prepare(`
             INSERT OR REPLACE INTO requirements (
               id, class, status, description, why, source, primary_owner,
-              supporting_slices, validation, notes, full_content, superseded_by
+              supporting_slices, validation, notes, full_content, superseded_by, milestone_id
             )
             SELECT id, class, status, description, why, source, primary_owner,
-                   supporting_slices, validation, notes, full_content, superseded_by
+                   supporting_slices, validation, notes, full_content, superseded_by, milestone_id
             FROM wt.requirements
           `).run());
         }

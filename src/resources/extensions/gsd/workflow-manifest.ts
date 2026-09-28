@@ -151,6 +151,11 @@ export function snapshotState(): StateManifest {
     notes: (r["notes"] as string) ?? "",
     full_content: (r["full_content"] as string) ?? "",
     superseded_by: (r["superseded_by"] as string) ?? null,
+    // Phase 33 (RELY-05, Assumption A1): this mapper builds Requirement rows
+    // field-by-field rather than spreading the DB row, so widening the
+    // Requirement interface alone does not reach it — the missing field must
+    // be added explicitly.
+    milestone_id: (r["milestone_id"] as string) ?? null,
   }));
 
   const rawArtifacts = db.prepare("SELECT * FROM artifacts ORDER BY path").all() as Record<string, unknown>[];

@@ -69,16 +69,19 @@ export function restoreManifest(manifest: StateManifest): void {
     if (manifest.requirements !== undefined) db.exec("DELETE FROM requirements");
 
     if (manifest.requirements !== undefined) {
+      // Phase 33 (RELY-05, Assumption A1): carry milestone_id through the
+      // manifest restore replay so a backup/restore round-trips it exactly.
       const reqStmt = db.prepare(
         `INSERT INTO requirements (
           id, class, status, description, why, source, primary_owner,
-          supporting_slices, validation, notes, full_content, superseded_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          supporting_slices, validation, notes, full_content, superseded_by, milestone_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const r of manifest.requirements) {
         reqStmt.run(
           r.id, r.class, r.status, r.description, r.why, r.source, r.primary_owner,
           r.supporting_slices, r.validation, r.notes, r.full_content, r.superseded_by,
+          r.milestone_id ?? null,
         );
       }
     }
