@@ -70,6 +70,12 @@ function executeAtFence(
   operationType: string,
   idempotencyKey: string,
   write: (context: Readonly<DomainOperationContext>) => void,
+  event?: {
+    eventType: string;
+    entityType: string;
+    entityId: string;
+    payload: Record<string, string>;
+  },
 ): void {
   const fence = readDomainOperationFence();
   executeDomainOperation({
@@ -82,12 +88,15 @@ function executeAtFence(
     payload: { operationType, idempotencyKey },
   }, (context) => {
     write(context);
+    const emitted = event ?? {
+      eventType: operationType,
+      entityType: "slice",
+      entityId: "M001/S01",
+      payload: { idempotencyKey },
+    };
     return {
       events: [{
-        eventType: operationType,
-        entityType: "slice",
-        entityId: "M001/S01",
-        payload: { idempotencyKey },
+        ...emitted,
         destinations: ["test"],
       }],
       projections: [{
@@ -272,6 +281,11 @@ function completeTaskOrdinarily(taskId: string): void {
       UPDATE tasks SET status = 'complete', completed_at = '2026-09-28T00:02:00.000Z'
       WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = :task_id
     `).run({ ":task_id": taskId });
+  }, {
+    eventType: "task.completion.published",
+    entityType: "task",
+    entityId: `M001/S01/${taskId}`,
+    payload: { attemptId },
   });
 }
 
@@ -331,8 +345,7 @@ test("Test C: closeout demands no cancellation Waiver for the attested Task", ()
   `).lifecycle_id);
   assert.equal(
     row(`
-      SELECT COUNT(*) AS count FROM workflow_waivers
-      WHERE lifecycle_id = :lifecycle_id AND scope = 'task-cancellation' AND waiver_status = 'active'
+      SELECT COUNT(*) AS count FROM workflow_waivers WHERE lifecycle_id = :lifecycle_id
     `, { ":lifecycle_id": lifecycleId }).count,
     0,
     "no cancellation Waiver exists for the attested Task",
@@ -376,5 +389,125 @@ test("Test D: a Task at operator-attested in only one vocabulary still fails Sli
   assert.throws(
     () => closeSlice(),
     /canonical and legacy lifecycle mismatch|is not terminal with canonical and legacy parity/,
+  );
+});
+
+// ── Milestone-level closeout (Task 2) ──
+
+const MILESTONE_SOURCE_REVISION = "fixture-source-revision";
+
+function waiveMilestoneValidation(): void {
+  grantMilestoneValidationWaiver({
+    invocation: invocation("fixture/milestone/validation-waiver"),
+    milestoneId: "M001",
+    testedSourceRevision: MILESTONE_SOURCE_REVISION,
+    reason: "trivial-scope",
+    policyId: "operator-attested-closeout-test",
+    policyVersion: "v1",
+  });
+}
+
+function closeMilestone(): ReturnType<typeof completeMilestoneHierarchy> {
+  let result!: ReturnType<typeof completeMilestoneHierarchy>;
+  executeAtFence("milestone.complete", "fixture/milestone/complete", (context) => {
+    result = completeMilestoneHierarchy(context, {
+      milestoneId: "M001",
+      sourceRevision: MILESTONE_SOURCE_REVISION,
+    });
+  });
+  return result;
+}
+
+/** Sets Slice S01 canonical + legacy status straight to terminal `completed`,
+ * bypassing a full completeSliceHierarchy cascade — Task 1's tests already
+ * prove that cascade; these Milestone-level tests isolate taskTerminalState
+ * and the per-Task completed/cancelled routing in completeMilestoneHierarchy. */
+function closeSliceDirectly(): void {
+  executeAtFence("test.slice.close-directly", "fixture/slice/close-directly", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed",
+    });
+  });
+  db().prepare(`UPDATE slices SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'S01'`).run();
+}
+
+test("Test E: a Task at operator-attested in only one vocabulary still fails Milestone closeout with the parity error", () => {
+  seedHierarchy(["T01"]);
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  executeAtFence("test.half-write.in-progress", "fixture/half-write/T01/milestone/in-progress", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "in_progress",
+    });
+  });
+  executeAtFence("test.half-write.operator-attested", "fixture/half-write/T01/milestone/operator-attested", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "operator-attested",
+    });
+  });
+  closeSliceDirectly();
+  waiveMilestoneValidation();
+
+  // The positive half of taskTerminalState's contract (it RETURNS the new
+  // literal, not a throw, when both vocabularies agree) is proven by Test F
+  // below succeeding — taskTerminalState is not exported for direct unit
+  // testing (mirrors the module's existing private-function convention).
+  assert.throws(
+    () => closeMilestone(),
+    /canonical and legacy lifecycle mismatch|is not terminal with canonical and legacy parity/,
+  );
+});
+
+test("Test F: a Milestone with one operator-attested Task and one ordinarily-completed Task completes, both counted completed and none cancelled", () => {
+  seedHierarchy(["T01", "T02"]);
+  attestTask("T01");
+  completeTaskOrdinarily("T02");
+  const sliceResult = closeSlice();
+  assert.deepEqual(sliceResult.cancelledTaskIds, []);
+  waiveMilestoneValidation();
+
+  const result = closeMilestone();
+
+  assert.deepEqual([...result.completedTaskIds].sort(), ["S01/T01", "S01/T02"]);
+  assert.deepEqual(result.cancelledTaskIds, []);
+  assert.equal(
+    row("SELECT status AS status FROM milestones WHERE id = 'M001'").status,
+    "complete",
+  );
+  assert.equal(
+    row("SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE milestone_id = 'M001' AND slice_id IS NULL").status,
+    "completed",
+  );
+});
+
+test("Test G: no cancellation Waiver is minted for the attested Task by Milestone closeout", () => {
+  seedHierarchy(["T01", "T02"]);
+  attestTask("T01");
+  completeTaskOrdinarily("T02");
+  closeSlice();
+  waiveMilestoneValidation();
+  const lifecycleId = String(row(`
+    SELECT lifecycle_id FROM workflow_item_lifecycles WHERE task_id = 'T01'
+  `).lifecycle_id);
+
+  const result = closeMilestone();
+
+  assert.deepEqual(
+    result.cancellationAuthorizations.filter((authorization) => authorization.lifecycleId === lifecycleId),
+    [],
+    "no cancellation authorization was minted for the attested Task's lifecycle",
+  );
+  assert.equal(
+    row(`
+      SELECT COUNT(*) AS count
+      FROM workflow_waivers waiver
+      JOIN workflow_operations operation
+        ON operation.operation_id = waiver.operation_id
+       AND operation.operation_type = 'task.waiver.grant'
+      WHERE waiver.lifecycle_id = :lifecycle_id
+    `, { ":lifecycle_id": lifecycleId }).count,
+    0,
+    "no cancellation Waiver row exists for the attested Task",
   );
 });

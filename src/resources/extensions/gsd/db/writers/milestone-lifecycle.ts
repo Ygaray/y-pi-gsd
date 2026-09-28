@@ -189,18 +189,25 @@ function requireTerminalState(row: HierarchyRow, identity: string): "completed" 
  * Task-level terminal classification for Milestone completion (#2202): a
  * `blocker-accepted` Task is terminal in both vocabularies without a fabricated
  * completion — it counts as closed work, and the Milestone closeout verdict
- * gate (criteria + validation attempt) is unaffected.
+ * gate (criteria + validation attempt) is unaffected. Phase 31 / RELY-03 /
+ * INC-2026-09-27-01 extends this with `operator-attested`: also terminal in
+ * both vocabularies on the strength of the recorded attestation (the
+ * `task.operator.attested` event's structured evidence — see task-settle.ts),
+ * also counted as closed work, and no completion proof is fabricated for it.
  */
 function taskTerminalState(
   row: HierarchyRow,
   identity: string,
-): "completed" | "cancelled" | "blocker-accepted" {
+): "completed" | "cancelled" | "blocker-accepted" | "operator-attested" {
   requireMatchingShadow(row, identity);
   const legacyStatus = normalizeLegacyLifecycleStatus(row.legacyStatus);
   if (legacyStatus === "completed" && row.lifecycleStatus === "completed") return "completed";
   if (legacyStatus === "cancelled" && row.lifecycleStatus === "cancelled") return "cancelled";
   if (legacyStatus === "blocker-accepted" && row.lifecycleStatus === "blocker-accepted") {
     return "blocker-accepted";
+  }
+  if (legacyStatus === "operator-attested" && row.lifecycleStatus === "operator-attested") {
+    return "operator-attested";
   }
   throw new MilestoneLifecycleValidationError(
     `${identity} is not terminal with canonical and legacy parity`,
@@ -618,11 +625,12 @@ export function completeMilestoneHierarchy(
   for (const task of tasks) {
     const taskIdentity = `${task.sliceId}/${task.taskId}`;
     const state = taskTerminalState(task, `Task ${taskIdentity}`);
-    if (state === "blocker-accepted") {
-      // Closed by accepting a discovered blocker — no completion proof exists
-      // and none is fabricated.
-      completedTaskIds.push(taskIdentity);
-    } else if (state === "completed") {
+    if (state === "blocker-accepted" || state === "completed" || state === "operator-attested") {
+      // blocker-accepted and operator-attested close a Task without a
+      // fabricated completion proof — the recorded disposition/attestation
+      // stands in for it, and no cancellation Waiver is minted for either.
+      // completed carries its own verdict-backed proof from the Slice
+      // cascade. All three read as one closed-work arm.
       completedTaskIds.push(taskIdentity);
     } else {
       cancelledTaskIds.push(taskIdentity);
