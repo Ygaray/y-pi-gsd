@@ -56,13 +56,19 @@ const staleDistProbeJiti = createJiti(fileURLToPath(import.meta.url), { interopD
  * src/ tree's db/engine.ts. This ALWAYS reads the source tree regardless of
  * whether this process itself is running from src/ or dist/.
  */
-function resolveSourceEngineModulePath(): string {
+export function resolveSourceEngineModulePath(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const packageRoot = join(moduleDir, "..", "..", "..", "..", "..", "..");
   return join(packageRoot, "src", "resources", "extensions", "gsd", "db", "engine.ts");
 }
 
-async function loadSourceTreeSchemaVersionViaJiti(): Promise<number> {
+// Exported so stale-dist-guard.test.ts can exercise the REAL default probe
+// (path resolution + jiti import) directly, in addition to the injected-seam
+// coverage the other tests in that file already provide (WR-01, Phase 32
+// review). Kept as the same function object ensureExistingWorkflowDbOpen's
+// default `options.loadSourceSchemaVersion` falls back to -- this is not a
+// test-only duplicate, it is the one true production probe.
+export async function loadSourceTreeSchemaVersionViaJiti(): Promise<number> {
   const engineModule = await staleDistProbeJiti.import(resolveSourceEngineModulePath(), {}) as { SCHEMA_VERSION?: unknown };
   if (typeof engineModule.SCHEMA_VERSION !== "number") {
     throw new Error("source-tree db/engine.ts did not export a numeric SCHEMA_VERSION");

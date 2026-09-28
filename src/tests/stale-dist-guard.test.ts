@@ -19,11 +19,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ensureExistingWorkflowDbOpen } from "../resources/extensions/gsd/state/derive/db-open.ts";
+import {
+  ensureExistingWorkflowDbOpen,
+  loadSourceTreeSchemaVersionViaJiti,
+  resolveSourceEngineModulePath,
+} from "../resources/extensions/gsd/state/derive/db-open.ts";
 import { closeDatabase, openDatabase, _getAdapter } from "../resources/extensions/gsd/gsd-db.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
 import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
@@ -172,6 +176,55 @@ test("source-version probe resolves to a non-number: fails safe to the existing 
           // real-world probe resolving to NaN must still fail closed.
           loadSourceSchemaVersion: async () => Number.NaN,
         }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal((err as Error).name, "GSDSchemaTooNewError");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("real default probe (WR-01): resolveSourceEngineModulePath resolves to an existing file and loadSourceTreeSchemaVersionViaJiti jiti-imports it, returning the actual checked-out SCHEMA_VERSION", async () => {
+  // Exercises the REAL production probe end-to-end -- no injected
+  // loadSourceSchemaVersion override anywhere in this test. Every other
+  // test in this file bypasses resolveSourceEngineModulePath() and
+  // loadSourceTreeSchemaVersionViaJiti() entirely via the injected seam;
+  // this is the one that would catch a future regression in the 6-level
+  // directory climb or the jiti import of db/engine.ts (e.g. an extra
+  // nesting level, or jiti failing to resolve db/engine.ts's transitive
+  // dependencies).
+  const path = resolveSourceEngineModulePath();
+  assert.ok(
+    existsSync(path),
+    `resolveSourceEngineModulePath() must resolve to a real file on disk, got: ${path}`,
+  );
+
+  const resolvedVersion = await loadSourceTreeSchemaVersionViaJiti();
+  assert.equal(
+    resolvedVersion,
+    SCHEMA_VERSION,
+    "the real jiti-imported source-tree SCHEMA_VERSION must match the statically-imported constant from the same file",
+  );
+});
+
+test("real default probe (WR-01): ensureExistingWorkflowDbOpen with NO loadSourceSchemaVersion override still hard-blocks a genuinely-newer DB (default wiring exercises the real probe, not just the injected seam)", async () => {
+  const base = makeProject();
+  try {
+    // Running directly from src/ (not a compiled dist/), the real probe's
+    // jiti-import of db/engine.ts and this test file's own static import
+    // resolve to the identical SCHEMA_VERSION constant -- so a dbVersion
+    // above it is "genuinely newer than source too" and must still throw
+    // the unchanged SchemaTooNewError (matches 32-01-PLAN.md's Task 2
+    // documented from-source invariant). This proves the DEFAULT
+    // (no-override) code path actually invokes the real probe and reaches
+    // the correct branch, rather than silently short-circuiting.
+    stampDbVersion(base, SCHEMA_VERSION + 1);
+
+    await assert.rejects(
+      () => ensureExistingWorkflowDbOpen(base, {}),
       (err: unknown) => {
         assert.ok(err instanceof Error);
         assert.equal((err as Error).name, "GSDSchemaTooNewError");
