@@ -46,11 +46,33 @@ let _loadedSuccessfully = false;
 // instead of surfacing later as a bare "unavailable" error.
 const EXPECTED_LOCK_EXPORTS = ["SqliteFileIdentityLock", "ProjectionRootIdentityLock"] as const;
 
+// Same staleness-guard idea as EXPECTED_LOCK_EXPORTS, for the `./git` subpath
+// shim (RD-01, packages/native/src/git/index.ts). A stale addon missing these
+// would otherwise fail as a bare "native.gitXxx is not a function" deep inside
+// a consumer instead of naming the real cause here.
+const EXPECTED_GIT_EXPORTS = [
+  "gitCurrentBranch",
+  "gitMainBranch",
+  "gitWorkingTreeStatus",
+  "gitHasChanges",
+  "gitCommitCountBetween",
+  "gitConflictFiles",
+] as const;
+
 function warnIfStale(loaded: Record<string, unknown>, source: string): void {
   const missing = EXPECTED_LOCK_EXPORTS.filter((name) => typeof loaded[name] !== "function");
   if (missing.length === 0) return;
   process.stderr.write(
     `[gsd] Native addon from ${source} is stale: it lacks exports the source tree expects (${missing.join(", ")}). ` +
+      `Build the local addon (pnpm run build:native:dev) or update the pinned @opengsd/engine-* package.\n`,
+  );
+}
+
+function warnIfGitExportsStale(loaded: Record<string, unknown>, source: string): void {
+  const missing = EXPECTED_GIT_EXPORTS.filter((name) => typeof loaded[name] !== "function");
+  if (missing.length === 0) return;
+  process.stderr.write(
+    `[gsd] Native addon from ${source} is stale: it lacks git exports the source tree expects (${missing.join(", ")}). ` +
       `Build the local addon (pnpm run build:native:dev) or update the pinned @opengsd/engine-* package.\n`,
   );
 }
@@ -79,6 +101,7 @@ function loadNative(): Record<string, unknown> {
           const loaded = _require(candidate) as Record<string, unknown>;
           _loadedSuccessfully = true;
           warnIfStale(loaded, candidate);
+          warnIfGitExportsStale(loaded, candidate);
           return loaded;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -95,6 +118,7 @@ function loadNative(): Record<string, unknown> {
         const loaded = _require(`@opengsd/engine-${packageSuffix}`) as Record<string, unknown>;
         _loadedSuccessfully = true;
         warnIfStale(loaded, `@opengsd/engine-${packageSuffix}`);
+        warnIfGitExportsStale(loaded, `@opengsd/engine-${packageSuffix}`);
         return loaded;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -108,6 +132,7 @@ function loadNative(): Record<string, unknown> {
       const loaded = _require(releasePath) as Record<string, unknown>;
       _loadedSuccessfully = true;
       warnIfStale(loaded, releasePath);
+      warnIfGitExportsStale(loaded, releasePath);
       return loaded;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -120,6 +145,7 @@ function loadNative(): Record<string, unknown> {
       const loaded = _require(devPath) as Record<string, unknown>;
       _loadedSuccessfully = true;
       warnIfStale(loaded, devPath);
+      warnIfGitExportsStale(loaded, devPath);
       return loaded;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -228,4 +254,10 @@ export const native = loadNative() as {
   parsePartialJson: (text: string) => unknown;
   parseStreamingJson: (text: string) => unknown;
   xxHash32: (input: string, seed: number) => number;
+  gitCurrentBranch: (repoPath: string) => string | null;
+  gitMainBranch: (repoPath: string) => string;
+  gitWorkingTreeStatus: (repoPath: string) => string;
+  gitHasChanges: (repoPath: string) => boolean;
+  gitCommitCountBetween: (repoPath: string, fromRef: string, toRef: string) => number;
+  gitConflictFiles: (repoPath: string) => string[];
 };

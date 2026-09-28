@@ -25,6 +25,10 @@
       "types": "./dist/grep/index.d.ts",
       "default": "./dist/grep/index.js"
     },
+    "./git": {
+      "types": "./dist/git/index.d.ts",
+      "default": "./dist/git/index.js"
+    },
     "./ps": {
       "types": "./dist/ps/index.d.ts",
       "default": "./dist/ps/index.js"

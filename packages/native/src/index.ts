@@ -40,6 +40,15 @@ export type {
 } from "./grep/index.js";
 
 export {
+  gitCurrentBranch,
+  gitMainBranch,
+  gitWorkingTreeStatus,
+  gitHasChanges,
+  gitCommitCountBetween,
+  gitConflictFiles,
+} from "./git/index.js";
+
+export {
   killTree,
   listDescendants,
   processGroupId,
