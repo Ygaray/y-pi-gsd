@@ -9,9 +9,10 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
-import { executeDomainOperation } from "../db/domain-operation.ts";
+import { executeDomainOperation, type DomainJsonValue } from "../db/domain-operation.ts";
 import {
   adoptOrTransitionLifecycle,
+  appendKernelCheckpoint,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.ts";
 import {
@@ -928,4 +929,337 @@ test("operator-attested apply closes both vocabularies, matches shadow, consumes
     1,
     "a repeated applied run is a no-op",
   );
+});
+
+// ── operator-attested guard-chain refusal net (Phase 31 Plan 04, RELY-03) ───
+//
+// Every test below calls planOperatorAttestedDisposition /
+// applyOperatorAttestedDisposition directly -- the exported domain functions
+// -- with no MCP tool or CLI wrapper anywhere in the call path. A guard that
+// had drifted into a wrapper would leave these refusals unraised (D-03).
+
+function taskStateSnapshot(taskId: string): {
+  lifecycleStatus: string | null;
+  legacyStatus: string | null;
+  headAttemptId: string | null;
+  headNextStage: string | null;
+} {
+  const lifecycle = row(
+    `SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = :task_id`,
+    { ":task_id": taskId },
+  );
+  const legacy = row(`SELECT status AS status FROM tasks WHERE id = :task_id`, { ":task_id": taskId });
+  const head = row(`
+    SELECT head.attempt_id AS attempt_id, head.next_stage AS next_stage
+    FROM workflow_kernel_checkpoints head
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = head.lifecycle_id
+    WHERE lifecycle.task_id = :task_id
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = head.kernel_checkpoint_id
+      )
+  `, { ":task_id": taskId });
+  return {
+    lifecycleStatus: lifecycle.status != null ? String(lifecycle.status) : null,
+    legacyStatus: legacy.status != null ? String(legacy.status) : null,
+    headAttemptId: head.attempt_id != null ? String(head.attempt_id) : null,
+    headNextStage: head.next_stage != null ? String(head.next_stage) : null,
+  };
+}
+
+/**
+ * Shared post-refusal state check: every refusal test asserts the canonical
+ * lifecycle status, the legacy task status, and the route head's attempt id
+ * and next stage are all unchanged from their pre-call values. A refusal
+ * that leaves a partial write is the failure mode ROADMAP SC-3 actually
+ * cares about.
+ */
+function assertUnchangedTaskState(
+  taskId: string,
+  before: ReturnType<typeof taskStateSnapshot>,
+): void {
+  assert.deepEqual(
+    taskStateSnapshot(taskId),
+    before,
+    "a refusal must leave the Task's two status vocabularies and route head untouched",
+  );
+}
+
+/**
+ * D-02's negative fixture: an agent-owner "tool-schema" classification
+ * routes to "repair" (recovery-policy.ts's budgetedRule), not "retry" -- a
+ * genuine non-retry route distinct from seedRetryRoutedResidue's "retry"
+ * route. Asserts the produced action itself so a future policy-mapping
+ * change fails this fixture rather than silently voiding Test A.
+ */
+function seedNonRetryRoutedResidue(): {
+  attemptId: string;
+  resultId: string;
+  recoveryActionId: string;
+  action: string;
+} {
+  const { attemptId } = seedRunningAttempt();
+  const settlement = settleTaskAttempt({
+    invocation: invocation("fixture/non-retry-settle"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "tool-schema",
+    summary: "tool schema mismatch; requires deterministic repair",
+    output: { fault: "tool-schema" },
+  });
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  const receipt = recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/non-retry-route"),
+    attemptId,
+    resultId: settlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "tool-schema" },
+    summary: "tool schema mismatch; requires deterministic repair",
+    evidence: { detail: "tool-schema" },
+    rationale: "agent-owner tool-schema routes to repair",
+  });
+  const route = readTaskRecoveryRoute(attemptId);
+  assert.ok(route, "fixture must produce a recovery route");
+  assert.equal(route.action, "repair", "fixture must produce a non-retry (repair) recovery action");
+  return {
+    attemptId,
+    resultId: settlement.resultId,
+    recoveryActionId: receipt.recoveryActionId,
+    action: route.action,
+  };
+}
+
+/**
+ * Claims a genuine retry Attempt (retryOfAttemptId) for TASK, moving the
+ * route Kernel head off whichever Attempt currently owns it. Mirrors
+ * task-recovery-domain-operation.test.ts's insertClaimedDispatch helper.
+ */
+function claimRetryAttempt(retryOfAttemptId: string, attemptNumber: number): string {
+  db().exec(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'retry-trace-${attemptNumber}', 'retry-turn-${attemptNumber}', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', ${attemptNumber}, '2026-07-13T02:00:00.000Z'
+    );
+  `);
+  const dispatchId = Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id);
+  const claim = claimTaskAttempt({
+    invocation: invocation(`fixture/retry-claim-${attemptNumber}`),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: dispatchId,
+    retryOfAttemptId,
+  });
+  return claim.attemptId;
+}
+
+/**
+ * Advances the route Kernel head for attemptId one step past "route" (to
+ * "closeout") without going through either closeout disposition -- reaching
+ * the "settled/failed but not at the route stage" state for Test E.
+ */
+function advanceHeadToCloseout(attemptId: string): void {
+  const head = row(`
+    SELECT head.kernel_checkpoint_id AS id, head.lifecycle_id AS lifecycle_id
+    FROM workflow_kernel_checkpoints head
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = head.lifecycle_id
+    WHERE lifecycle.task_id = 'T01'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = head.kernel_checkpoint_id
+      )
+  `);
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.task.checkpoint-advance",
+    idempotencyKey: `fixture/advance-${attemptId}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { attemptId },
+  }, (context) => {
+    appendKernelCheckpoint(context, {
+      lifecycleId: String(head.lifecycle_id),
+      attemptId,
+      nextStage: "closeout",
+      previousKernelCheckpointId: String(head.id),
+    });
+    return {
+      events: [{
+        eventType: "test.checkpoint.advanced",
+        entityType: "task",
+        entityId: "M001/S01/T01",
+        payload: {},
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/m001/s01/t01/advance",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+}
+
+/**
+ * An in_progress canonical lifecycle with zero Attempts recorded (Test D).
+ * Opens its own fresh database (mirroring seedRunningAttempt) since this is
+ * the first fixture call in its test.
+ */
+function seedInProgressNoAttempt(taskId: string): void {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-task-settle-"));
+  tempDirs.add(dir);
+  assert.equal(openDatabase(join(dir, "gsd.db")), true);
+  db().exec(`
+    INSERT INTO milestones (id, title, status, created_at)
+    VALUES ('M001', 'Settle', 'active', '2026-07-13T00:00:00.000Z');
+    INSERT INTO slices (milestone_id, id, title, status, created_at)
+    VALUES ('M001', 'S01', 'Settle operation', 'active', '2026-07-13T00:00:00.000Z');
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('M001', 'S01', '${taskId}', 'No attempt yet', 'in_progress');
+  `);
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.task.in-progress",
+    idempotencyKey: `fixture/task-in-progress-${taskId}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { taskId },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId,
+      lifecycleStatus: "in_progress",
+    });
+    return {
+      events: [{
+        eventType: "test.task.in-progress",
+        entityType: "task",
+        entityId: `M001/S01/${taskId}`,
+        payload: {},
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: `test/m001/s01/${taskId.toLowerCase()}`,
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+}
+
+test("operator-attested refuses a settled/failed Attempt whose recovery action is not retry, naming the action found and the supported alternative (D-02, Test A)", () => {
+  seedNonRetryRoutedResidue();
+  const before = taskStateSnapshot("T01");
+  assert.throws(
+    () => planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified the deliverable manually"),
+    /requires the routed recovery action for Attempt .* to be "retry"; found repair\..*blocker-accepted.*gsd_task_recovery_resume/s,
+  );
+  assertUnchangedTaskState("T01", before);
+});
+
+test("operator-attested refuses a running Attempt with the exact prerequisite (Test B)", () => {
+  seedRunningAttempt();
+  const before = taskStateSnapshot("T01");
+  assert.throws(
+    () => planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually"),
+    /operator-attested requires no running Attempt.*settle the running Attempt first \(gsd_task_settle without settleDisposition\)/s,
+  );
+  assertUnchangedTaskState("T01", before);
+});
+
+test("operator-attested refuses a Task lifecycle other than in_progress, naming the lifecycle found (Test C)", () => {
+  seedRetryRoutedResidue();
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('M001', 'S01', 'T02', 'No lifecycle yet', 'pending');
+  `);
+  const other = { milestoneId: "M001", sliceId: "S01", taskId: "T02" };
+  const before = taskStateSnapshot("T02");
+  assert.throws(
+    () => planOperatorAttestedDisposition(other, PASSING_EVIDENCE, "operator verified manually"),
+    /operator-attested requires the Task lifecycle in_progress; found none for M001\/S01\/T02/,
+  );
+  assertUnchangedTaskState("T02", before);
+});
+
+test("operator-attested refuses a Task with no Attempt at all (Test D)", () => {
+  seedInProgressNoAttempt("T02");
+  const other = { milestoneId: "M001", sliceId: "S01", taskId: "T02" };
+  const before = taskStateSnapshot("T02");
+  assert.throws(
+    () => planOperatorAttestedDisposition(other, PASSING_EVIDENCE, "operator verified manually"),
+    /operator-attested requires the latest Attempt of M001\/S01\/T02 settled as failed at the route stage; found no Attempt at no Kernel head/,
+  );
+  assertUnchangedTaskState("T02", before);
+});
+
+test("operator-attested refuses a settled/failed Attempt whose Kernel head has advanced past the route stage (Test E)", () => {
+  const { attemptId } = seedRetryRoutedResidue();
+  advanceHeadToCloseout(attemptId);
+  const before = taskStateSnapshot("T01");
+  assert.throws(
+    () => planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually"),
+    /requires the latest Attempt of M001\/S01\/T01 settled as failed at the route stage; found settled\/failed at closeout/,
+  );
+  assertUnchangedTaskState("T01", before);
+});
+
+/**
+ * Test F. The domain's kernel-checkpoint chain trigger
+ * (trg_workflow_kernel_checkpoint_chain, requiring attempt jumps to only
+ * ever move forward via a genuine retry claim) and its strict attempt-number
+ * sequencing (trg_workflow_attempt_number_sequence, requiring each new
+ * Attempt's number be exactly MAX+1) together guarantee that the route
+ * Kernel head always belongs to whichever Attempt readLatestTaskAttempt
+ * resolves to -- a single plan() call can never observe the two diverge
+ * (confirmed empirically: attempting to fabricate a lower-numbered "stale"
+ * Attempt is rejected by the sequencing trigger). The reachable analog is:
+ * a retry Attempt gets claimed for real, genuinely moving the head off the
+ * originally-eligible, retry-routed Attempt, and a fresh plan() call is
+ * refused using CURRENT live state (the running-Attempt guard) rather than
+ * the stale Attempt's own now-superseded eligibility -- proving the guard
+ * always re-reads live state rather than trusting a Task's history.
+ */
+test("operator-attested refuses once a retry Attempt has been claimed and the route head has moved off the originally-eligible Attempt (Test F)", () => {
+  const { attemptId: firstAttemptId } = seedRetryRoutedResidue();
+  const secondAttemptId = claimRetryAttempt(firstAttemptId, 2);
+  const before = taskStateSnapshot("T01");
+  assert.equal(
+    before.headAttemptId,
+    secondAttemptId,
+    "the route Kernel head must have genuinely moved to the claimed retry Attempt, off the original",
+  );
+  assert.throws(
+    () => planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually"),
+    /operator-attested requires no running Attempt.*settle the running Attempt first/s,
+  );
+  assertUnchangedTaskState("T01", before);
+});
+
+test("operator-attested's non-retry refusal is raised by the exported domain function directly, with no MCP tool or CLI wrapper in the call path (Test G, D-03)", () => {
+  seedNonRetryRoutedResidue();
+  // Deliberately calling the domain function directly, with no MCP tool and
+  // no CLI wrapper anywhere in the call path: the point is that a caller
+  // reaching straight into the domain layer is equally gated (D-03).
+  let thrown: Error | undefined;
+  try {
+    planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "operator verified manually");
+  } catch (err) {
+    thrown = err as Error;
+  }
+  assert.ok(thrown, "the direct domain-layer call must throw");
+  assert.match(thrown.message, /^gsd_task_settle: operator-attested requires the routed recovery action/);
 });
