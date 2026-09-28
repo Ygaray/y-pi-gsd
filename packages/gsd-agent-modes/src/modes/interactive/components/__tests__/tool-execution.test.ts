@@ -1210,3 +1210,49 @@ describe("ToolExecutionComponent size-based auto-collapse: boundary and precisio
 		assert.ok(renderRowLineCount("a") > 1, "1 line at a clamped limit of 1 must stay expanded");
 	});
 });
+
+describe("ToolExecutionComponent operator-configured threshold round trip (TUI-05, Plan 03)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	function renderRowLineCount(text: string): number {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text }], isError: false });
+		return stripAnsi(component.render(120).join("\n")).split("\n").length;
+	}
+
+	test("a configured 2-line limit collapses a 3-line result and leaves a 2-line result expanded", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 2, bytes: 4096 });
+		const threeLines = "a\nb\nc";
+		const twoLines = "a\nb";
+		assert.equal(renderRowLineCount(threeLines), 1, "a configured value, not the default 40, must decide");
+		assert.ok(renderRowLineCount(twoLines) > 1, "a 2-line result at the configured limit stays expanded");
+	});
+
+	test("a raised limit genuinely disables collapse for a body the default would have collapsed", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 4000, bytes: 1048576 });
+		const twoHundredLines = Array.from({ length: 200 }, (_, i) => `l${i}`).join("\n");
+		assert.ok(
+			renderRowLineCount(twoHundredLines) > 1,
+			"a 200-line result must not collapse once the threshold is raised past it",
+		);
+	});
+
+	test("_resetToolBodyAutoCollapseThresholds restores the defaults so a 200-line result collapses again", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 4000, bytes: 1048576 });
+		const twoHundredLines = Array.from({ length: 200 }, (_, i) => `l${i}`).join("\n");
+		assert.ok(renderRowLineCount(twoHundredLines) > 1, "raised threshold: 200 lines stays expanded");
+
+		_resetToolBodyAutoCollapseThresholds();
+
+		assert.equal(renderRowLineCount(twoHundredLines), 1, "after reset, 200 lines collapses under the 40-line default");
+	});
+});

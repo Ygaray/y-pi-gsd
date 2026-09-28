@@ -35,6 +35,8 @@ export interface TerminalSettings {
 	toolsExpanded?: boolean; // default: true (tool output cards start expanded)
 	toolRailAnimation?: boolean; // default: true (animate the running tool-card rail; off = static rail + no re-render timer)
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
+	toolCollapseThresholdLines?: number; // default: 40 (transcript UX auto-collapse threshold for a tool-call row's result text, measured against the raw result content; deliberately unrelated to, and far smaller than, the capture-time hard truncation ceiling in core/tools/truncate.ts)
+	toolCollapseThresholdBytes?: number; // default: 4096 (transcript UX auto-collapse threshold for a tool-call row's result text, measured against the raw result content; deliberately unrelated to, and far smaller than, the capture-time hard truncation ceiling in core/tools/truncate.ts)
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
 	adaptiveMode?: AdaptiveTuiMode;
@@ -1035,6 +1037,22 @@ export class SettingsManager {
 		this.globalSettings.terminal.imageWidthCells = Math.max(1, Math.floor(width));
 		this.markModified("terminal", "imageWidthCells");
 		this.save();
+	}
+
+	getToolCollapseThresholdLines(): number {
+		const lines = this.settings.terminal?.toolCollapseThresholdLines;
+		if (typeof lines !== "number" || !Number.isFinite(lines)) {
+			return 40;
+		}
+		return Math.max(1, Math.floor(lines));
+	}
+
+	getToolCollapseThresholdBytes(): number {
+		const bytes = this.settings.terminal?.toolCollapseThresholdBytes;
+		if (typeof bytes !== "number" || !Number.isFinite(bytes)) {
+			return 4096;
+		}
+		return Math.max(1, Math.floor(bytes));
 	}
 
 	getClearOnShrink(): boolean {

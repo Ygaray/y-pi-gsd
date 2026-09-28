@@ -326,6 +326,79 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("terminal.toolCollapseThreshold*", () => {
+		it("should default to 40 lines and 4096 bytes with no terminal settings present", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdLines()).toBe(40);
+			expect(manager.getToolCollapseThresholdBytes()).toBe(4096);
+		});
+
+		it("should honour a configured lines value while bytes stays at its default", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminal: { toolCollapseThresholdLines: 120 } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdLines()).toBe(120);
+			expect(manager.getToolCollapseThresholdBytes()).toBe(4096);
+		});
+
+		it("should clamp a configured 0 lines value to 1", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminal: { toolCollapseThresholdLines: 0 } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdLines()).toBe(1);
+		});
+
+		it("should floor a fractional configured lines value", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminal: { toolCollapseThresholdLines: 12.7 } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdLines()).toBe(12);
+		});
+
+		it("should clamp a negative configured bytes value to 1", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminal: { toolCollapseThresholdBytes: -5 } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdBytes()).toBe(1);
+		});
+
+		it("should fall back to the documented default for a string-valued lines setting", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminal: { toolCollapseThresholdLines: "lots" } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdLines()).toBe(40);
+		});
+
+		it("should fall back to the documented default for a non-finite bytes setting", () => {
+			// "1e999" is valid JSON number syntax that overflows to Infinity on parse -
+			// the only way to get a non-finite value out of a real settings file on disk.
+			writeFileSync(join(agentDir, "settings.json"), '{"terminal":{"toolCollapseThresholdBytes":1e999}}');
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdBytes()).toBe(4096);
+		});
+
+		it("should preserve an unrelated existing setting when the threshold keys are read", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ theme: "dark", terminal: { toolCollapseThresholdLines: 80 } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolCollapseThresholdLines()).toBe(80);
+			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(savedSettings.theme).toBe("dark");
+		});
+	});
+
 	describe("shellCommandPrefix", () => {
 		it("should load shellCommandPrefix from settings", () => {
 			const settingsPath = join(agentDir, "settings.json");
