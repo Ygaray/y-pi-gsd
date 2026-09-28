@@ -1,54 +1,49 @@
-import { execFile, spawnSync } from "child_process";
 import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let resolvedBranch = "main";
-type GitStatusFixture = { kind: "ok"; stdout: string } | { kind: "error" };
-let gitStatusFixture: GitStatusFixture = { kind: "ok", stdout: "" };
+type GitStatusFixture = { kind: "ok"; statusText: string; conflicts?: string[] } | { kind: "error" };
+let gitStatusFixture: GitStatusFixture = { kind: "ok", statusText: "" };
 
-vi.mock("child_process", () => ({
-	execFile: vi.fn(
-		(
-			_command: string,
-			args: readonly string[],
-			_options: unknown,
-			callback: (error: Error | null, stdout: string, stderr: string) => void,
-		) => {
-			if (args[1] === "symbolic-ref") {
-				setTimeout(
-					() =>
-						callback(
-							resolvedBranch ? null : new Error("detached"),
-							resolvedBranch ? `${resolvedBranch}\n` : "",
-							"",
-						),
-					0,
-				);
-				return;
-			}
-			if (args[1] === "status") {
-				setTimeout(() => {
-					if (gitStatusFixture.kind === "error") {
-						callback(new Error("boom"), "", "");
-						return;
-					}
-					callback(null, gitStatusFixture.stdout, "");
-				}, 0);
-				return;
-			}
-			setTimeout(() => callback(new Error("unsupported"), "", ""), 0);
-		},
-	),
-	spawnSync: vi.fn((_command: string, args: readonly string[]) => {
-		if (args[1] === "symbolic-ref") {
-			return { status: resolvedBranch ? 0 : 1, stdout: resolvedBranch ? `${resolvedBranch}\n` : "", stderr: "" };
-		}
-		return { status: 1, stdout: "", stderr: "" };
+/**
+ * `gitCommitCountBetween` mock, keyed on its `(repoPath, fromRef, toRef)` args:
+ * `fromRef === "HEAD@{upstream}", toRef === "HEAD"` -> ahead value;
+ * `fromRef === "HEAD", toRef === "HEAD@{upstream}"` -> behind value;
+ * throws to simulate "no upstream configured" when `hasUpstream` is false.
+ */
+let hasUpstream = true;
+let aheadCount = 0;
+let behindCount = 0;
+/**
+ * Per-repoPath ahead override, for tests that need to distinguish two different
+ * repos' status data (the WR-02 stale-cwd race test) rather than sharing one
+ * global `aheadCount` across every repo the mock is asked about.
+ */
+let aheadByRepo: Record<string, number> = {};
+
+vi.mock("@gsd/native/git", () => ({
+	gitCurrentBranch: vi.fn((_repoPath: string) => (resolvedBranch ? resolvedBranch : null)),
+	gitWorkingTreeStatus: vi.fn((_repoPath: string) => {
+		if (gitStatusFixture.kind === "error") throw new Error("boom");
+		return gitStatusFixture.statusText;
+	}),
+	gitHasChanges: vi.fn(() => false),
+	gitCommitCountBetween: vi.fn((repoPath: string, fromRef: string, toRef: string) => {
+		if (!hasUpstream) throw new Error("Failed to resolve ref 'HEAD@{upstream}'");
+		const ahead = aheadByRepo[repoPath] ?? aheadCount;
+		if (fromRef === "HEAD@{upstream}" && toRef === "HEAD") return ahead;
+		if (fromRef === "HEAD" && toRef === "HEAD@{upstream}") return behindCount;
+		return 0;
+	}),
+	gitConflictFiles: vi.fn((_repoPath: string) => {
+		if (gitStatusFixture.kind === "error") throw new Error("boom");
+		return gitStatusFixture.conflicts ?? [];
 	}),
 }));
 
+import { gitCurrentBranch } from "@gsd/native/git";
 import { FooterDataProvider } from "../src/core/footer-data-provider.ts";
 
 type WorktreeFixture = {
@@ -100,13 +95,13 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 }
 
 /**
- * Count only the branch-resolution (`symbolic-ref`) execFile invocations. Since Plan 02, the
- * shared debounce window fires a `git status` call alongside the branch call (RESEARCH Pattern 2
- * / PATTERNS.md "one debounce window, not two systems"), so a raw `execFile` call count no longer
- * isolates branch-refresh behavior on its own.
+ * Count only `gitCurrentBranch` calls (the reftable `.invalid` fallback path). Since
+ * Plan 02, the shared debounce window fires a status refresh alongside the branch
+ * refresh, so a raw call count on any single mock no longer isolates branch-refresh
+ * behavior on its own — this helper narrows to just the branch-resolution calls.
  */
-function symbolicRefCallCount(): number {
-	return vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "symbolic-ref").length;
+function gitCurrentBranchCallCount(): number {
+	return vi.mocked(gitCurrentBranch).mock.calls.length;
 }
 
 describe("FooterDataProvider reftable branch detection", () => {
@@ -117,8 +112,7 @@ describe("FooterDataProvider reftable branch detection", () => {
 		originalCwd = process.cwd();
 		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-"));
 		resolvedBranch = "main";
-		vi.mocked(spawnSync).mockClear();
-		vi.mocked(execFile).mockClear();
+		vi.mocked(gitCurrentBranch).mockClear();
 	});
 
 	afterEach(() => {
@@ -137,34 +131,26 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(nestedDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
-			expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
+			expect(vi.mocked(gitCurrentBranch)).not.toHaveBeenCalled();
 		} finally {
 			provider.dispose();
 		}
 	});
 
-	it("resolves the branch via git when HEAD is .invalid in a reftable repo", () => {
+	it("resolves the branch via the native addon when HEAD is .invalid in a reftable repo", () => {
 		const repoDir = createPlainReftableRepo(tempDir);
 		process.chdir(repoDir);
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
-			expect(vi.mocked(spawnSync)).toHaveBeenCalledWith(
-				"git",
-				["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
-				expect.objectContaining({
-					cwd: expect.stringMatching(/repo$/),
-					encoding: "utf8",
-					stdio: ["ignore", "pipe", "ignore"],
-				}),
-			);
+			expect(vi.mocked(gitCurrentBranch)).toHaveBeenCalledWith(expect.stringMatching(/repo$/));
 		} finally {
 			provider.dispose();
 		}
 	});
 
-	it("resolves the branch via git in a reftable-backed worktree", () => {
+	it("resolves the branch via the native addon in a reftable-backed worktree", () => {
 		const { worktreeDir } = createReftableWorktree(tempDir);
 		process.chdir(worktreeDir);
 
@@ -196,15 +182,14 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(worktreeDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
-			vi.mocked(spawnSync).mockClear();
+			vi.mocked(gitCurrentBranch).mockClear();
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			await waitFor(() => symbolicRefCallCount() === 1);
+			await waitFor(() => gitCurrentBranchCallCount() === 1);
 
-			expect(symbolicRefCallCount()).toBe(1);
-			expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
+			expect(gitCurrentBranchCallCount()).toBe(1);
 			expect(provider.getGitBranch()).toBe("main");
 			expect(onBranchChange).not.toHaveBeenCalled();
 		} finally {
@@ -219,15 +204,15 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(worktreeDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
-			vi.mocked(execFile).mockClear();
+			vi.mocked(gitCurrentBranch).mockClear();
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
 			writeFileSync(join(reftableDir, "tables.list"), "2\n");
 			writeFileSync(join(reftableDir, "tables.list"), "3\n");
-			await waitFor(() => symbolicRefCallCount() === 1);
+			await waitFor(() => gitCurrentBranchCallCount() === 1);
 			await new Promise((resolve) => setTimeout(resolve, 650));
 
-			expect(symbolicRefCallCount()).toBe(1);
+			expect(gitCurrentBranchCallCount()).toBe(1);
 		} finally {
 			provider.dispose();
 		}
@@ -240,15 +225,16 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(worktreeDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
+			vi.mocked(gitCurrentBranch).mockClear();
 			resolvedBranch = "foo";
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			await waitFor(() => symbolicRefCallCount() === 1);
+			await waitFor(() => gitCurrentBranchCallCount() === 1);
 			await waitFor(() => provider.getGitBranch() === "foo");
 
-			expect(symbolicRefCallCount()).toBe(1);
+			expect(gitCurrentBranchCallCount()).toBe(1);
 			expect(provider.getGitBranch()).toBe("foo");
 			expect(onBranchChange).toHaveBeenCalledTimes(1);
 		} finally {
@@ -286,22 +272,10 @@ describe("FooterDataProvider reftable branch detection", () => {
 	});
 });
 
-const CLEAN_STATUS_STDOUT = ["# branch.oid abc123", "# branch.head main", "# branch.ab +0 -0", ""].join("\n");
+/** Native status-line format: "<indexChar><worktreeChar> <path>" per line, no header. */
+const CLEAN_STATUS_TEXT = "";
 
-const AHEAD_BEHIND_STATUS_STDOUT = ["# branch.oid abc123", "# branch.head main", "# branch.ab +3 -0", ""].join("\n");
-
-const NO_UPSTREAM_STATUS_STDOUT = ["# branch.oid abc123", "# branch.head main", ""].join("\n");
-
-const MIXED_ENTRIES_STATUS_STDOUT = [
-	"# branch.oid abc123",
-	"# branch.head main",
-	"# branch.ab +0 -0",
-	"1 M. N... 100644 100644 100644 abc123 def456 staged-file.txt",
-	"1 .M N... 100644 100644 100644 abc123 def456 dirty-file.txt",
-	"? untracked-file.txt",
-	"u UU N... 100644 100644 100644 100644 abc123 def456 ghi789 conflict-file.txt",
-	"",
-].join("\n");
+const MIXED_ENTRIES_STATUS_TEXT = ["M  staged-file.txt", " M dirty-file.txt", " ? untracked-file.txt", ""].join("\n");
 
 type ProviderInternals = { scheduleRefresh: () => void };
 
@@ -317,9 +291,12 @@ describe("FooterDataProvider git status", () => {
 		originalCwd = process.cwd();
 		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-status-"));
 		resolvedBranch = "main";
-		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
-		vi.mocked(spawnSync).mockClear();
-		vi.mocked(execFile).mockClear();
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
+		hasUpstream = true;
+		aheadCount = 0;
+		behindCount = 0;
+		aheadByRepo = {};
+		vi.mocked(gitCurrentBranch).mockClear();
 	});
 
 	afterEach(() => {
@@ -337,16 +314,17 @@ describe("FooterDataProvider git status", () => {
 		const provider = new FooterDataProvider(outsideDir);
 		try {
 			expect(provider.getGitStatus()).toBeNull();
-			expect(vi.mocked(execFile)).not.toHaveBeenCalled();
 		} finally {
 			provider.dispose();
 		}
 	});
 
-	it("parses ahead/behind counts from the branch.ab header", async () => {
+	it("parses ahead/behind counts via gitCommitCountBetween against HEAD@{upstream}", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: AHEAD_BEHIND_STATUS_STDOUT };
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
+		aheadCount = 3;
+		behindCount = 0;
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
@@ -365,10 +343,11 @@ describe("FooterDataProvider git status", () => {
 		}
 	});
 
-	it("defaults ahead/behind to 0 (never undefined/NaN) when branch.ab header is absent", async () => {
+	it("defaults ahead/behind to 0 (never undefined/NaN) when there is no upstream", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: NO_UPSTREAM_STATUS_STDOUT };
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
+		hasUpstream = false;
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
@@ -383,10 +362,14 @@ describe("FooterDataProvider git status", () => {
 		}
 	});
 
-	it("classifies staged (1 M.), dirty (1 .M), untracked (?), and conflict (u) entries", async () => {
+	it("classifies staged (M ), dirty ( M), untracked (?), and conflict entries", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: MIXED_ENTRIES_STATUS_STDOUT };
+		gitStatusFixture = {
+			kind: "ok",
+			statusText: MIXED_ENTRIES_STATUS_TEXT,
+			conflicts: ["conflict-file.txt"],
+		};
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
@@ -407,7 +390,7 @@ describe("FooterDataProvider git status", () => {
 	it("reports all-zero counts for a clean, in-sync tree", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
@@ -428,7 +411,7 @@ describe("FooterDataProvider git status", () => {
 	it("keeps the previous cached value when a git invocation errors, without throwing", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
@@ -436,11 +419,9 @@ describe("FooterDataProvider git status", () => {
 			const beforeError = provider.getGitStatus();
 
 			gitStatusFixture = { kind: "error" };
-			const callsBefore = vi.mocked(execFile).mock.calls.length;
 			scheduleRefresh(provider);
-			await waitFor(() => vi.mocked(execFile).mock.calls.length > callsBefore);
 			// give the errored refresh's microtask chain a chance to settle
-			await new Promise((resolve) => setTimeout(resolve, 50));
+			await new Promise((resolve) => setTimeout(resolve, 550));
 
 			expect(() => provider.getGitStatus()).not.toThrow();
 			expect(provider.getGitStatus()).toEqual(beforeError);
@@ -452,7 +433,7 @@ describe("FooterDataProvider git status", () => {
 	it("fires onGitStatusChange only when the computed struct differs from the cached one", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
@@ -462,17 +443,13 @@ describe("FooterDataProvider git status", () => {
 			provider.onGitStatusChange(onGitStatusChange);
 
 			// Same fixture again -> no change -> no notification
-			const callsBefore = vi.mocked(execFile).mock.calls.length;
 			scheduleRefresh(provider);
-			await waitFor(() => vi.mocked(execFile).mock.calls.length > callsBefore);
-			await new Promise((resolve) => setTimeout(resolve, 50));
+			await new Promise((resolve) => setTimeout(resolve, 550));
 			expect(onGitStatusChange).not.toHaveBeenCalled();
 
 			// Different fixture -> change -> notification fires
-			gitStatusFixture = { kind: "ok", stdout: AHEAD_BEHIND_STATUS_STDOUT };
-			const callsBefore2 = vi.mocked(execFile).mock.calls.length;
+			aheadCount = 3;
 			scheduleRefresh(provider);
-			await waitFor(() => vi.mocked(execFile).mock.calls.length > callsBefore2);
 			await waitFor(() => provider.getGitStatus()?.ahead === 3);
 			expect(onGitStatusChange).toHaveBeenCalledTimes(1);
 		} finally {
@@ -484,16 +461,81 @@ describe("FooterDataProvider git status", () => {
 		vi.useFakeTimers();
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
-		gitStatusFixture = { kind: "ok", stdout: CLEAN_STATUS_STDOUT };
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
 
 		const provider = new FooterDataProvider(repoDir);
 		try {
 			scheduleRefresh(provider);
-			const callsBefore = vi.mocked(execFile).mock.calls.length;
+			const callsBefore = vi.mocked(gitCurrentBranch).mock.calls.length;
 			provider.dispose();
 			await vi.advanceTimersByTimeAsync(1000);
-			expect(vi.mocked(execFile).mock.calls.length).toBe(callsBefore);
+			expect(vi.mocked(gitCurrentBranch).mock.calls.length).toBe(callsBefore);
 		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	/**
+	 * WR-02 regression attempt: a `setCwd()` call interleaving with an in-flight
+	 * refresh's cache write. Since the native calls are synchronous, the actual async
+	 * window is now just the microtask tick between `await this.resolveGitStatusAsync()`
+	 * returning and its continuation running (an async function still yields at least
+	 * one microtask to its awaiter) — the race is real but narrow.
+	 */
+	it("discards a stale-cwd status refresh that resolves after setCwd() moves to a new directory (WR-02)", async () => {
+		vi.useFakeTimers();
+		const oldRepoDir = createPlainRepo(tempDir);
+		const newRepoDir = join(tempDir, "repo-new");
+		mkdirSync(join(newRepoDir, ".git"), { recursive: true });
+		writeFileSync(join(newRepoDir, ".git", "HEAD"), "ref: refs/heads/other\n");
+
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
+		resolvedBranch = "main";
+		// Only the OLD repo's status refresh reports ahead:9 — the new repo (absent
+		// from the map) falls back to aheadCount (0). This lets the assertion tell
+		// "stale old-cwd data landed" apart from "correct new-cwd data landed",
+		// which a single shared ahead value could not distinguish.
+		aheadByRepo[oldRepoDir] = 9;
+
+		const provider = new FooterDataProvider(oldRepoDir);
+		try {
+			// Prime the old cwd's cache so it's non-null before the race begins.
+			scheduleRefresh(provider);
+			await vi.advanceTimersByTimeAsync(500);
+			expect(provider.getGitStatus()?.ahead).toBe(9);
+
+			// Trigger a second debounced refresh for the OLD cwd. Fire its timer with
+			// the SYNC advance (not the async variant) so the timer callback runs and
+			// `refreshGitStatusAsync` suspends at its internal `await
+			// this.resolveGitStatusAsync()` WITHOUT yielding the microtask queue back
+			// to the test — an async function's continuation only runs once the
+			// enclosing synchronous stack (this test body, up to its next `await`)
+			// finishes. This is the narrow real race window (#WR-02): the native call
+			// itself is synchronous now, so the only async gap left is that one
+			// microtask tick between the promise settling and its continuation.
+			scheduleRefresh(provider);
+			vi.advanceTimersByTime(500);
+
+			// Switch cwd in this same synchronous tick, before the suspended
+			// continuation above has any chance to run.
+			resolvedBranch = "other";
+			provider.setCwd(newRepoDir);
+
+			// setCwd() clears the cache; confirm nothing was written synchronously.
+			expect(provider.getGitStatus()).toBeNull();
+
+			// Now let everything settle: the discarded old-cwd continuation (guarded
+			// by the cwdGeneration check) and a fresh debounced refresh for the new cwd.
+			await vi.advanceTimersByTimeAsync(500);
+			await vi.runAllTimersAsync();
+
+			const finalStatus = provider.getGitStatus();
+			// The old cwd's stale refresh (ahead: 9) must never land in the new cwd's
+			// cache slot.
+			expect(finalStatus?.ahead).not.toBe(9);
+			expect(provider.getGitBranch()).toBe("other");
+		} finally {
+			provider.dispose();
 			vi.useRealTimers();
 		}
 	});

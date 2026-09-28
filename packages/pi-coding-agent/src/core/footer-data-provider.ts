@@ -1,6 +1,6 @@
-import { type ExecFileException, execFile, spawnSync } from "child_process";
 import { existsSync, type FSWatcher, readFileSync, statSync, unwatchFile, watchFile } from "fs";
 import { dirname, join, resolve } from "path";
+import { gitCommitCountBetween, gitConflictFiles, gitCurrentBranch, gitWorkingTreeStatus } from "@gsd/native/git";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../utils/fs-watch.js";
 
 type GitPaths = {
@@ -19,9 +19,6 @@ export type GitStatusInfo = {
 	behind: number;
 };
 
-/** Ceiling on buffered `git status` stdout — bounds a pathological tree (T-28-04). */
-const GIT_STATUS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
-
 function gitStatusEqual(a: GitStatusInfo | null, b: GitStatusInfo | null): boolean {
 	if (a === b) return true;
 	if (a === null || b === null) return false;
@@ -36,48 +33,34 @@ function gitStatusEqual(a: GitStatusInfo | null, b: GitStatusInfo | null): boole
 }
 
 /**
- * Parse `git status --porcelain=v2 --branch` stdout into counts only — never a path,
- * per the never-retain-a-path contract (threat register T-28-04/T-28-05).
+ * Parse the native `gitWorkingTreeStatus()` compact format into counts only — never a
+ * path, per the never-retain-a-path contract (threat register T-28-04/T-28-05).
+ *
+ * Each line is `"<indexChar><worktreeChar> <path>"` — NOT `git status --porcelain` v1
+ * or v2. `indexChar`/`worktreeChar` are each one of `A`, `M`, `D`, `R`, `T`, or `' '`
+ * (unchanged), except `worktreeChar` can also be `?` for untracked (`" ? path"`, a
+ * space then `?` — never porcelain's `"??"`). There is no branch/ahead-behind header
+ * line and no conflict marker; conflicts come from `gitConflictFiles()` separately.
  */
-function parseGitStatusPorcelain(stdout: string): GitStatusInfo {
-	let ahead = 0;
-	let behind = 0;
+function parseNativeGitStatus(statusText: string): Pick<GitStatusInfo, "staged" | "dirty" | "untracked"> {
 	let staged = 0;
 	let dirty = 0;
 	let untracked = 0;
-	let conflicts = 0;
 
-	for (const rawLine of stdout.split("\n")) {
-		const line = rawLine.trimEnd();
-		if (!line) continue;
+	for (const rawLine of statusText.split("\n")) {
+		if (rawLine.length < 2) continue;
+		const indexChar = rawLine[0];
+		const worktreeChar = rawLine[1];
 
-		if (line.startsWith("# branch.ab ")) {
-			const match = /^# branch\.ab \+(\d+) -(\d+)/.exec(line);
-			if (match) {
-				ahead = Number(match[1]);
-				behind = Number(match[2]);
-			}
-			continue;
-		}
-		if (line.startsWith("#")) continue;
-
-		if (line.startsWith("u ")) {
-			conflicts++;
-			continue;
-		}
-		if (line.startsWith("? ")) {
+		if (worktreeChar === "?") {
 			untracked++;
 			continue;
 		}
-		if (line.startsWith("1 ") || line.startsWith("2 ")) {
-			const xy = line.slice(2, 4);
-			if (xy[0] !== ".") staged++;
-			if (xy[1] !== ".") dirty++;
-			continue;
-		}
+		if (indexChar !== " ") staged++;
+		if (worktreeChar !== " ") dirty++;
 	}
 
-	return { staged, dirty, untracked, conflicts, ahead, behind };
+	return { staged, dirty, untracked };
 }
 
 /**
@@ -118,37 +101,19 @@ function findGitPaths(cwd: string): GitPaths | null {
 	}
 }
 
-/** Ask git for the current branch. Returns null on detached HEAD or if git is unavailable. */
-function resolveBranchWithGitSync(repoDir: string): string | null {
-	const result = spawnSync("git", ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"], {
-		cwd: repoDir,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-	});
-	const branch = result.status === 0 ? result.stdout.trim() : "";
-	return branch || null;
-}
-
-/** Ask git for the current branch asynchronously. Returns null on detached HEAD or if git is unavailable. */
-function resolveBranchWithGitAsync(repoDir: string): Promise<string | null> {
-	return new Promise((resolvePromise) => {
-		execFile(
-			"git",
-			["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
-			{
-				cwd: repoDir,
-				encoding: "utf8",
-			},
-			(error: ExecFileException | null, stdout: string) => {
-				if (error) {
-					resolvePromise(null);
-					return;
-				}
-				const branch = stdout.trim();
-				resolvePromise(branch || null);
-			},
-		);
-	});
+/**
+ * Ask the native git addon for the current branch (used only for the reftable
+ * `.invalid` HEAD-content fallback — see `resolveGitBranchSync`/`resolveGitBranchAsync`).
+ * Returns "detached" on any thrown error or a null branch, since `gitCurrentBranch()`
+ * throws on an unborn branch and on repos it cannot open, unlike a plain HEAD-content
+ * read.
+ */
+function resolveBranchWithNativeGit(repoDir: string): string {
+	try {
+		return gitCurrentBranch(repoDir) ?? "detached";
+	} catch {
+		return "detached";
+	}
 }
 
 /**
@@ -378,28 +343,35 @@ export class FooterDataProvider {
 		}
 	}
 
+	/**
+	 * Reads working-tree status + conflicts from the native git addon (no subprocess).
+	 * The main status/conflicts calls are left to throw on failure — the caller
+	 * (`refreshGitStatusAsync`) already wraps this in try/catch and preserves the
+	 * "never overwrite cache on error" contract. Ahead/behind are computed separately
+	 * via `HEAD@{upstream}`, each independently defaulted to 0 on failure since "no
+	 * upstream configured" is an expected, common condition rather than a real error.
+	 */
 	private async resolveGitStatusAsync(): Promise<GitStatusInfo | null> {
 		if (!this.gitPaths) return null;
 		const repoDir = this.gitPaths.repoDir;
-		const stdout = await new Promise<string>((resolvePromise, rejectPromise) => {
-			execFile(
-				"git",
-				["--no-optional-locks", "status", "--porcelain=v2", "--branch"],
-				{
-					cwd: repoDir,
-					encoding: "utf8",
-					maxBuffer: GIT_STATUS_MAX_BUFFER_BYTES,
-				},
-				(error: ExecFileException | null, stdout: string) => {
-					if (error) {
-						rejectPromise(error);
-						return;
-					}
-					resolvePromise(stdout);
-				},
-			);
-		});
-		return parseGitStatusPorcelain(stdout);
+		const statusText = gitWorkingTreeStatus(repoDir);
+		const conflictFiles = gitConflictFiles(repoDir);
+		const counts = parseNativeGitStatus(statusText);
+
+		let ahead = 0;
+		try {
+			ahead = gitCommitCountBetween(repoDir, "HEAD@{upstream}", "HEAD");
+		} catch {
+			ahead = 0;
+		}
+		let behind = 0;
+		try {
+			behind = gitCommitCountBetween(repoDir, "HEAD", "HEAD@{upstream}");
+		} catch {
+			behind = 0;
+		}
+
+		return { ...counts, conflicts: conflictFiles.length, ahead, behind };
 	}
 
 	private resolveGitBranchSync(): string | null {
@@ -408,7 +380,7 @@ export class FooterDataProvider {
 			const content = readFileSync(this.gitPaths.headPath, "utf8").trim();
 			if (content.startsWith("ref: refs/heads/")) {
 				const branch = content.slice(16);
-				return branch === ".invalid" ? (resolveBranchWithGitSync(this.gitPaths.repoDir) ?? "detached") : branch;
+				return branch === ".invalid" ? resolveBranchWithNativeGit(this.gitPaths.repoDir) : branch;
 			}
 			return "detached";
 		} catch {
@@ -416,20 +388,13 @@ export class FooterDataProvider {
 		}
 	}
 
+	/**
+	 * `gitCurrentBranch()` is synchronous (no subprocess, no async I/O), so this no
+	 * longer performs any real async work — it stays `async` to keep the public
+	 * signature and call sites (`await this.resolveGitBranchAsync()`) unchanged.
+	 */
 	private async resolveGitBranchAsync(): Promise<string | null> {
-		try {
-			if (!this.gitPaths) return null;
-			const content = readFileSync(this.gitPaths.headPath, "utf8").trim();
-			if (content.startsWith("ref: refs/heads/")) {
-				const branch = content.slice(16);
-				return branch === ".invalid"
-					? ((await resolveBranchWithGitAsync(this.gitPaths.repoDir)) ?? "detached")
-					: branch;
-			}
-			return "detached";
-		} catch {
-			return null;
-		}
+		return this.resolveGitBranchSync();
 	}
 
 	private clearGitWatchers(): void {
