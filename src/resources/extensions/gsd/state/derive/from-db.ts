@@ -45,6 +45,7 @@ import { countUnmappedActiveRequirements, formatCompletePhaseNextAction } from '
 import { logWarning } from '../../workflow-logger.js';
 import {
   buildDbUnavailableState,
+  buildStaleDistState,
   ensureExistingWorkflowDbOpen,
   getRequestedMilestoneLock,
 } from './db-open.js';
@@ -448,8 +449,9 @@ export async function deriveStateFromDb(
   // Use the canonical read root (matches the caller's DB-open call in
   // derive/index.ts) — a worktree basePath can resolve to a different (or
   // nonexistent) DB path than the canonical project root.
-  if (!ensureExistingWorkflowDbOpen(_artifactReadRoot, options)) {
-    return buildDbUnavailableState();
+  const opened = await ensureExistingWorkflowDbOpen(_artifactReadRoot, options);
+  if (!opened.ok) {
+    return opened.staleDist ? buildStaleDistState(opened.staleDist) : buildDbUnavailableState();
   }
 
   const requirements = getRequirementCounts();

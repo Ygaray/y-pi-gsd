@@ -17,6 +17,7 @@ import {
 } from './cache.js';
 import {
   buildDbUnavailableState,
+  buildStaleDistState,
   ensureExistingWorkflowDbOpen,
 } from './db-open.js';
 import { deriveStateFromDb } from './from-db.js';
@@ -48,7 +49,7 @@ export async function deriveState(
   // Resolve/open through the canonical read root, matching deriveStateFromDb
   // below — otherwise a worktree basePath with projectRootForReads can open
   // the wrong (or no) DB while deriveStateFromDb still reads the correct one.
-  ensureExistingWorkflowDbOpen(opts?.projectRootForReads ?? basePath, {
+  const opened = await ensureExistingWorkflowDbOpen(opts?.projectRootForReads ?? basePath, {
     syncQueueOrder: opts?.syncQueueOrder,
   });
 
@@ -59,6 +60,8 @@ export async function deriveState(
     });
     stopDbTimer({ phase: result.phase, milestone: result.activeMilestone?.id });
     incrementDbDeriveCount();
+  } else if (!opened.ok && opened.staleDist) {
+    result = buildStaleDistState(opened.staleDist);
   } else {
     if (wasWorkflowDatabaseOpenAttempted()) {
       logWarning("state", "DB unavailable — refusing implicit markdown state derivation");

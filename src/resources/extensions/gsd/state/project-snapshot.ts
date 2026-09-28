@@ -205,8 +205,8 @@ export async function readProjectSnapshotFromDb(
 ): Promise<DbProjectSnapshot | null> {
   const previousDbPath = opts.preserveGlobalDbHandle ? getDbPath() : null;
   try {
-    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: false });
-    if (!openedRequestedDb || !isDbAvailable()) return null;
+    const openedRequestedDb = await ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: false });
+    if (!openedRequestedDb.ok || !isDbAvailable()) return null;
 
     invalidateStateCache();
     for (let attempt = 1; ; attempt++) {
