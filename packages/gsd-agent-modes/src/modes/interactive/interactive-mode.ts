@@ -30,7 +30,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
-import { ToolExecutionComponent } from "./components/tool-execution.js";
+import { ToolExecutionComponent, setToolBodyAutoCollapseThresholds } from "./components/tool-execution.js";
 import { setRailAnimationEnabled } from "./components/transcript-design.js";
 import { ContextualTips } from "@gsd/agent-core";
 import { handleAgentEvent } from "./controllers/chat-controller.js";
@@ -234,6 +234,14 @@ export class InteractiveMode {
 		}));
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.toolOutputExpanded = this.settingsManager.getToolsExpanded();
+		// TUI-05: bind the operator's configured tool-collapse thresholds once at
+		// startup, in the same settings pass as the ctrl+o default above. Safe even
+		// if a future caller supplies a raw value - the accessor clamps and
+		// defaults on the component side as well.
+		setToolBodyAutoCollapseThresholds({
+			lines: this.settingsManager.getToolCollapseThresholdLines(),
+			bytes: this.settingsManager.getToolCollapseThresholdBytes(),
+		});
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		initTheme(this.settingsManager.getTheme(), true);
