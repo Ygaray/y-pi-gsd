@@ -5,8 +5,8 @@
   "importer_version": "v1-test",
   "base_project_revision": 0,
   "base_authority_epoch": 0,
-  "base_database_schema_version": 56,
-  "source_set_hash": "sha256:58767cdc5cea37b4c510219a153069025a7223fda8c36e26942972619093d751",
+  "base_database_schema_version": 58,
+  "source_set_hash": "sha256:15e7974d8b941a6e4225e269a5483e19e720afa6100980897c0540d6c505d25a",
   "change_set_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "counts": {
     "create": 0,
@@ -29,12 +29,12 @@
       "encoding": "binary"
     },
     {
-      "source_id": "database-future-v57",
-      "path": "future-v57/.gsd/gsd.db",
+      "source_id": "database-future-v59",
+      "path": "future-v59/.gsd/gsd.db",
       "kind": "sqlite-database",
       "outcome": "unparsed",
       "byte_size": 9728,
-      "sha256": "sha256:596951ba698cac9d92b3ef5141bbd558b4a38fda95df32ac2eb453a11d9af5a3",
+      "sha256": "sha256:69a6a0d48da6d4b45c6cbc42842207f02069add9ff389588ba6e6908ed0f8d0c",
       "parser_id": "gsd-sqlite-target",
       "parser_version": "1",
       "encoding": "binary"
@@ -201,10 +201,10 @@
       "message": "The target is not an openable SQLite database and cannot be classified safely."
     },
     {
-      "diagnosis_id": "diagnosis-future-v57",
+      "diagnosis_id": "diagnosis-future-v59",
       "code": "future-schema-version",
       "severity": "blocker",
-      "source_id": "database-future-v57",
+      "source_id": "database-future-v59",
       "locator": {
         "start_byte": 0,
         "end_byte": 16
@@ -213,7 +213,7 @@
         "redacted": true,
         "sha256": "sha256:3f8434aff012ffcb594ad7527d6042841ce94f499887f86ab828f84a9a275f91"
       },
-      "message": "Schema v57 is newer than the accepted v56 target and must remain untouched."
+      "message": "Schema v59 is newer than the accepted v58 target and must remain untouched."
     },
     {
       "diagnosis_id": "diagnosis-historical-v30",
@@ -387,7 +387,7 @@
       "disposition": "unsupported"
     },
     {
-      "diagnosis_id": "diagnosis-future-v57",
+      "diagnosis_id": "diagnosis-future-v59",
       "disposition": "unsupported"
     },
     {

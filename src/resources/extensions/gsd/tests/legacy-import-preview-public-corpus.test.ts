@@ -40,7 +40,7 @@ const DEVIATIONS = {
   "action-matrix": {
     reason: "state-narrative-preservation",
     counts: [1, 1, 1, 1, 0, 0],
-    semantic_hash: "sha256:f6fab5a15177fdce6fd1991c44683713f3dbae106976bb50745651c620fd4f57",
+    semantic_hash: "sha256:5728311e0a7d55a86ae8b2a74dc53ee555cb8936beff9cfe4e0b0ac6d38c47d0",
   },
   "assessment-matrix": {
     reason: "empty-base-create",
@@ -50,12 +50,12 @@ const DEVIATIONS = {
   "composite-capstone": {
     reason: "multi-target-completeness",
     counts: [5, 0, 0, 5, 3, 5],
-    semantic_hash: "sha256:3989cd22a325b8c776c62a47965d13e03b968eefc3c71aaf5af3f7c1246ce5a8",
+    semantic_hash: "sha256:5199794296ba755e2664e5af4d1ee9578b55f2ff32fe2126967b7f33d0ede342",
   },
   "db-target-matrix": {
     reason: "multi-target-ambiguity",
     counts: [0, 0, 0, 0, 2, 3],
-    semantic_hash: "sha256:db5e892ec6eb864f342655c75d4bd5c60a38d7f686ff3ab1349f99eaa0f4658c",
+    semantic_hash: "sha256:18a0a077484d024a5ab6ea89b7ab2e20ecebf6738583b12df7bab090c9413c19",
   },
   "gsd-flat": {
     reason: "empty-base-create-instead-of-update",
@@ -65,12 +65,12 @@ const DEVIATIONS = {
   "lifecycle-truth-matrix": {
     reason: "t06-conflicting-completeness",
     counts: [7, 0, 0, 7, 2, 11],
-    semantic_hash: "sha256:a2efc7e1d2039c83185f80911021980911447a45fed43d5d9eb424fa1025e08e",
+    semantic_hash: "sha256:7be6c9e4040994542dc578d9fd9a1075d5771d37923f30a457abd2651bb769f0",
   },
   "planning-flat-complete": {
     reason: "empty-base-create-instead-of-update",
     counts: [5, 0, 0, 0, 0, 0],
-    semantic_hash: "sha256:4f2f0c2152f1b6af03576be913066491a16b3c9478c1bcbdab873eae8fea5251",
+    semantic_hash: "sha256:3cd10ec32802ca353814678ad49e83943eb3cb699517dca97ab506a9b3ed07a6",
   },
   "planning-loss-surfaces": {
     reason: "t06-unscoped-planning-preservation",
@@ -255,7 +255,7 @@ test("public legacy Preview returns deterministic read-only artifacts for every 
     "create:assessment:M702/S01/run-uat",
     "create:milestone-status:M702",
     "create:milestone:M702",
-    "create:requirement:R701",
+    "create:requirement:/R701",
     "create:slice:M702/S01",
     "preserve:legacy-knowledge-source:.gsd/KNOWLEDGE.md",
     "preserve:legacy-workflow-definition:.gsd/workflows/capstone.yaml",

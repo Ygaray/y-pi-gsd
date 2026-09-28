@@ -1,13 +1,13 @@
 {
   "preview_schema_version": 1,
-  "preview_id": "registries",
-  "import_kind": "legacy-corpus",
-  "importer_version": "v1-test",
+  "preview_id": "sha256:f496417d508bcb7bcc7a1655cbf994244cb1389d31ef4e675e1e20d7cc30a4d5",
+  "import_kind": "legacy-markdown",
+  "importer_version": "1",
   "base_project_revision": 0,
   "base_authority_epoch": 0,
-  "base_database_schema_version": 56,
-  "source_set_hash": "sha256:e54a5e612ecf1065a508f3e9c9efac596fb5a3c7756bd984a88183587701ecb6",
-  "change_set_hash": "sha256:a1dadeaf15c01c2aa25e2cf1793dfd8f51a805ba1c6cdfcd9e47fe1bb7f3ef42",
+  "base_database_schema_version": 58,
+  "source_set_hash": "sha256:7299cc3ebd3353bd642c6dc1a40300f100cdb2c15b872622f2ddd774070d15d9",
+  "change_set_hash": "sha256:849b4b52853d0edc5c32d77ec5c29e4f1fb284be1650d6d15858d9b259ec1d74",
   "counts": {
     "create": 5,
     "update": 0,
@@ -18,7 +18,7 @@
   },
   "sources": [
     {
-      "source_id": "source-decisions",
+      "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
       "path": ".gsd/DECISIONS.md",
       "kind": "markdown",
       "byte_size": 642,
@@ -29,7 +29,7 @@
       "outcome": "mapped"
     },
     {
-      "source_id": "source-requirements",
+      "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
       "path": ".gsd/REQUIREMENTS.md",
       "kind": "markdown",
       "byte_size": 1354,
@@ -42,184 +42,14 @@
   ],
   "changes": [
     {
-      "change_id": "change-decision-d001",
-      "action": "create",
-      "target": {
-        "kind": "decision",
-        "key": "D001"
-      },
-      "raw": {
-        "source_id": "source-decisions",
-        "locator": {
-          "start_byte": 174,
-          "end_byte": 260,
-          "line": 5
-        },
-        "value": "| D001 | M001 | storage | Choose persistence | SQLite | Local durable authority | No |",
-        "sha256": "sha256:b9d7fff1d64edfc7307dfe2efd0c1248053065a739b9908845411414b100cbab"
-      },
-      "normalized": {
-        "id": "D001",
-        "when_context": "M001",
-        "scope": "storage",
-        "decision": "Choose persistence",
-        "choice": "SQLite",
-        "rationale": "Local durable authority",
-        "revisable": "No",
-        "made_by": "agent",
-        "superseded_by": "D002"
-      },
-      "provenance": {
-        "source_id": "source-decisions",
-        "parser_id": "gsd-decisions-table",
-        "parser_version": "1"
-      },
-      "reason_code": "canonical-seven-column-decision"
-    },
-    {
-      "change_id": "change-decision-d002",
-      "action": "create",
-      "target": {
-        "kind": "decision",
-        "key": "D002"
-      },
-      "raw": {
-        "source_id": "source-decisions",
-        "locator": {
-          "start_byte": 261,
-          "end_byte": 370,
-          "line": 6
-        },
-        "value": "| D002 | M002 | storage | Refine persistence (amends D001) | WAL mode | Safe concurrent reads | Yes | human |",
-        "sha256": "sha256:faab1fc0a4a31deab449d8ff4d0e7f10bf277795b049dc73bcb9f575422761e7"
-      },
-      "normalized": {
-        "id": "D002",
-        "when_context": "M002",
-        "scope": "storage",
-        "decision": "Refine persistence (amends D001)",
-        "choice": "WAL mode",
-        "rationale": "Safe concurrent reads",
-        "revisable": "Yes",
-        "made_by": "human",
-        "superseded_by": null
-      },
-      "provenance": {
-        "source_id": "source-decisions",
-        "parser_id": "gsd-decisions-table",
-        "parser_version": "1"
-      },
-      "reason_code": "canonical-eight-column-decision"
-    },
-    {
-      "change_id": "change-decision-d003-preserve",
-      "action": "preserve",
-      "target": {
-        "kind": "legacy-decision-row",
-        "key": "D003"
-      },
-      "raw": {
-        "source_id": "source-decisions",
-        "locator": {
-          "start_byte": 371,
-          "end_byte": 479,
-          "line": 7
-        },
-        "value": "| D003 | M003 | storage | Refine durability (amends D002) | Full sync | Safer checkpoints | Yes | operator |",
-        "sha256": "sha256:08049013b2ed4d42abe6160d298ed1dddaf16f6654510db11cd38ff1aab40448"
-      },
-      "normalized": {
-        "id": "D003",
-        "when_context": "M003",
-        "scope": "storage",
-        "decision": "Refine durability (amends D002)",
-        "choice": "Full sync",
-        "rationale": "Safer checkpoints",
-        "revisable": "Yes",
-        "amends": "D002",
-        "unresolved_field": "made_by"
-      },
-      "provenance": {
-        "source_id": "source-decisions",
-        "parser_id": "gsd-decisions-table",
-        "parser_version": "1"
-      },
-      "reason_code": "invalid-made-by-preserved"
-    },
-    {
-      "change_id": "change-decision-freeform-preserve",
-      "action": "preserve",
-      "target": {
-        "kind": "legacy-decision-fragment",
-        "key": ".gsd/DECISIONS.md#freeform"
-      },
-      "raw": {
-        "source_id": "source-decisions",
-        "locator": {
-          "start_byte": 581,
-          "end_byte": 641,
-          "line": 10
-        },
-        "value": "Legacy note: keep the first migration rehearsal for context.",
-        "sha256": "sha256:106fa9d03aedbc754cc4cd2bee54217c3f0c9db88736c12fc902e4c471001e1b"
-      },
-      "normalized": {
-        "path": ".gsd/DECISIONS.md",
-        "fragment": "freeform",
-        "preservation": "verbatim"
-      },
-      "provenance": {
-        "source_id": "source-decisions",
-        "parser_id": "gsd-decisions-table",
-        "parser_version": "1"
-      },
-      "reason_code": "freeform-decision-content-preserved"
-    },
-    {
-      "change_id": "change-requirement-net-01",
+      "change_id": "sha256:32319832edf801a371675257403aa65c52e625a1cb8a238197a54e4c64eeb35a",
       "action": "create",
       "target": {
         "kind": "requirement",
-        "key": "NET-01"
+        "key": "/R030"
       },
       "raw": {
-        "source_id": "source-requirements",
-        "locator": {
-          "start_byte": 632,
-          "end_byte": 814,
-          "line": 27
-        },
-        "value": "### NET-01 — Network path verified\n- Status: validated\n- Description: The offline handoff path has executable proof.\n- Validated by: M002/S01\n- Proof: Focused handoff test passed.\n",
-        "sha256": "sha256:85c0222a8411e68dccd820f20871ceda2f09d8d68b1794103dcf9f7af3a5f78e"
-      },
-      "normalized": {
-        "id": "NET-01",
-        "class": "",
-        "status": "validated",
-        "description": "The offline handoff path has executable proof.",
-        "why": "",
-        "source": "",
-        "primary_owner": "",
-        "supporting_slices": "",
-        "validation": "M002/S01",
-        "notes": "Focused handoff test passed."
-      },
-      "provenance": {
-        "source_id": "source-requirements",
-        "parser_id": "gsd-requirements-sections",
-        "parser_version": "1"
-      },
-      "reason_code": "categorical-requirement-id"
-    },
-    {
-      "change_id": "change-requirement-r030",
-      "action": "create",
-      "target": {
-        "kind": "requirement",
-        "key": "R030"
-      },
-      "raw": {
-        "source_id": "source-requirements",
+        "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
         "locator": {
           "start_byte": 828,
           "end_byte": 1015,
@@ -241,21 +71,21 @@
         "notes": ""
       },
       "provenance": {
-        "source_id": "source-requirements",
+        "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
         "parser_id": "gsd-requirements-sections",
         "parser_version": "1"
       },
       "reason_code": "requirement-field-aliases-normalized"
     },
     {
-      "change_id": "change-requirement-r040",
+      "change_id": "sha256:48f27eed5c514b8b2c6d9872a148826835e963b70a5926fe429157c59016ec9f",
       "action": "create",
       "target": {
         "kind": "requirement",
-        "key": "R040"
+        "key": "/R040"
       },
       "raw": {
-        "source_id": "source-requirements",
+        "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
         "locator": {
           "start_byte": 1183,
           "end_byte": 1354,
@@ -277,32 +107,189 @@
         "notes": ""
       },
       "provenance": {
-        "source_id": "source-requirements",
+        "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
         "parser_id": "gsd-requirements-sections",
         "parser_version": "1"
       },
       "reason_code": "canonical-out-of-scope-requirement"
+    },
+    {
+      "change_id": "sha256:6f1c2028e2e869895d96652f29ed73c7b617c66bdba9242eca5be30a417b6351",
+      "action": "preserve",
+      "target": {
+        "kind": "legacy-decision-fragment",
+        "key": ".gsd/DECISIONS.md#freeform"
+      },
+      "raw": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "locator": {
+          "start_byte": 581,
+          "end_byte": 641,
+          "line": 10
+        },
+        "value": "Legacy note: keep the first migration rehearsal for context.",
+        "sha256": "sha256:106fa9d03aedbc754cc4cd2bee54217c3f0c9db88736c12fc902e4c471001e1b"
+      },
+      "normalized": {
+        "path": ".gsd/DECISIONS.md",
+        "fragment": "freeform",
+        "preservation": "verbatim"
+      },
+      "provenance": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "parser_id": "gsd-decisions-table",
+        "parser_version": "1"
+      },
+      "reason_code": "freeform-decision-content-preserved"
+    },
+    {
+      "change_id": "sha256:a0a59711c9f77f64ecc422fc92dae3c598e8cbe4dce4477b3fc9c0235d8f9605",
+      "action": "create",
+      "target": {
+        "kind": "requirement",
+        "key": "/NET-01"
+      },
+      "raw": {
+        "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
+        "locator": {
+          "start_byte": 632,
+          "end_byte": 814,
+          "line": 27
+        },
+        "value": "### NET-01 — Network path verified\n- Status: validated\n- Description: The offline handoff path has executable proof.\n- Validated by: M002/S01\n- Proof: Focused handoff test passed.\n",
+        "sha256": "sha256:85c0222a8411e68dccd820f20871ceda2f09d8d68b1794103dcf9f7af3a5f78e"
+      },
+      "normalized": {
+        "id": "NET-01",
+        "class": "",
+        "status": "validated",
+        "description": "The offline handoff path has executable proof.",
+        "why": "",
+        "source": "",
+        "primary_owner": "",
+        "supporting_slices": "",
+        "validation": "M002/S01",
+        "notes": "Focused handoff test passed."
+      },
+      "provenance": {
+        "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
+        "parser_id": "gsd-requirements-sections",
+        "parser_version": "1"
+      },
+      "reason_code": "categorical-requirement-id"
+    },
+    {
+      "change_id": "sha256:a6264693b546789917b36c6c64db1ebd7d617ac491c6f2f4bc78a6a552bcdde8",
+      "action": "create",
+      "target": {
+        "kind": "decision",
+        "key": "D001"
+      },
+      "raw": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "locator": {
+          "start_byte": 174,
+          "end_byte": 260,
+          "line": 5
+        },
+        "value": "| D001 | M001 | storage | Choose persistence | SQLite | Local durable authority | No |",
+        "sha256": "sha256:b9d7fff1d64edfc7307dfe2efd0c1248053065a739b9908845411414b100cbab"
+      },
+      "normalized": {
+        "id": "D001",
+        "when_context": "M001",
+        "scope": "storage",
+        "decision": "Choose persistence",
+        "choice": "SQLite",
+        "rationale": "Local durable authority",
+        "revisable": "No",
+        "made_by": "agent",
+        "superseded_by": "D002"
+      },
+      "provenance": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "parser_id": "gsd-decisions-table",
+        "parser_version": "1"
+      },
+      "reason_code": "canonical-seven-column-decision"
+    },
+    {
+      "change_id": "sha256:c35be277b72dcbc113802dae3b87ed9510ce989e4f6ee6fa7925da1278d13d95",
+      "action": "create",
+      "target": {
+        "kind": "decision",
+        "key": "D002"
+      },
+      "raw": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "locator": {
+          "start_byte": 261,
+          "end_byte": 370,
+          "line": 6
+        },
+        "value": "| D002 | M002 | storage | Refine persistence (amends D001) | WAL mode | Safe concurrent reads | Yes | human |",
+        "sha256": "sha256:faab1fc0a4a31deab449d8ff4d0e7f10bf277795b049dc73bcb9f575422761e7"
+      },
+      "normalized": {
+        "id": "D002",
+        "when_context": "M002",
+        "scope": "storage",
+        "decision": "Refine persistence (amends D001)",
+        "choice": "WAL mode",
+        "rationale": "Safe concurrent reads",
+        "revisable": "Yes",
+        "made_by": "human",
+        "superseded_by": null
+      },
+      "provenance": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "parser_id": "gsd-decisions-table",
+        "parser_version": "1"
+      },
+      "reason_code": "canonical-eight-column-decision"
+    },
+    {
+      "change_id": "sha256:d3cd64eb8f3a9198670de8eb4d5f70261935703d478daa457c1ceaa8114496d7",
+      "action": "preserve",
+      "target": {
+        "kind": "legacy-decision-row",
+        "key": "D003"
+      },
+      "raw": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "locator": {
+          "start_byte": 371,
+          "end_byte": 479,
+          "line": 7
+        },
+        "value": "| D003 | M003 | storage | Refine durability (amends D002) | Full sync | Safer checkpoints | Yes | operator |",
+        "sha256": "sha256:08049013b2ed4d42abe6160d298ed1dddaf16f6654510db11cd38ff1aab40448"
+      },
+      "normalized": {
+        "id": "D003",
+        "when_context": "M003",
+        "scope": "storage",
+        "decision": "Refine durability (amends D002)",
+        "choice": "Full sync",
+        "rationale": "Safer checkpoints",
+        "revisable": "Yes",
+        "amends": "D002",
+        "unresolved_field": "made_by"
+      },
+      "provenance": {
+        "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+        "parser_id": "gsd-decisions-table",
+        "parser_version": "1"
+      },
+      "reason_code": "invalid-made-by-preserved"
     }
   ],
   "diagnoses": [
     {
-      "diagnosis_id": "diagnosis-duplicate-requirement-id",
-      "code": "duplicate-requirement-id",
-      "severity": "blocker",
-      "source_id": "source-requirements",
-      "locator": {
-        "start_byte": 369,
-        "end_byte": 401,
-        "line": 16
-      },
-      "raw_value": "### R001 — Competing duplicate",
-      "message": "A duplicate requirement identifier has conflicting content and cannot be merged safely."
-    },
-    {
-      "diagnosis_id": "diagnosis-freeform-decision-content",
+      "diagnosis_id": "sha256:14a5c60b4b202e9d449c4f82f8de2d2f25f446b143c4f2de7243e558b5a781ed",
       "code": "freeform-decision-content",
       "severity": "warning",
-      "source_id": "source-decisions",
+      "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
       "locator": {
         "start_byte": 581,
         "end_byte": 641,
@@ -312,36 +299,10 @@
       "message": "Freeform decision prose is preserved verbatim because the table parser cannot model it."
     },
     {
-      "diagnosis_id": "diagnosis-invalid-decision-id",
-      "code": "invalid-decision-id",
-      "severity": "blocker",
-      "source_id": "source-decisions",
-      "locator": {
-        "start_byte": 482,
-        "end_byte": 490,
-        "line": 8
-      },
-      "raw_value": "D001junk",
-      "message": "A decision identifier that only begins with a canonical ID is invalid and must not be inferred."
-    },
-    {
-      "diagnosis_id": "diagnosis-invalid-made-by",
-      "code": "invalid-made-by",
-      "severity": "warning",
-      "source_id": "source-decisions",
-      "locator": {
-        "start_byte": 469,
-        "end_byte": 477,
-        "line": 7
-      },
-      "raw_value": "operator",
-      "message": "An unsupported decision author value is explicitly coerced to the legacy agent default."
-    },
-    {
-      "diagnosis_id": "diagnosis-invalid-requirement-id",
+      "diagnosis_id": "sha256:22dac572eac3950067d69f9114178b44df9d60f41d5e6b961c585a8818a75ff3",
       "code": "invalid-requirement-id",
       "severity": "blocker",
-      "source_id": "source-requirements",
+      "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
       "locator": {
         "start_byte": 499,
         "end_byte": 503,
@@ -351,10 +312,23 @@
       "message": "A malformed requirement identifier cannot be normalized without user intent."
     },
     {
-      "diagnosis_id": "diagnosis-requirement-status-conflict",
+      "diagnosis_id": "sha256:728cfa5993e6a430850842eb30076130e7186a3993c240061bd978b80bb2cfb8",
+      "code": "duplicate-requirement-id",
+      "severity": "blocker",
+      "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
+      "locator": {
+        "start_byte": 369,
+        "end_byte": 401,
+        "line": 16
+      },
+      "raw_value": "### R001 — Competing duplicate",
+      "message": "A duplicate requirement identifier has conflicting content and cannot be merged safely."
+    },
+    {
+      "diagnosis_id": "sha256:b6148434b8160d6781b6ce6fdf8445ae7f235b44419a189685e32917d7fd759c",
       "code": "requirement-status-conflict",
       "severity": "blocker",
-      "source_id": "source-requirements",
+      "source_id": "sha256:be4e306d9193d598f709cda73058ced59a95109ed961dc5b9f0afa8ba81823d8",
       "locator": {
         "start_byte": 1067,
         "end_byte": 1073,
@@ -362,15 +336,37 @@
       },
       "raw_value": "active",
       "message": "The requirement section and status bullet disagree, so no canonical status is inferred."
+    },
+    {
+      "diagnosis_id": "sha256:be2e058e8059b29d6b8fae270e43a487286c509aaf825b78e158d8d4fa374e2f",
+      "code": "invalid-made-by",
+      "severity": "warning",
+      "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+      "locator": {
+        "start_byte": 469,
+        "end_byte": 477,
+        "line": 7
+      },
+      "raw_value": "operator",
+      "message": "An unsupported decision author value is explicitly coerced to the legacy agent default."
+    },
+    {
+      "diagnosis_id": "sha256:ced79b56907aafa664194e621886bc03892b2d1ac64dc651ae76da7171a9d55e",
+      "code": "invalid-decision-id",
+      "severity": "blocker",
+      "source_id": "sha256:f48bdaea0cf8186d40d5173b43f79dbe3bdf3cb6913dd8a54958744cee66f397",
+      "locator": {
+        "start_byte": 482,
+        "end_byte": 490,
+        "line": 8
+      },
+      "raw_value": "D001junk",
+      "message": "A decision identifier that only begins with a canonical ID is invalid and must not be inferred."
     }
   ],
   "resolutions": [
     {
-      "diagnosis_id": "diagnosis-duplicate-requirement-id",
-      "disposition": "requires-user"
-    },
-    {
-      "diagnosis_id": "diagnosis-freeform-decision-content",
+      "diagnosis_id": "sha256:14a5c60b4b202e9d449c4f82f8de2d2f25f446b143c4f2de7243e558b5a781ed",
       "disposition": "preserved",
       "target": {
         "kind": "legacy-decision-fragment",
@@ -378,19 +374,23 @@
       }
     },
     {
-      "diagnosis_id": "diagnosis-invalid-decision-id",
+      "diagnosis_id": "sha256:22dac572eac3950067d69f9114178b44df9d60f41d5e6b961c585a8818a75ff3",
       "disposition": "requires-user"
     },
     {
-      "diagnosis_id": "diagnosis-invalid-made-by",
+      "diagnosis_id": "sha256:728cfa5993e6a430850842eb30076130e7186a3993c240061bd978b80bb2cfb8",
       "disposition": "requires-user"
     },
     {
-      "diagnosis_id": "diagnosis-invalid-requirement-id",
+      "diagnosis_id": "sha256:b6148434b8160d6781b6ce6fdf8445ae7f235b44419a189685e32917d7fd759c",
       "disposition": "requires-user"
     },
     {
-      "diagnosis_id": "diagnosis-requirement-status-conflict",
+      "diagnosis_id": "sha256:be2e058e8059b29d6b8fae270e43a487286c509aaf825b78e158d8d4fa374e2f",
+      "disposition": "requires-user"
+    },
+    {
+      "diagnosis_id": "sha256:ced79b56907aafa664194e621886bc03892b2d1ac64dc651ae76da7171a9d55e",
       "disposition": "requires-user"
     }
   ]

@@ -1,13 +1,13 @@
 {
   "preview_schema_version": 1,
-  "preview_id": "planning-milestone-dirs",
-  "import_kind": "legacy-corpus",
-  "importer_version": "v1-test",
+  "preview_id": "sha256:e39e4ae3ed978c1e99d411a1a5f311ff3b2fd0828f3b4581f4d30c2c2bdf4e6d",
+  "import_kind": "legacy-markdown",
+  "importer_version": "1",
   "base_project_revision": 0,
   "base_authority_epoch": 0,
-  "base_database_schema_version": 56,
-  "source_set_hash": "sha256:ef37d0f33ca819b6a2b54b3bc84ea2387bb149c33414d238a797eb09eed04a9a",
-  "change_set_hash": "sha256:d2c85dfeedb2eda8459c1d27ca6c6bbdd38cdf3f1b13c15021834874462eb391",
+  "base_database_schema_version": 58,
+  "source_set_hash": "sha256:31472537734743ddba21cd86372e3fbad766c2f4854f4a9dc69d2a31a6903b21",
+  "change_set_hash": "sha256:6fc819701bd6e8135981dca0ca83838540fa75e29b376b8e5140526fb9a9e7e7",
   "counts": {
     "create": 4,
     "update": 0,
@@ -18,7 +18,7 @@
   },
   "sources": [
     {
-      "source_id": "source-milestone-requirements",
+      "source_id": "sha256:cd002730c5f28920e0972cd0a3c47eed5b8d3571036317c0beacda5df5453e32",
       "path": ".planning/milestones/v1.0-REQUIREMENTS.md",
       "kind": "markdown",
       "byte_size": 82,
@@ -29,7 +29,7 @@
       "outcome": "mapped"
     },
     {
-      "source_id": "source-milestone-roadmap",
+      "source_id": "sha256:dfb3b7b5afc1ed745712ba93af3e23ef3eb0071e493b3bc203fbd02854106b55",
       "path": ".planning/milestones/v1.0-ROADMAP.md",
       "kind": "markdown",
       "byte_size": 51,
@@ -40,7 +40,7 @@
       "outcome": "mapped"
     },
     {
-      "source_id": "source-milestone-summary",
+      "source_id": "sha256:c2dec68754473a8ecca61dcc465e0a0af0435e6746fcf9b0b582b6a9be0e2aaf",
       "path": ".planning/milestones/v1.0-SUMMARY.md",
       "kind": "markdown",
       "byte_size": 111,
@@ -51,7 +51,7 @@
       "outcome": "preserved"
     },
     {
-      "source_id": "source-duplicate-phase-plan",
+      "source_id": "sha256:ecb3a7d89fd4973ea035d534032dacbf8ccecda8f320cee0bc6b7e60d09b37bd",
       "path": ".planning/milestones/v1.0-phases/01-foundation-duplicate/01-PLAN.md",
       "kind": "markdown",
       "byte_size": 150,
@@ -62,7 +62,7 @@
       "outcome": "unparsed"
     },
     {
-      "source_id": "source-primary-phase-plan",
+      "source_id": "sha256:257d64477ff1ff9dee36665a5ffdc010fd078f6c3b4e61030752ab3e64dc3817",
       "path": ".planning/milestones/v1.0-phases/01-foundation/01-PLAN.md",
       "kind": "markdown",
       "byte_size": 186,
@@ -73,7 +73,7 @@
       "outcome": "mapped"
     },
     {
-      "source_id": "source-primary-phase-summary",
+      "source_id": "sha256:a28d261da30454aa8950b78b6b56c9665d31e310b667fb35c41a25de423f4770",
       "path": ".planning/milestones/v1.0-phases/01-foundation/01-SUMMARY.md",
       "kind": "markdown",
       "byte_size": 101,
@@ -84,7 +84,7 @@
       "outcome": "preserved"
     },
     {
-      "source_id": "source-primary-phase-notes",
+      "source_id": "sha256:f428f8e5c49d65f30ae209f6849923b3937283ac2323ab329e7ad77e11367ee5",
       "path": ".planning/milestones/v1.0-phases/01-foundation/NOTES.md",
       "kind": "markdown",
       "byte_size": 82,
@@ -97,101 +97,14 @@
   ],
   "changes": [
     {
-      "change_id": "change-milestone-m001",
-      "action": "create",
-      "target": {
-        "kind": "milestone",
-        "key": "M001"
-      },
-      "raw": {
-        "source_id": "source-milestone-roadmap",
-        "locator": {
-          "start_byte": 0,
-          "end_byte": 14,
-          "line": 1
-        },
-        "value": "# v1.0 Roadmap",
-        "sha256": "sha256:850d8423ad4cfa49e1ff180a26fd749bfef1b218a5ed21102f6252d5aff7ba4a"
-      },
-      "normalized": {
-        "id": "M001",
-        "title": "Foundation Migration",
-        "legacy_provenance": {
-          "milestone_id": "v1.0"
-        }
-      },
-      "provenance": {
-        "source_id": "source-milestone-roadmap",
-        "parser_id": "planning-milestone-directory-parser",
-        "parser_version": "1"
-      },
-      "reason_code": "milestone-directory-roadmap"
-    },
-    {
-      "change_id": "change-preserve-duplicate-phase-plan",
-      "action": "preserve",
-      "target": {
-        "kind": "legacy-artifact",
-        "key": ".planning/milestones/v1.0-phases/01-foundation-duplicate/01-PLAN.md"
-      },
-      "raw": {
-        "source_id": "source-duplicate-phase-plan",
-        "locator": {
-          "start_byte": 0,
-          "end_byte": 150,
-          "line": 1
-        },
-        "value": "---\nphase: \"01-foundation-duplicate\"\nplan: \"01\"\n---\n\n# 01-01: Alternate Foundation\n\n<objective>\nUse the alternate foundation membership.\n</objective>\n",
-        "sha256": "sha256:2d94044da588f263e966e0f165e405ef2c5d29e5c37697c9d5b1b61e50275130"
-      },
-      "normalized": {
-        "disposition": "preserved",
-        "reason": "duplicate-phase-membership"
-      },
-      "provenance": {
-        "source_id": "source-duplicate-phase-plan",
-        "parser_id": "planning-milestone-directory-parser",
-        "parser_version": "1"
-      },
-      "reason_code": "duplicate-phase-preserve"
-    },
-    {
-      "change_id": "change-preserve-milestone-summary",
-      "action": "preserve",
-      "target": {
-        "kind": "legacy-artifact",
-        "key": ".planning/milestones/v1.0-SUMMARY.md"
-      },
-      "raw": {
-        "source_id": "source-milestone-summary",
-        "locator": {
-          "start_byte": 0,
-          "end_byte": 111,
-          "line": 1
-        },
-        "value": "# v1.0 Summary\n\nThe milestone narrative is retained verbatim because the legacy transformer does not model it.\n",
-        "sha256": "sha256:1e291e908f53d88f0f2465b6f70a916c3ca70993340eae778907268c5bfd42bb"
-      },
-      "normalized": {
-        "disposition": "preserved",
-        "reason": "milestone-summary-not-modeled"
-      },
-      "provenance": {
-        "source_id": "source-milestone-summary",
-        "parser_id": "planning-supplemental-classifier",
-        "parser_version": "1"
-      },
-      "reason_code": "milestone-summary-preserve"
-    },
-    {
-      "change_id": "change-preserve-phase-notes",
+      "change_id": "sha256:25d47d51d25831b43de3631a5a6c62c1cc493b86a66e60880a9a6ec1cd6a07b9",
       "action": "preserve",
       "target": {
         "kind": "legacy-artifact",
         "key": ".planning/milestones/v1.0-phases/01-foundation/NOTES.md"
       },
       "raw": {
-        "source_id": "source-primary-phase-notes",
+        "source_id": "sha256:f428f8e5c49d65f30ae209f6849923b3937283ac2323ab329e7ad77e11367ee5",
         "locator": {
           "start_byte": 0,
           "end_byte": 82,
@@ -205,114 +118,21 @@
         "reason": "phase-extra-not-modeled"
       },
       "provenance": {
-        "source_id": "source-primary-phase-notes",
+        "source_id": "sha256:f428f8e5c49d65f30ae209f6849923b3937283ac2323ab329e7ad77e11367ee5",
         "parser_id": "planning-supplemental-classifier",
         "parser_version": "1"
       },
       "reason_code": "phase-extra-preserve"
     },
     {
-      "change_id": "change-preserve-phase-summary",
-      "action": "preserve",
-      "target": {
-        "kind": "legacy-artifact",
-        "key": ".planning/milestones/v1.0-phases/01-foundation/01-SUMMARY.md"
-      },
-      "raw": {
-        "source_id": "source-primary-phase-summary",
-        "locator": {
-          "start_byte": 0,
-          "end_byte": 101,
-          "line": 1
-        },
-        "value": "---\nphase: \"01-foundation\"\nplan: \"01\"\n---\n\n# 01-01: Foundation Summary\n\nImplemented the stable core.\n",
-        "sha256": "sha256:e1d7f194f13776df9d23d64aede05c2c9fd645954d282d0c31849b97161597e8"
-      },
-      "normalized": {
-        "disposition": "preserved",
-        "reason": "phase-summary-not-modeled"
-      },
-      "provenance": {
-        "source_id": "source-primary-phase-summary",
-        "parser_id": "planning-supplemental-classifier",
-        "parser_version": "1"
-      },
-      "reason_code": "phase-summary-preserve"
-    },
-    {
-      "change_id": "change-requirement-core-01",
-      "action": "create",
-      "target": {
-        "kind": "requirement",
-        "key": "CORE-01"
-      },
-      "raw": {
-        "source_id": "source-milestone-requirements",
-        "locator": {
-          "start_byte": 35,
-          "end_byte": 81,
-          "line": 5
-        },
-        "value": "- ✅ CORE-01: Foundation behavior is verified",
-        "sha256": "sha256:e8fd06d5b5860ef536f43cc6586ec1cadcae70a82713f7f41bc3e10836ce52b1"
-      },
-      "normalized": {
-        "id": "CORE-01",
-        "status": "validated",
-        "text": "Foundation behavior is verified"
-      },
-      "provenance": {
-        "source_id": "source-milestone-requirements",
-        "parser_id": "planning-milestone-directory-parser",
-        "parser_version": "1"
-      },
-      "reason_code": "milestone-requirement-row"
-    },
-    {
-      "change_id": "change-slice-m001-s01",
-      "action": "create",
-      "target": {
-        "kind": "slice",
-        "key": "M001/S01"
-      },
-      "raw": {
-        "source_id": "source-milestone-roadmap",
-        "locator": {
-          "start_byte": 27,
-          "end_byte": 50,
-          "line": 5
-        },
-        "value": "- [x] 01 — Foundation",
-        "sha256": "sha256:dfaa820de73dd374f5f3293850d7a923e9c9593cb66c94ab8efa335d4fa58437"
-      },
-      "normalized": {
-        "id": "S01",
-        "milestone_id": "M001",
-        "title": "Foundation",
-        "status": "complete",
-        "sequence": 1,
-        "legacy_provenance": {
-          "milestone_id": "v1.0",
-          "phase_number": "01",
-          "phase_slug": "foundation"
-        }
-      },
-      "provenance": {
-        "source_id": "source-milestone-roadmap",
-        "parser_id": "planning-milestone-directory-parser",
-        "parser_version": "1"
-      },
-      "reason_code": "milestone-directory-phase"
-    },
-    {
-      "change_id": "change-task-m001-s01-t01",
+      "change_id": "sha256:2b7c4474fa99b68fc84734a8b308c08e1a5b0295db5a1866844fe68701d020f7",
       "action": "create",
       "target": {
         "kind": "task",
         "key": "M001/S01/T01"
       },
       "raw": {
-        "source_id": "source-primary-phase-plan",
+        "source_id": "sha256:257d64477ff1ff9dee36665a5ffdc010fd078f6c3b4e61030752ab3e64dc3817",
         "locator": {
           "start_byte": 82,
           "end_byte": 117,
@@ -335,19 +155,199 @@
         }
       },
       "provenance": {
-        "source_id": "source-primary-phase-plan",
+        "source_id": "sha256:257d64477ff1ff9dee36665a5ffdc010fd078f6c3b4e61030752ab3e64dc3817",
         "parser_id": "planning-milestone-directory-parser",
         "parser_version": "1"
       },
       "reason_code": "milestone-directory-plan"
+    },
+    {
+      "change_id": "sha256:849aea3675b8ce015ed3c9212ac22e572bd8af0693f20c0127f4097e6bef5ba7",
+      "action": "create",
+      "target": {
+        "kind": "slice",
+        "key": "M001/S01"
+      },
+      "raw": {
+        "source_id": "sha256:dfb3b7b5afc1ed745712ba93af3e23ef3eb0071e493b3bc203fbd02854106b55",
+        "locator": {
+          "start_byte": 27,
+          "end_byte": 50,
+          "line": 5
+        },
+        "value": "- [x] 01 — Foundation",
+        "sha256": "sha256:dfaa820de73dd374f5f3293850d7a923e9c9593cb66c94ab8efa335d4fa58437"
+      },
+      "normalized": {
+        "id": "S01",
+        "milestone_id": "M001",
+        "title": "Foundation",
+        "status": "complete",
+        "sequence": 1,
+        "legacy_provenance": {
+          "milestone_id": "v1.0",
+          "phase_number": "01",
+          "phase_slug": "foundation"
+        }
+      },
+      "provenance": {
+        "source_id": "sha256:dfb3b7b5afc1ed745712ba93af3e23ef3eb0071e493b3bc203fbd02854106b55",
+        "parser_id": "planning-milestone-directory-parser",
+        "parser_version": "1"
+      },
+      "reason_code": "milestone-directory-phase"
+    },
+    {
+      "change_id": "sha256:87fe1d096d690dc822111fcf7fcc60a500bbb88c8b986c48d3f22465abb38040",
+      "action": "create",
+      "target": {
+        "kind": "requirement",
+        "key": "M001/CORE-01"
+      },
+      "raw": {
+        "source_id": "sha256:cd002730c5f28920e0972cd0a3c47eed5b8d3571036317c0beacda5df5453e32",
+        "locator": {
+          "start_byte": 35,
+          "end_byte": 81,
+          "line": 5
+        },
+        "value": "- ✅ CORE-01: Foundation behavior is verified",
+        "sha256": "sha256:e8fd06d5b5860ef536f43cc6586ec1cadcae70a82713f7f41bc3e10836ce52b1"
+      },
+      "normalized": {
+        "id": "CORE-01",
+        "status": "validated",
+        "text": "Foundation behavior is verified"
+      },
+      "provenance": {
+        "source_id": "sha256:cd002730c5f28920e0972cd0a3c47eed5b8d3571036317c0beacda5df5453e32",
+        "parser_id": "planning-milestone-directory-parser",
+        "parser_version": "1"
+      },
+      "reason_code": "milestone-requirement-row"
+    },
+    {
+      "change_id": "sha256:945c9bcf4bb8fc8e1f5427edb2d9ede5a190f6b37f197e8e338707156463621d",
+      "action": "create",
+      "target": {
+        "kind": "milestone",
+        "key": "M001"
+      },
+      "raw": {
+        "source_id": "sha256:dfb3b7b5afc1ed745712ba93af3e23ef3eb0071e493b3bc203fbd02854106b55",
+        "locator": {
+          "start_byte": 0,
+          "end_byte": 14,
+          "line": 1
+        },
+        "value": "# v1.0 Roadmap",
+        "sha256": "sha256:850d8423ad4cfa49e1ff180a26fd749bfef1b218a5ed21102f6252d5aff7ba4a"
+      },
+      "normalized": {
+        "id": "M001",
+        "title": "Foundation Migration",
+        "legacy_provenance": {
+          "milestone_id": "v1.0"
+        }
+      },
+      "provenance": {
+        "source_id": "sha256:dfb3b7b5afc1ed745712ba93af3e23ef3eb0071e493b3bc203fbd02854106b55",
+        "parser_id": "planning-milestone-directory-parser",
+        "parser_version": "1"
+      },
+      "reason_code": "milestone-directory-roadmap"
+    },
+    {
+      "change_id": "sha256:ad7669853c6cb5aaa230b31f059ec9bc8876f22add62da0cd24b56c145867701",
+      "action": "preserve",
+      "target": {
+        "kind": "legacy-artifact",
+        "key": ".planning/milestones/v1.0-phases/01-foundation-duplicate/01-PLAN.md"
+      },
+      "raw": {
+        "source_id": "sha256:ecb3a7d89fd4973ea035d534032dacbf8ccecda8f320cee0bc6b7e60d09b37bd",
+        "locator": {
+          "start_byte": 0,
+          "end_byte": 150,
+          "line": 1
+        },
+        "value": "---\nphase: \"01-foundation-duplicate\"\nplan: \"01\"\n---\n\n# 01-01: Alternate Foundation\n\n<objective>\nUse the alternate foundation membership.\n</objective>\n",
+        "sha256": "sha256:2d94044da588f263e966e0f165e405ef2c5d29e5c37697c9d5b1b61e50275130"
+      },
+      "normalized": {
+        "disposition": "preserved",
+        "reason": "duplicate-phase-membership"
+      },
+      "provenance": {
+        "source_id": "sha256:ecb3a7d89fd4973ea035d534032dacbf8ccecda8f320cee0bc6b7e60d09b37bd",
+        "parser_id": "planning-milestone-directory-parser",
+        "parser_version": "1"
+      },
+      "reason_code": "duplicate-phase-preserve"
+    },
+    {
+      "change_id": "sha256:afbedeab0cc85be8d10042460e7382f1e68068b428df4cd245b496b630687df5",
+      "action": "preserve",
+      "target": {
+        "kind": "legacy-artifact",
+        "key": ".planning/milestones/v1.0-SUMMARY.md"
+      },
+      "raw": {
+        "source_id": "sha256:c2dec68754473a8ecca61dcc465e0a0af0435e6746fcf9b0b582b6a9be0e2aaf",
+        "locator": {
+          "start_byte": 0,
+          "end_byte": 111,
+          "line": 1
+        },
+        "value": "# v1.0 Summary\n\nThe milestone narrative is retained verbatim because the legacy transformer does not model it.\n",
+        "sha256": "sha256:1e291e908f53d88f0f2465b6f70a916c3ca70993340eae778907268c5bfd42bb"
+      },
+      "normalized": {
+        "disposition": "preserved",
+        "reason": "milestone-summary-not-modeled"
+      },
+      "provenance": {
+        "source_id": "sha256:c2dec68754473a8ecca61dcc465e0a0af0435e6746fcf9b0b582b6a9be0e2aaf",
+        "parser_id": "planning-supplemental-classifier",
+        "parser_version": "1"
+      },
+      "reason_code": "milestone-summary-preserve"
+    },
+    {
+      "change_id": "sha256:ff79c973ff053474eae129b6fef756dd31ddb8fd28efc46fad474f496f84cbc8",
+      "action": "preserve",
+      "target": {
+        "kind": "legacy-artifact",
+        "key": ".planning/milestones/v1.0-phases/01-foundation/01-SUMMARY.md"
+      },
+      "raw": {
+        "source_id": "sha256:a28d261da30454aa8950b78b6b56c9665d31e310b667fb35c41a25de423f4770",
+        "locator": {
+          "start_byte": 0,
+          "end_byte": 101,
+          "line": 1
+        },
+        "value": "---\nphase: \"01-foundation\"\nplan: \"01\"\n---\n\n# 01-01: Foundation Summary\n\nImplemented the stable core.\n",
+        "sha256": "sha256:e1d7f194f13776df9d23d64aede05c2c9fd645954d282d0c31849b97161597e8"
+      },
+      "normalized": {
+        "disposition": "preserved",
+        "reason": "phase-summary-not-modeled"
+      },
+      "provenance": {
+        "source_id": "sha256:a28d261da30454aa8950b78b6b56c9665d31e310b667fb35c41a25de423f4770",
+        "parser_id": "planning-supplemental-classifier",
+        "parser_version": "1"
+      },
+      "reason_code": "phase-summary-preserve"
     }
   ],
   "diagnoses": [
     {
-      "diagnosis_id": "diagnosis-duplicate-phase-number",
+      "diagnosis_id": "sha256:b06983201e9a5be7dc20dca39c2ae87d665e4fbc03a359c7540d549aafa0d03b",
       "code": "duplicate-phase-number",
       "severity": "blocker",
-      "source_id": "source-duplicate-phase-plan",
+      "source_id": "sha256:ecb3a7d89fd4973ea035d534032dacbf8ccecda8f320cee0bc6b7e60d09b37bd",
       "locator": {
         "start_byte": 4,
         "end_byte": 36,
@@ -359,7 +359,7 @@
   ],
   "resolutions": [
     {
-      "diagnosis_id": "diagnosis-duplicate-phase-number",
+      "diagnosis_id": "sha256:b06983201e9a5be7dc20dca39c2ae87d665e4fbc03a359c7540d549aafa0d03b",
       "disposition": "requires-user"
     }
   ]

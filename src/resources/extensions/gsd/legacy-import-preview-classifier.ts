@@ -130,11 +130,11 @@ function rowAddress(rowSet: LegacyImportBaseRowSet, rowIdentity: string): string
 function memberKey(rowSet: LegacyImportBaseRowSet, value: Readonly<JsonRecord>): string {
   switch (rowSet) {
     case "milestones":
-    case "requirements":
     case "decisions": return String(value.id);
     case "slices": return `${String(value.milestone_id)}/${String(value.id)}`;
     case "tasks": return `${String(value.milestone_id)}/${String(value.slice_id)}/${String(value.id)}`;
     case "artifacts": return String(value.path);
+    case "requirements":
     case "assessments": return completeMemberKey(rowSet, value);
     default:
       fail(
@@ -177,9 +177,17 @@ function completeMemberKey(
 ): string {
   switch (rowSet) {
     case "milestones":
-    case "requirements":
     case "decisions":
       return requiredStringIdentity(rowSet, value, "id");
+    case "requirements": {
+      // Milestone-scoped composite identity (RD-01/D-01): a requirement id is no
+      // longer globally unique, so complete-set membership must key on
+      // (milestone_id, id) too -- mirroring the empty-segment convention used by
+      // the requirement target adapter (legacy-import-preview-classifier-targets.ts)
+      // for legacy rows carrying no milestone context.
+      const milestoneId = optionalStringIdentity(rowSet, value, "milestone_id");
+      return `${milestoneId ?? ""}/${requiredStringIdentity(rowSet, value, "id")}`;
+    }
     case "slices":
       return [
         requiredStringIdentity(rowSet, value, "milestone_id"),

@@ -406,6 +406,7 @@ function completeStateManifestV1() {
     exported_at: "2026-07-16T12:00:00.000Z",
     requirements: [{
       id: "R001",
+      milestone_id: "M001",
       class: "functional",
       status: "active",
       description: "Retain one database authority.",
@@ -985,7 +986,7 @@ describe("legacy .gsd captured-byte interpretation", () => {
       { property: "milestones", kind: "milestone", key: "M001", normalized: milestone },
       { property: "slices", kind: "slice", key: "M001/S01", normalized: slice },
       { property: "tasks", kind: "task", key: "M001/S01/T01", normalized: task },
-      { property: "requirements", kind: "requirement", key: "R001", normalized: requirement },
+      { property: "requirements", kind: "requirement", key: "M001/R001", normalized: requirement },
       {
         property: "artifacts",
         kind: "artifact",
@@ -1036,7 +1037,7 @@ describe("legacy .gsd captured-byte interpretation", () => {
       { property: "milestones", rowSet: "milestones", kind: "milestone", members: ["M001"] },
       { property: "slices", rowSet: "slices", kind: "slice", members: ["M001/S01"] },
       { property: "tasks", rowSet: "tasks", kind: "task", members: ["M001/S01/T01"] },
-      { property: "requirements", rowSet: "requirements", kind: "requirement", members: ["R001"] },
+      { property: "requirements", rowSet: "requirements", kind: "requirement", members: ["M001/R001"] },
       {
         property: "artifacts",
         rowSet: "artifacts",
@@ -1128,7 +1129,7 @@ describe("legacy .gsd captured-byte interpretation", () => {
         ["create", "assessment", "M001/S01/T01/run-uat"],
         ["create", "decision", "D001"],
         ["create", "milestone", "M001"],
-        ["create", "requirement", "R001"],
+        ["create", "requirement", "M001/R001"],
         ["create", "slice", "M001/S01"],
         ["create", "task", "M001/S01/T01"],
       ].sort(),
@@ -1243,7 +1244,7 @@ describe("legacy .gsd captured-byte interpretation", () => {
     }
 
     const result = classifyLegacyImportChanges(classificationBase([
-      classificationBaseRow("requirements", { id: requirement.id }, requirement),
+      classificationBaseRow("requirements", { id: requirement.id, milestone_id: requirement.milestone_id }, requirement),
       classificationBaseRow("artifacts", { path: artifact.path }, artifact),
       classificationBaseRow("assessments", {
         milestone_id: assessment.milestone_id,
@@ -1259,7 +1260,7 @@ describe("legacy .gsd captured-byte interpretation", () => {
       [
         ["artifact", artifact.path, []],
         ["assessment", "M001/S01/T01/run-uat", []],
-        ["requirement", requirement.id, []],
+        ["requirement", `${requirement.milestone_id}/${requirement.id}`, []],
       ].sort(),
     );
   });
@@ -1274,9 +1275,9 @@ describe("legacy .gsd captured-byte interpretation", () => {
     const complete = interpretation.complete_row_sets.find((candidate) => candidate.row_set === "requirements");
 
     assert.equal(source?.outcome, "mapped");
-    assert.deepEqual(complete?.member_keys, ["NET-01"]);
+    assert.deepEqual(complete?.member_keys, ["M001/NET-01"]);
     assert.ok(interpretation.candidates.some((candidate) => (
-      candidate.target.kind === "requirement" && candidate.target.key === "NET-01"
+      candidate.target.kind === "requirement" && candidate.target.key === "M001/NET-01"
     )));
   });
 

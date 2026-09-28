@@ -212,6 +212,11 @@ function manifestTaskKey(record: ManifestRecord): string {
   return `${String(record.value.milestone_id)}/${String(record.value.slice_id)}/${String(record.value.id)}`;
 }
 
+function manifestRequirementKey(record: ManifestRecord): string {
+  const milestoneId = record.value.milestone_id;
+  return `${milestoneId === null || milestoneId === undefined ? "" : String(milestoneId)}/${String(record.value.id)}`;
+}
+
 function manifestAssessmentKey(record: ManifestRecord): string {
   return [record.value.milestone_id, record.value.slice_id, record.value.task_id, record.value.scope]
     .filter((part) => part !== null)
@@ -299,6 +304,7 @@ const TASK_SCHEMA = {
 
 const REQUIREMENT_SCHEMA = {
   id: nonblankString,
+  milestone_id: nullableString,
   class: stringValue,
   status: stringValue,
   description: stringValue,
@@ -909,7 +915,7 @@ function interpretVersionedManifestRows(
   if (versioned.requirements !== undefined) {
     addCompleteManifestCollection(
       state, candidates, completeRowSets, "requirements", "requirements", "requirement", versioned.requirements,
-      (record) => record.value.id as string,
+      manifestRequirementKey,
       (record) => withoutTemporalFields(record.value) as JsonRecord,
     );
   }
