@@ -7,9 +7,13 @@ import { randomUUID } from "node:crypto";
 
 import { autoSession } from "../auto-runtime-state.ts";
 import { registerHooks } from "../bootstrap/register-hooks.ts";
-import { signalTurnEnd, type TurnCompletionSignalDeps } from "../bootstrap/turn-completion-signal.ts";
+import {
+  signalTurnEnd,
+  _resetTurnCompletionScopeCounter,
+  type TurnCompletionSignalDeps,
+} from "../bootstrap/turn-completion-signal.ts";
 import { setHookEmitter, clearHookEmitter } from "../hook-emitter.ts";
-import { initNotificationStore, readNotifications, _resetNotificationStore } from "../notification-store.ts";
+import { initNotificationStore, readNotifications, appendNotification, _resetNotificationStore } from "../notification-store.ts";
 import { recordTurnToolOutcome, resetTurnToolOutcome } from "../auto-tool-tracking.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
@@ -128,6 +132,7 @@ function makeDepsDouble(): TurnCompletionSignalDeps & {
 // ─── Deps-double payload-shape assertions ───────────────────────────────────
 
 test("signalTurnEnd (interactive, clean end): bell + turn-complete store entry + one StopEvent(completed)", async () => {
+  _resetTurnCompletionScopeCounter();
   const deps = makeDepsDouble();
   const ctx: any = { hasPendingMessages: () => false };
   await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
@@ -192,17 +197,142 @@ test("signalTurnEnd (pending tool call in last message): no interactive signal, 
   assert.equal(deps.stopCalls.length, 1);
 });
 
+// ─── SIGNAL-05: per-turn identity contract (deps double, unit level) ────────
+
+test("signalTurnEnd: first fired signal after a reset carries scope turn/1", async () => {
+  _resetTurnCompletionScopeCounter();
+  const deps = makeDepsDouble();
+  const ctx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
+
+  assert.equal(deps.notifyCalls.length, 1);
+  assert.equal(deps.notifyCalls[0].meta.scope, "turn/1");
+});
+
+test("signalTurnEnd: three consecutive fired signals carry turn/1, turn/2, turn/3 in strict order", async () => {
+  _resetTurnCompletionScopeCounter();
+  const scopes: Array<string | undefined> = [];
+  for (let i = 0; i < 3; i++) {
+    const deps = makeDepsDouble();
+    const ctx: any = { hasPendingMessages: () => false };
+    await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
+    scopes.push(deps.notifyCalls[0]?.meta.scope);
+  }
+  assert.deepEqual(scopes, ["turn/1", "turn/2", "turn/3"]);
+});
+
+test("signalTurnEnd: every recorded scope matches the shape turn/<digits> only — never carries session-derived content", async () => {
+  _resetTurnCompletionScopeCounter();
+  const deps = makeDepsDouble();
+  const ctx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
+
+  const scope = deps.notifyCalls[0]?.meta.scope;
+  assert.match(
+    scope ?? "",
+    /^turn\/\d+$/,
+    `scope ${JSON.stringify(scope)} must match "turn/<digits>" only — anything else means something session-derived (a path, prompt text, branch name) leaked into a value persisted verbatim to .gsd/notifications.jsonl`,
+  );
+});
+
+test("signalTurnEnd: an auto-active call records zero notifications and consumes no counter value", async () => {
+  _resetTurnCompletionScopeCounter();
+  const gatedDeps = makeDepsDouble();
+  (gatedDeps as any).autoActiveFlag = true;
+  const ctx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, gatedDeps);
+  assert.equal(gatedDeps.notifyCalls.length, 0, "auto-active call must record zero notifications");
+
+  const nextDeps = makeDepsDouble();
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, nextDeps);
+  assert.equal(
+    nextDeps.notifyCalls[0]?.meta.scope,
+    "turn/1",
+    "the gated auto-active call must not have consumed a counter value — the next interactive call is still turn/1",
+  );
+});
+
+test("signalTurnEnd: a willRetry:true call records zero notifications and consumes no counter value", async () => {
+  _resetTurnCompletionScopeCounter();
+  const gatedDeps = makeDepsDouble();
+  const ctx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd({ messages: [], willRetry: true }, ctx, {}, gatedDeps);
+  assert.equal(gatedDeps.notifyCalls.length, 0, "willRetry:true call must record zero notifications");
+
+  const nextDeps = makeDepsDouble();
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, nextDeps);
+  assert.equal(
+    nextDeps.notifyCalls[0]?.meta.scope,
+    "turn/1",
+    "the gated willRetry:true call must not have consumed a counter value — the next interactive call is still turn/1",
+  );
+});
+
+test("signalTurnEnd: a call gated by hasPendingMessages records zero notifications and consumes no counter value", async () => {
+  _resetTurnCompletionScopeCounter();
+  const gatedDeps = makeDepsDouble();
+  const pendingCtx: any = { hasPendingMessages: () => true };
+  await signalTurnEnd({ messages: [], willRetry: false }, pendingCtx, {}, gatedDeps);
+  assert.equal(gatedDeps.notifyCalls.length, 0, "hasPendingMessages-gated call must record zero notifications");
+
+  const nextDeps = makeDepsDouble();
+  const cleanCtx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd({ messages: [], willRetry: false }, cleanCtx, {}, nextDeps);
+  assert.equal(
+    nextDeps.notifyCalls[0]?.meta.scope,
+    "turn/1",
+    "the gated hasPendingMessages call must not have consumed a counter value — the next interactive call is still turn/1",
+  );
+});
+
+test("signalTurnEnd: a call gated by a trailing unanswered tool call records zero notifications and consumes no counter value", async () => {
+  _resetTurnCompletionScopeCounter();
+  const gatedDeps = makeDepsDouble();
+  const ctx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd(
+    {
+      messages: [{ role: "assistant", content: [{ type: "toolCall", id: "x", name: "web_search", arguments: {} }] }],
+      willRetry: false,
+    } as any,
+    ctx,
+    {},
+    gatedDeps,
+  );
+  assert.equal(gatedDeps.notifyCalls.length, 0, "pending-tool-call-gated call must record zero notifications");
+
+  const nextDeps = makeDepsDouble();
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, nextDeps);
+  assert.equal(
+    nextDeps.notifyCalls[0]?.meta.scope,
+    "turn/1",
+    "the gated pending-tool-call call must not have consumed a counter value — the next interactive call is still turn/1",
+  );
+});
+
+test("signalTurnEnd: each fired call still records exactly one bell, one notification and one idle notification", async () => {
+  _resetTurnCompletionScopeCounter();
+  const deps = makeDepsDouble();
+  const ctx: any = { hasPendingMessages: () => false };
+  await signalTurnEnd({ messages: [], willRetry: false }, ctx, {}, deps);
+
+  assert.equal(deps.bellCalls.length, 1, "widening the identity must not multiply the bell");
+  assert.equal(deps.notifyCalls.length, 1, "widening the identity must not multiply the store entry");
+  assert.equal(deps.idleCalls.length, 1, "widening the identity must not multiply the idle notification");
+});
+
 // ─── Real registerHooks harness — end-to-end wiring proof ───────────────────
 
 test("register-hooks agent_end handler is wired to signalTurnEnd end-to-end", async (t) => {
   autoSession.reset();
   _resetNotificationStore();
+  _resetTurnCompletionScopeCounter();
   clearHookEmitter();
   const base = makeRuntimeBase();
   initNotificationStore(base);
   t.after(() => {
     autoSession.reset();
     _resetNotificationStore();
+    _resetTurnCompletionScopeCounter();
     clearHookEmitter();
     rmSync(base, { recursive: true, force: true });
   });
@@ -217,6 +347,86 @@ test("register-hooks agent_end handler is wired to signalTurnEnd end-to-end", as
 
   const entries = readNotifications(base, { kind: "turn-complete" });
   assert.equal(entries.length, 1, "exactly one turn-complete notification-store entry");
+  assert.ok(
+    entries[0].scope && entries[0].scope.length > 0,
+    "the persisted turn-complete entry must carry a distinct non-empty scope, not the old empty-string literal (notification-store.ts:141 drops an empty scope entirely)",
+  );
+});
+
+// ─── SIGNAL-05: two back-to-back completions must not collapse into one ─────
+
+test("SIGNAL-05: two back-to-back emitAgentEnd calls leave two distinct turn-complete entries, not one collapsed by the 30s kind:scope dedup window", async (t) => {
+  autoSession.reset();
+  _resetNotificationStore();
+  _resetTurnCompletionScopeCounter();
+  clearHookEmitter();
+  const base = makeRuntimeBase();
+  initNotificationStore(base);
+  t.after(() => {
+    autoSession.reset();
+    _resetNotificationStore();
+    _resetTurnCompletionScopeCounter();
+    clearHookEmitter();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const { emitAgentEnd } = makeHookHarness();
+
+  await emitAgentEnd({ messages: [], willRetry: false });
+  await emitAgentEnd({ messages: [], willRetry: false });
+
+  const entries = readNotifications(base, { kind: "turn-complete" });
+  assert.equal(
+    entries.length,
+    2,
+    "two genuine interactive turn completions inside the 30s dedup window must each persist their own entry — a hardcoded empty scope collapses the second into the first via notification-store.ts's kind:scope dedup key",
+  );
+  // readNotifications returns newest-first.
+  const [second, first] = entries;
+  assert.ok(first.scope && first.scope.length > 0, "first entry must carry a non-empty scope");
+  assert.ok(second.scope && second.scope.length > 0, "second entry must carry a non-empty scope");
+  assert.notEqual(
+    first.scope,
+    second.scope,
+    "the two completions must carry different scope values — an identical scope would still dedup as the same kind:scope identity",
+  );
+  assert.equal(first.message, second.message, "the message text must be unchanged across the two distinct entries");
+});
+
+test("SIGNAL-05: appendNotification directly proves the dedup mechanism is intact — distinct scopes both persist, a shared scope inside the window dedups", () => {
+  _resetNotificationStore();
+  const base = makeRuntimeBase();
+  initNotificationStore(base);
+  try {
+    const first = appendNotification("Turn complete — waiting for you.", "info", "notify", {
+      kind: "turn-complete",
+      scope: "turn/1",
+    });
+    const second = appendNotification("Turn complete — waiting for you.", "info", "notify", {
+      kind: "turn-complete",
+      scope: "turn/2",
+    });
+    assert.equal(first, true, "first distinct-scope append must persist");
+    assert.equal(second, true, "second distinct-scope append must persist — the dedup mechanism must not treat different scopes as the same identity");
+
+    const thirdRepeat = appendNotification("Turn complete — waiting for you.", "info", "notify", {
+      kind: "turn-complete",
+      scope: "turn/3",
+    });
+    const fourthRepeatSameScope = appendNotification("Turn complete — waiting for you.", "info", "notify", {
+      kind: "turn-complete",
+      scope: "turn/3",
+    });
+    assert.equal(thirdRepeat, true, "first occurrence of a shared scope must persist");
+    assert.equal(
+      fourthRepeatSameScope,
+      false,
+      "a second occurrence of the SAME scope inside the 30s window must still be deduped — proving the dedup mechanism itself is untouched and only its input changed",
+    );
+  } finally {
+    _resetNotificationStore();
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("WR-02: emitStop threads autoSession.currentTurnId onto the StopEvent for correlation", async (t) => {
