@@ -61,6 +61,45 @@ const WRITE_PARTIAL_FULL_HIGHLIGHT_LINES = 50;
 const RUNNING_RAIL_RENDER_INTERVAL_MS = 70;
 const RUNNING_COMPACT_RENDER_INTERVAL_MS = 1000;
 
+// TUI-05: UX auto-collapse thresholds for a large tool-output row. These are
+// deliberately far smaller than DEFAULT_MAX_LINES/DEFAULT_MAX_BYTES (imported
+// above from truncate.js — 2000 lines / 50KB), which is the capture-time hard
+// truncation ceiling for tool output itself, not a UX default. Reusing the
+// capture ceiling here would mean almost nothing ever collapses.
+export const DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_LINES = 40;
+export const DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_BYTES = 4096;
+
+// Module-local, mutable — mirrors the setRailAnimationEnabled/isRailAnimationEnabled
+// precedent in transcript-design.ts. Plan 03 calls the setter once at interactive-mode
+// startup from the operator's settings; nothing else may write these locals.
+let toolBodyAutoCollapseMaxLines = DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_LINES;
+let toolBodyAutoCollapseMaxBytes = DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_BYTES;
+
+/**
+ * Configure the TUI-05 size-based auto-collapse thresholds. An absent key
+ * leaves its current value untouched; a non-finite value (NaN, undefined) is
+ * ignored; an accepted value is clamped to a minimum of 1 so a misconfigured
+ * 0 cannot collapse every row.
+ */
+export function setToolBodyAutoCollapseThresholds(opts: { lines?: number; bytes?: number }): void {
+	if (opts.lines !== undefined && Number.isFinite(opts.lines)) {
+		toolBodyAutoCollapseMaxLines = Math.max(1, Math.floor(opts.lines));
+	}
+	if (opts.bytes !== undefined && Number.isFinite(opts.bytes)) {
+		toolBodyAutoCollapseMaxBytes = Math.max(1, Math.floor(opts.bytes));
+	}
+}
+
+export function getToolBodyAutoCollapseThresholds(): { lines: number; bytes: number } {
+	return { lines: toolBodyAutoCollapseMaxLines, bytes: toolBodyAutoCollapseMaxBytes };
+}
+
+/** Test hook — restores both thresholds to their defaults. */
+export function _resetToolBodyAutoCollapseThresholds(): void {
+	toolBodyAutoCollapseMaxLines = DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_LINES;
+	toolBodyAutoCollapseMaxBytes = DEFAULT_TOOL_BODY_AUTO_COLLAPSE_MAX_BYTES;
+}
+
 /**
  * Replace tabs with spaces for consistent rendering
  */
@@ -468,6 +507,11 @@ export class ToolExecutionComponent extends Container {
 	private args: any;
 	private expanded = false;
 	private explicitlyCollapsed = false;
+	// D-02: distinguishes "inherited the global startup default" ("default") from
+	// "the operator explicitly pressed ctrl+o on this row" ("user"). Only the
+	// ctrl+o broadcast (interactive-key-handlers.ts) ever passes "user" — every
+	// startup-seeding call site keeps passing a single argument and defaults here.
+	private expansionSource: "default" | "user" = "default";
 	private showImages: boolean;
 	// Registration source ("standalone" / "content"), for D-02 anomaly tracing (WR-03).
 	private readonly source?: string;
@@ -903,18 +947,73 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	setExpanded(expanded: boolean): void {
+	// The optional `source` parameter is left unset by every existing
+	// single-argument call site (chat-tool-rollup.ts, chat-segment-walker.ts,
+	// interactive-chat-render.ts) — those call sites mean "inherit the global
+	// startup default" and must NOT downgrade a row's expansionSource once the
+	// operator has explicitly touched it (D-02's "explicit choice always wins" —
+	// an operator-expanded oversized row must never be snapped back by a later
+	// default-shaped re-seed on the same instance). Only the ctrl+o broadcast
+	// (interactive-key-handlers.ts) passes "user" explicitly, so expansionSource
+	// is only ever written when a source argument is actually given.
+	setExpanded(expanded: boolean, source?: "default" | "user"): void {
 		this.expanded = expanded;
 		this.explicitlyCollapsed = !expanded;
+		if (source !== undefined) {
+			this.expansionSource = source;
+		}
 		this.updateDisplay();
+	}
+
+	/**
+	 * TUI-05 size-based auto-collapse decision input (D-01). Reads raw
+	 * `this.result.content` text directly — NOT getTextOutput(), which applies
+	 * ANSI-stripping/binary-sanitization for a render-oriented purpose and would
+	 * make the decision depend on a rendering pass. Returns false immediately
+	 * when there is no result or no content array, so a streaming row is never
+	 * collapsed by this branch. Combines the line and byte checks with OR (never
+	 * AND): a single very-long line has a low line count but a high byte count,
+	 * and a many-short-lines listing can stay well under the byte limit — an AND
+	 * would let either case escape collapse entirely.
+	 */
+	private isBodyOverAutoCollapseThreshold(): boolean {
+		const content = this.result?.content;
+		if (!content) return false;
+		let lines = 0;
+		let bytes = 0;
+		for (const block of content) {
+			if (block.type !== "text" || typeof block.text !== "string") continue;
+			lines += block.text.split("\n").length;
+			bytes += Buffer.byteLength(block.text, "utf8");
+		}
+		const limits = getToolBodyAutoCollapseThresholds();
+		return lines > limits.lines || bytes > limits.bytes;
 	}
 
 	private shouldDefaultExpandBody(): boolean {
 		// If the user explicitly collapsed (ctrl+o), don't auto-expand even for
 		// edit/write tools — the global collapse must be respected.
 		if (this.explicitlyCollapsed) return false;
-		if (this.expanded) return true;
+		// D-02: an explicit ctrl+o expand always wins over the size default, in
+		// either direction — this is what lets ctrl+o escape a size-collapsed row
+		// (SC-3) and what stops a later default-sourced seed from ever snapping
+		// an explicitly-expanded row back to collapsed.
+		if (this.expansionSource === "user") return true;
+		// D-03: oversized error results are exempt from the size collapse. This
+		// branch's own return VALUE is unchanged by this phase — showExpandedBody()
+		// is also consulted from inside per-tool body renderers, and flipping the
+		// value would change how much of an error body renders. The real exemption
+		// is enforced by the call sites (render()/getDisplayedLineCount() each gate
+		// their collapsed branch on `!this.result?.isError`); this line's job is to
+		// stay ABOVE the size branch below so a future reader cannot reorder it
+		// into collapsing a failure.
 		if (this.result?.isError) return false;
+		// TUI-05: a row that still carries the inherited startup default and whose
+		// raw result content exceeds the configured line/byte threshold defaults to
+		// the existing one-line hidden strip — only for rows that haven't been
+		// touched by an explicit ctrl+o (see the expansionSource branch above).
+		if (this.expanded && this.isBodyOverAutoCollapseThreshold()) return false;
+		if (this.expanded) return true;
 		return false;
 	}
 

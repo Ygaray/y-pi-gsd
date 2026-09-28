@@ -6,9 +6,12 @@ import { existsSync, readFileSync } from "node:fs";
 import stripAnsi from "strip-ansi";
 import { isImageLine, resetCapabilitiesCache, setCapabilities, setCellDimensions } from "@gsd/pi-tui";
 import {
+	_resetToolBodyAutoCollapseThresholds,
 	_resetUnnamedToolEvents,
 	_unnamedToolEvents,
 	coerceToolNameForDisplay,
+	getToolBodyAutoCollapseThresholds,
+	setToolBodyAutoCollapseThresholds,
 	ToolExecutionComponent,
 	ToolPhaseSummaryComponent,
 	UNNAMED_TOOL_DESCRIPTOR,
@@ -43,6 +46,10 @@ function renderTool(
 		details?: Record<string, unknown>;
 	},
 	toolDefinition?: { label?: string; renderCall?: (...args: any[]) => any; renderResult?: (...args: any[]) => any },
+	// TUI-05: "user" simulates an explicit ctrl+o expand, for fixtures whose
+	// intent is "this body renders expanded" even when it's larger than the
+	// size auto-collapse threshold (see the read-truncation test below).
+	expandSource: "default" | "user" = "default",
 ): string {
 	const component = new ToolExecutionComponent(
 		toolName,
@@ -51,7 +58,7 @@ function renderTool(
 		toolDefinition as any,
 		{ requestRender() {} } as any,
 	);
-	component.setExpanded(true);
+	component.setExpanded(true, expandSource);
 	if (result) component.updateResult(result);
 	return stripAnsi(component.render(120).join("\n"));
 }
@@ -367,11 +374,17 @@ describe("ToolExecutionComponent", () => {
 	});
 
 	test("truncates expanded read output lines to the display cap", () => {
+		// TUI-05: this fixture is intentionally larger than the size auto-collapse
+		// threshold (52 lines > 40) — its intent is "renders expanded, capped at
+		// READ_TUI_EXPANDED_MAX_LINES", so it seeds an explicit operator expand
+		// (simulating ctrl+o) rather than the default-inherited path.
 		const output = Array.from({ length: READ_TUI_EXPANDED_MAX_LINES + 2 }, (_, index) => `line-${index + 1}`).join("\n");
 		const rendered = renderTool(
 			"read",
 			{ path: "big.txt" },
 			{ content: [{ type: "text", text: output }], isError: false },
+			undefined,
+			"user",
 		);
 
 		assert.match(rendered, /line-1/);
@@ -882,5 +895,318 @@ describe("ToolExecutionComponent inline image (Kitty) rendering", () => {
 			/first[\s\S]*?\n\s*\n\s*\n\s*\nsecond/,
 			"plain text should still have consecutive blank rows collapsed",
 		);
+	});
+});
+
+// TUI-05 (Phase 29, Plan 01): size-based auto-collapse. A tool-call row whose
+// raw result content exceeds a line or byte threshold defaults to the existing
+// one-line hidden strip, exactly as if the user had pressed ctrl+o — but an
+// explicit ctrl+o (operator-sourced setExpanded) always wins over the size
+// default, in both directions (D-01/D-02/SC-1/SC-2/SC-3).
+describe("tool body auto-collapse thresholds (TUI-05 accessor)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	test("defaults to 40 lines / 4096 bytes when nothing is configured", () => {
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 40, bytes: 4096 });
+	});
+
+	test("a partial update leaves the other threshold untouched", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 5 });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 5, bytes: 4096 });
+	});
+
+	test("clamps a non-positive lines value to 1", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 0 });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 1, bytes: 4096 });
+	});
+
+	test("ignores a non-finite or undefined lines value and leaves the current value untouched", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 5 });
+		setToolBodyAutoCollapseThresholds({ lines: Number.NaN });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 5, bytes: 4096 });
+		setToolBodyAutoCollapseThresholds({ lines: undefined });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 5, bytes: 4096 });
+	});
+
+	test("_resetToolBodyAutoCollapseThresholds restores both defaults", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 5, bytes: 10 });
+		_resetToolBodyAutoCollapseThresholds();
+		assert.deepEqual(getToolBodyAutoCollapseThresholds(), { lines: 40, bytes: 4096 });
+	});
+});
+
+describe("ToolExecutionComponent size-based auto-collapse (TUI-05)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	const oversizedText = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+
+	test("an oversized non-error result seeded from the default renders exactly one row with the hidden-strip status text", () => {
+		const rendered = renderTool(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{ content: [{ type: "text", text: oversizedText }], isError: false },
+		);
+		assert.equal(rendered.split("\n").length, 1);
+		assert.match(rendered, /output hidden/);
+		assert.match(rendered, /ctrl\+o expand/);
+	});
+
+	test("getDisplayedLineCount(120) returns exactly 1 for a size-collapsed default-seeded row", () => {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(component.getDisplayedLineCount(120), 1);
+	});
+
+	test("a body under threshold renders fully expanded, byte-identical to today's output", () => {
+		const smallText = "line 1\nline 2\nline 3";
+		const rendered = renderTool(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{ content: [{ type: "text", text: smallText }], isError: false },
+		);
+		assert.ok(rendered.split("\n").length > 1);
+		assert.match(rendered, /line 1/);
+		assert.match(rendered, /line 3/);
+	});
+
+	test("a bash tool with an oversized result renders exactly one row through the command-card path", () => {
+		const rendered = renderTool(
+			"bash",
+			{ command: "cat bigfile" },
+			{ content: [{ type: "text", text: oversizedText }], isError: false, details: { cwd: "/tmp/project" } },
+		);
+		assert.equal(rendered.split("\n").length, 1);
+		assert.match(rendered, /output hidden/);
+	});
+
+	test("an operator-sourced setExpanded escapes the size default in both directions", () => {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true); // inherits the global startup default
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+
+		component.setExpanded(true, "user");
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+
+		component.setExpanded(false, "user");
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+
+		component.setExpanded(true, "user");
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+	});
+
+	test("an operator-expanded oversized row is never snapped back by a later default-sourced seed", () => {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		component.setExpanded(true, "user");
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+
+		component.setExpanded(true); // startup-seed shape, no source argument
+		assert.ok(
+			stripAnsi(component.render(120).join("\n")).split("\n").length > 1,
+			"an explicit ctrl+o expand must not be snapped back by a later default-sourced seed",
+		);
+	});
+});
+
+// TUI-05 (Phase 29, Plan 02): D-03's error exemption plus the streaming and
+// idempotency guarantees around the size branch. Oversized error results must
+// never collapse (a failing tool's diagnostic text is never hidden), a
+// streaming row (no result yet) must be untouched by the size branch, and the
+// decision must be recomputed per render from the current result rather than
+// latched onto any prior state.
+describe("ToolExecutionComponent size-based auto-collapse: D-03 error exemption and streaming/idempotency (TUI-05)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	const oversizedText = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+	const smallText = "line 1\nline 2\nline 3";
+
+	function buildComponent(toolName = "mcp__demo__do_thing", args: Record<string, unknown> = { ok: true }) {
+		return new ToolExecutionComponent(toolName, args, {}, undefined, { requestRender() {} } as any);
+	}
+
+	test("an oversized isError result renders more than one row and carries no hidden-strip status text", () => {
+		const component = buildComponent();
+		component.setExpanded(true); // default-seeded
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: true });
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		assert.ok(rendered.split("\n").length > 1);
+
+		// Source the hidden-strip marker phrase from a known collapsed non-error
+		// row rather than hardcoding it twice.
+		const collapsedControl = buildComponent("mcp__demo__control", { ok: true });
+		collapsedControl.setExpanded(true);
+		collapsedControl.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		const hiddenStripMarker = stripAnsi(collapsedControl.render(120).join("\n")).match(/output hidden.*ctrl\+o expand/)?.[0];
+		assert.ok(hiddenStripMarker, "collapsed control row must carry the hidden-strip marker");
+		assert.doesNotMatch(rendered, new RegExp(hiddenStripMarker!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
+	test("getDisplayedLineCount(120) for an oversized error row is greater than 1", () => {
+		const component = buildComponent();
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: true });
+		assert.ok(component.getDisplayedLineCount(120) > 1);
+	});
+
+	test("a bash tool with an oversized error result renders more than one row", () => {
+		const component = buildComponent("bash", { command: "cat bigfile" });
+		component.setExpanded(true);
+		component.updateResult({
+			content: [{ type: "text", text: oversizedText }],
+			isError: true,
+			details: { cwd: "/tmp/project" },
+		});
+		assert.ok(stripAnsi(component.render(120).join("\n")).split("\n").length > 1);
+	});
+
+	test("a streaming row (no result yet) is untouched by the size branch, and starts collapsing once an oversized result arrives", () => {
+		const component = buildComponent();
+		component.setExpanded(true);
+		const beforeResult = stripAnsi(component.render(120).join("\n"));
+		// No result yet: this is the running/partial card, not the one-row hidden
+		// strip — the size branch must contribute nothing on a row with no result.
+		assert.ok(beforeResult.split("\n").length >= 1);
+		assert.doesNotMatch(beforeResult, /output hidden/);
+
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+	});
+
+	test("re-update ordering: small then oversized collapses; oversized then small expands", () => {
+		const smallThenOversized = buildComponent();
+		smallThenOversized.setExpanded(true);
+		smallThenOversized.updateResult({ content: [{ type: "text", text: smallText }], isError: false });
+		smallThenOversized.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		assert.equal(stripAnsi(smallThenOversized.render(120).join("\n")).split("\n").length, 1);
+
+		const oversizedThenSmall = buildComponent();
+		oversizedThenSmall.setExpanded(true);
+		oversizedThenSmall.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+		oversizedThenSmall.updateResult({ content: [{ type: "text", text: smallText }], isError: false });
+		assert.ok(stripAnsi(oversizedThenSmall.render(120).join("\n")).split("\n").length > 1);
+	});
+
+	test("idempotency: two consecutive renders of the same oversized row are deeply equal and mutate no row state", () => {
+		const component = buildComponent();
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text: oversizedText }], isError: false });
+
+		const first = component.render(120);
+		const second = component.render(120);
+		assert.deepEqual(first, second);
+
+		const countBefore = component.getDisplayedLineCount(120);
+		component.render(120);
+		const countAfter = component.getDisplayedLineCount(120);
+		assert.equal(countBefore, countAfter);
+
+		// A render must not flip the row into the operator-sourced state — a
+		// subsequent default-sourced setExpanded(true) still collapses.
+		component.setExpanded(true);
+		assert.equal(stripAnsi(component.render(120).join("\n")).split("\n").length, 1);
+	});
+});
+
+// TUI-05 (Phase 29, Plan 03): threshold boundary and measurement-precision
+// coverage — each threshold trips independently (OR, never AND), byte
+// measurement counts real UTF-8 bytes rather than UTF-16 code units, and a
+// configured 0 clamps to 1.
+describe("ToolExecutionComponent size-based auto-collapse: boundary and precision (TUI-05)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	function renderRowLineCount(text: string): number {
+		const component = new ToolExecutionComponent(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{},
+			undefined,
+			{ requestRender() {} } as any,
+		);
+		component.setExpanded(true);
+		component.updateResult({ content: [{ type: "text", text }], isError: false });
+		return stripAnsi(component.render(120).join("\n")).split("\n").length;
+	}
+
+	test("exactly 40 lines stays expanded; exactly 41 lines collapses (default thresholds)", () => {
+		const exactly40 = Array.from({ length: 40 }, (_, i) => `l${i}`).join("\n");
+		const exactly41 = Array.from({ length: 41 }, (_, i) => `l${i}`).join("\n");
+		assert.ok(renderRowLineCount(exactly40) > 1, "exactly 40 lines must stay expanded");
+		assert.equal(renderRowLineCount(exactly41), 1, "41 lines must collapse");
+	});
+
+	test("exactly 4096 bytes stays expanded; 4097 bytes collapses (single line, default thresholds)", () => {
+		const exactly4096 = "a".repeat(4096);
+		const exactly4097 = "a".repeat(4097);
+		assert.equal(Buffer.byteLength(exactly4096, "utf8"), 4096);
+		assert.equal(Buffer.byteLength(exactly4097, "utf8"), 4097);
+		assert.ok(renderRowLineCount(exactly4096) > 1, "exactly 4096 bytes must stay expanded");
+		assert.equal(renderRowLineCount(exactly4097), 1, "4097 bytes must collapse");
+	});
+
+	test("a 1-line 10000-byte body collapses on the byte threshold alone", () => {
+		const body = "a".repeat(10000);
+		assert.equal(body.split("\n").length, 1);
+		assert.equal(renderRowLineCount(body), 1);
+	});
+
+	test("a 100-line, well-under-4096-byte body collapses on the line threshold alone", () => {
+		const body = Array.from({ length: 100 }, (_, i) => `l${i}`).join("\n");
+		assert.ok(Buffer.byteLength(body, "utf8") < 4096);
+		assert.equal(renderRowLineCount(body), 1);
+	});
+
+	test("byte measurement counts real UTF-8 bytes, not UTF-16 code units", () => {
+		// "€" is a 3-byte UTF-8 character: 2000 of them is 6000 bytes (over 4096),
+		// single line (no newlines) so the line threshold never fires.
+		const multiByte = "€".repeat(2000);
+		const ascii = "a".repeat(2000);
+		assert.equal(Buffer.byteLength(multiByte, "utf8"), 6000);
+		assert.equal(Buffer.byteLength(ascii, "utf8"), 2000);
+		assert.equal(renderRowLineCount(multiByte), 1, "6000 UTF-8 bytes must collapse");
+		assert.ok(renderRowLineCount(ascii) > 1, "2000 ASCII bytes (under 4096) must stay expanded");
+	});
+
+	test("a configured lines threshold applies independently of the byte default", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 2 });
+		const threeLines = "a\nb\nc";
+		const twoLines = "a\nb";
+		assert.equal(renderRowLineCount(threeLines), 1, "3 lines over a configured limit of 2 must collapse");
+		assert.ok(renderRowLineCount(twoLines) > 1, "2 lines at a configured limit of 2 must stay expanded");
+	});
+
+	test("a configured lines threshold of 0 clamps to 1", () => {
+		setToolBodyAutoCollapseThresholds({ lines: 0 });
+		assert.deepEqual(getToolBodyAutoCollapseThresholds().lines, 1);
+		assert.equal(renderRowLineCount("a\nb"), 1, "2 lines over a clamped limit of 1 must collapse");
+		assert.ok(renderRowLineCount("a") > 1, "1 line at a clamped limit of 1 must stay expanded");
 	});
 });
