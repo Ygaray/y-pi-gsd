@@ -89,6 +89,13 @@ export async function handleTaskSettle(
     );
     return;
   }
+  if (parsed.blockerAccepted && parsed.operatorAttested) {
+    ctx.ui.notify(
+      "gsd task settle: --blocker-accepted and --operator-attested are mutually exclusive.",
+      "error",
+    );
+    return;
+  }
   const dispositionFlag = parsed.blockerAccepted
     ? "--blocker-accepted"
     : parsed.operatorAttested
@@ -100,6 +107,12 @@ export async function handleTaskSettle(
       "error",
     );
     return;
+  }
+  if (parsed.evidenceRaw !== null && !parsed.blockerAccepted && !parsed.operatorAttested) {
+    ctx.ui.notify(
+      "gsd task settle: --evidence is only used with --operator-attested and will be ignored here.",
+      "warning",
+    );
   }
   if (!await ensureDbOpen(basePath)) {
     ctx.ui.notify("gsd task settle: GSD database is not available.", "error");
