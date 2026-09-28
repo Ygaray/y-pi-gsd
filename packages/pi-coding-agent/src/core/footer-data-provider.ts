@@ -436,11 +436,14 @@ export class FooterDataProvider {
 
 		// Watch the directory containing HEAD, not HEAD itself.
 		// Git uses atomic writes (write temp, rename over HEAD), which changes the inode.
-		// fs.watch on a file stops working after the inode changes.
+		// fs.watch on a file stops working after the inode changes. `index` lives in the
+		// same directory and is watched here too: staging/unstaging a file (`git add`)
+		// rewrites `index`, and the footer's staged/dirty markers need the same debounced
+		// refresh that a HEAD change already triggers.
 		this.headWatcher = watchWithErrorHandler(
 			dirname(this.gitPaths.headPath),
 			(_eventType, filename) => {
-				if (!filename || filename === "HEAD") {
+				if (!filename || filename === "HEAD" || filename === "index") {
 					this.scheduleRefresh();
 				}
 			},

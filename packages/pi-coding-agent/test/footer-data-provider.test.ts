@@ -408,6 +408,74 @@ describe("FooterDataProvider git status", () => {
 		}
 	});
 
+	it("refreshes git status when .git/index changes (staging a file)", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+			expect(provider.getGitStatus()).toEqual({
+				staged: 0,
+				dirty: 0,
+				untracked: 0,
+				conflicts: 0,
+				ahead: 0,
+				behind: 0,
+			});
+
+			// Simulate `git add`: the underlying status changes and `.git/index` is rewritten.
+			gitStatusFixture = { kind: "ok", statusText: MIXED_ENTRIES_STATUS_TEXT };
+			writeFileSync(join(repoDir, ".git", "index"), "fake index bytes");
+
+			await waitFor(() => provider.getGitStatus()?.staged === 1);
+			expect(provider.getGitStatus()).toEqual({
+				staged: 1,
+				dirty: 1,
+				untracked: 1,
+				conflicts: 0,
+				ahead: 0,
+				behind: 0,
+			});
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("does not refresh git status when an unrelated untracked file is created outside .git", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		gitStatusFixture = { kind: "ok", statusText: CLEAN_STATUS_TEXT };
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await waitFor(() => provider.getGitStatus() !== null);
+
+			const onGitStatusChange = vi.fn();
+			provider.onGitStatusChange(onGitStatusChange);
+
+			// A plain new file in the working tree (not under .git/) must not trigger a
+			// refresh — full recursive working-tree watching is explicitly out of scope;
+			// this fix is scoped to `.git/index` only.
+			gitStatusFixture = { kind: "ok", statusText: MIXED_ENTRIES_STATUS_TEXT };
+			writeFileSync(join(repoDir, "untracked-elsewhere.txt"), "hello");
+
+			await new Promise((resolve) => setTimeout(resolve, 650));
+			expect(onGitStatusChange).not.toHaveBeenCalled();
+			expect(provider.getGitStatus()).toEqual({
+				staged: 0,
+				dirty: 0,
+				untracked: 0,
+				conflicts: 0,
+				ahead: 0,
+				behind: 0,
+			});
+		} finally {
+			provider.dispose();
+		}
+	});
+
 	it("keeps the previous cached value when a git invocation errors, without throwing", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
