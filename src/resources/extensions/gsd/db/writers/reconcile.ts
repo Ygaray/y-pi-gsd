@@ -225,6 +225,13 @@ export function reconcileWorktreeDb(
       const hasDecisionSource = wtInfo.some((col) => col["name"] === "source");
       const wtRequirementInfo = wtTableInfo("requirements");
       const hasWtRequirements = wtRequirementInfo.length > 0;
+      // Phase 33 (RELY-05) / CR-02: mirror the hasSliceTargetRepositories /
+      // hasEscalationPending backward-compat pattern used everywhere else in
+      // this function. A worktree DB predating V58 has no requirements.milestone_id
+      // column at all; without this guard the conflict-detection join and the
+      // merge INSERT below throw "no such column: milestone_id", which rolls
+      // back the entire reconcile transaction (every table, not just requirements).
+      const hasRequirementMilestoneId = wtRequirementInfo.some((col) => col["name"] === "milestone_id");
       const wtMilestoneInfo = wtTableInfo("milestones");
       const hasWtMilestones = wtMilestoneInfo.length > 0;
       const hasMilestoneSequence = wtMilestoneInfo.some((col) => col["name"] === "sequence");
@@ -309,7 +316,9 @@ export function reconcileWorktreeDb(
         // milestones' requirements that happen to share an id would report a
         // false conflict here (or merge across milestones below).
         const reqConf = adapter.prepare(
-          `SELECT m.id, m.milestone_id FROM requirements m INNER JOIN wt.requirements w ON m.id = w.id AND m.milestone_id IS w.milestone_id WHERE m.description != w.description OR m.status != w.status OR m.notes != w.notes OR m.superseded_by IS NOT w.superseded_by`,
+          `SELECT m.id, m.milestone_id FROM requirements m INNER JOIN wt.requirements w ON m.id = w.id AND m.milestone_id IS ${
+            hasRequirementMilestoneId ? "w.milestone_id" : "NULL"
+          } WHERE m.description != w.description OR m.status != w.status OR m.notes != w.notes OR m.superseded_by IS NOT w.superseded_by`,
         ).all();
         for (const row of reqConf) conflicts.push(`requirement ${(row as Record<string, unknown>)["id"]}: modified in both`);
       }
@@ -385,7 +394,9 @@ export function reconcileWorktreeDb(
               supporting_slices, validation, notes, full_content, superseded_by, milestone_id
             )
             SELECT id, class, status, description, why, source, primary_owner,
-                   supporting_slices, validation, notes, full_content, superseded_by, milestone_id
+                   supporting_slices, validation, notes, full_content, superseded_by, ${
+                     hasRequirementMilestoneId ? "milestone_id" : "NULL"
+                   }
             FROM wt.requirements
           `).run());
         }
