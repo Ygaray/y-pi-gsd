@@ -50,6 +50,7 @@ export interface MilestoneArchiveSnapshotSlice {
 export interface MilestoneArchiveSnapshotRequirement {
   id: string;
   status: string;
+  description: string;
   primaryOwner: string;
   supportingSlices: string;
 }
@@ -149,6 +150,7 @@ function captureMilestoneArchiveSnapshot(
     requirements: requirements.map((requirement) => ({
       id: requirement.id,
       status: requirement.status,
+      description: requirement.description,
       primaryOwner: requirement.primary_owner,
       supportingSlices: requirement.supporting_slices,
     })),

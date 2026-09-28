@@ -28,6 +28,20 @@ function requiredString(value: unknown, field: string): string {
   return value;
 }
 
+// Phase 33 / RELY-05: `description` was added to the snapshot's requirement
+// shape after milestones v1-v5 already shipped their own immutable
+// milestone.shipped events — those historical payloads have no such field at
+// all. Tolerate absence (default "") rather than requiredString, which would
+// make every pre-existing archive unrenderable; a present-but-wrong-type
+// value is still corrupt and still throws.
+function optionalStringWithDefault(value: unknown, field: string, fallback: string): string {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string") {
+    throw new Error(`Milestone archive event ${field} is corrupt`);
+  }
+  return value;
+}
+
 function requiredStringOrNull(value: unknown, field: string): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") {
@@ -88,6 +102,11 @@ function snapshotFromPayload(value: unknown): MilestoneArchiveSnapshot {
       return {
         id: requiredString(requirement["id"], `snapshot.requirements[${index}].id`),
         status: requiredString(requirement["status"], `snapshot.requirements[${index}].status`),
+        description: optionalStringWithDefault(
+          requirement["description"],
+          `snapshot.requirements[${index}].description`,
+          "",
+        ),
         primaryOwner: requiredString(
           requirement["primaryOwner"],
           `snapshot.requirements[${index}].primaryOwner`,
