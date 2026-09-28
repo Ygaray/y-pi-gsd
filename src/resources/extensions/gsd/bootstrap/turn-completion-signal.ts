@@ -14,6 +14,14 @@ import { emitNotification, emitStop } from "../hook-emitter.js";
 
 export const TURN_COMPLETE_NOTIFICATION_KIND = "turn-complete";
 
+// D-04: the per-turn dedup identity for the interactive turn-complete signal
+// comes from this module-local monotonic counter, never from
+// `autoSession.currentTurnId` — that field is `null` outside the auto loop
+// (`auto/session.ts:163`, set only at `auto/loop.ts:532`), and the interactive
+// path this bug fires on is exactly the `!autoActive` path, so reusing it
+// would ship the same empty identity in disguise.
+let turnCompletionScopeCounter = 0;
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type TurnEndStopReason = "completed" | "cancelled" | "error" | "blocked";
@@ -57,6 +65,22 @@ const defaultTurnCompletionSignalDeps: TurnCompletionSignalDeps = {
   emitStop: (args) => emitStop({ ...args, turnId: autoSession.currentTurnId ?? undefined }),
   emitNotification: (kind, message, details) => emitNotification(kind, message, details),
 };
+
+/**
+ * Builds the per-turn dedup scope, mirroring `buildUnitNoticeScope`'s
+ * `{type}/{id}` shape (`auto-timers.ts:64-66`) so both per-unit dedup
+ * conventions in this codebase read as one family. Pre-increments so the
+ * first value is `turn/1` — the scope is never the bare prefix.
+ */
+export function buildTurnCompletionScope(): string {
+  turnCompletionScopeCounter += 1;
+  return `turn/${turnCompletionScopeCounter}`;
+}
+
+/** Test-only: resets the counter so the next fired signal is `turn/1` again. */
+export function _resetTurnCompletionScopeCounter(): void {
+  turnCompletionScopeCounter = 0;
+}
 
 // ─── Pure Helpers ───────────────────────────────────────────────────────────
 
@@ -203,7 +227,7 @@ export async function signalTurnEnd(
       deps.playBell("attention");
       deps.appendNotification("Turn complete — waiting for you.", "info", "notify", {
         kind: TURN_COMPLETE_NOTIFICATION_KIND,
-        scope: "",
+        scope: buildTurnCompletionScope(),
       });
       await deps.emitNotification("idle", "Turn complete — waiting for you.");
     }
