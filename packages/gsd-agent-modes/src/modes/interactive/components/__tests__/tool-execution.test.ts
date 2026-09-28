@@ -1033,6 +1033,52 @@ describe("ToolExecutionComponent size-based auto-collapse (TUI-05)", () => {
 	});
 });
 
+// WR-01 (Phase 29 code review): a tool with a custom `renderResult` already
+// implements its own curated compact/expanded split over a (typically much
+// shorter) view of the result — e.g. subagent/index.ts renders a curated
+// icon + agent name + task preview rather than the raw final-output text.
+// The size branch above measures raw `this.result.content`, which does not
+// correlate with what the custom renderer actually displays, so it must not
+// collapse these rows down to the generic one-line hidden strip.
+describe("ToolExecutionComponent size-based auto-collapse: custom renderResult exemption (WR-01)", () => {
+	afterEach(() => {
+		_resetToolBodyAutoCollapseThresholds();
+	});
+
+	const oversizedText = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+
+	test("a tool with a custom renderResult keeps its curated view instead of collapsing to the generic hidden strip", () => {
+		const rendered = renderTool(
+			"subagent",
+			{ agent: "demo" },
+			{ content: [{ type: "text", text: oversizedText }], isError: false },
+			{
+				label: "Subagent",
+				renderResult() {
+					return {
+						render: () => ["curated subagent summary"],
+						invalidate() {},
+					};
+				},
+			},
+		);
+
+		assert.match(rendered, /curated subagent summary/);
+		assert.doesNotMatch(rendered, /output hidden/);
+	});
+
+	test("a tool without a custom renderResult still collapses under the same oversized content", () => {
+		const rendered = renderTool(
+			"mcp__demo__do_thing",
+			{ ok: true },
+			{ content: [{ type: "text", text: oversizedText }], isError: false },
+		);
+
+		assert.equal(rendered.split("\n").length, 1);
+		assert.match(rendered, /output hidden/);
+	});
+});
+
 // TUI-05 (Phase 29, Plan 02): D-03's error exemption plus the streaming and
 // idempotency guarantees around the size branch. Oversized error results must
 // never collapse (a failing tool's diagnostic text is never hidden), a

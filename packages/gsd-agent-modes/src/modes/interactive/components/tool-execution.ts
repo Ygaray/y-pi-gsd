@@ -1012,7 +1012,15 @@ export class ToolExecutionComponent extends Container {
 		// raw result content exceeds the configured line/byte threshold defaults to
 		// the existing one-line hidden strip — only for rows that haven't been
 		// touched by an explicit ctrl+o (see the expansionSource branch above).
-		if (this.expanded && this.isBodyOverAutoCollapseThreshold()) return false;
+		// WR-01: exempt tools with a custom `renderResult` from this size branch.
+		// The threshold above measures raw `this.result.content`, which does not
+		// correlate with what a custom renderer actually displays — a tool like
+		// subagent/index.ts already implements its own curated compact/expanded
+		// split over a *different* (often much shorter) view of the same result,
+		// so collapsing it here would discard that curated view in favor of the
+		// generic one-line strip. Tools without a custom renderResult are
+		// unaffected and keep the size-based auto-collapse behavior.
+		if (!this.toolDefinition?.renderResult && this.expanded && this.isBodyOverAutoCollapseThreshold()) return false;
 		if (this.expanded) return true;
 		return false;
 	}
