@@ -24,6 +24,42 @@ const __dirname_ = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname_, '..', '..')
 const BUILD_SCRIPT = join(REPO_ROOT, 'native', 'scripts', 'build.js')
 
+// Extracts the source text of a named top-level function declaration
+// (`function <name>(...) { ... }`) from a file's contents, by brace-counting
+// from the opening `{` to its matching closing `}`. Used to compare the
+// verbatim-duplicated `commandExists` implementations across build.js
+// (ESM) and run-package-tests.cjs (CJS) without needing a shared module.
+function extractFunctionSource(content, functionName) {
+	const marker = `function ${functionName}(`
+	const startIdx = content.indexOf(marker)
+	assert.ok(startIdx !== -1, `function ${functionName} not found`)
+	const braceStart = content.indexOf('{', startIdx)
+	assert.ok(braceStart !== -1, `opening brace for ${functionName} not found`)
+	let depth = 0
+	for (let i = braceStart; i < content.length; i += 1) {
+		if (content[i] === '{') depth += 1
+		else if (content[i] === '}') {
+			depth -= 1
+			if (depth === 0) {
+				return content.slice(startIdx, i + 1)
+			}
+		}
+	}
+	throw new Error(`unbalanced braces while extracting ${functionName}`)
+}
+
+// Normalizes cosmetic differences that are expected between the ESM
+// (build.js: double quotes, semicolons) and CJS (run-package-tests.cjs:
+// single quotes, no semicolons, tabs) copies, so the comparison asserts on
+// behavior-equivalent source, not on each file's own style convention.
+function normalizeFunctionSource(source) {
+	return source
+		.replace(/'/g, '"')
+		.replace(/;/g, '')
+		.replace(/\s+/g, ' ')
+		.trim()
+}
+
 // Regex-parses a `<declarationName> = { "k": "v", ... };` object literal out
 // of raw file source text, WITHOUT importing/requiring the file. build.js in
 // particular runs its cargo-presence gate (including possible
@@ -156,6 +192,21 @@ test('PLATFORM_PACKAGE_MAP matches native.ts platformPackageMap (drift guard)', 
 		buildJsExtracted,
 		extracted,
 		'build.js PLATFORM_PACKAGE_MAP has drifted from native.ts',
+	)
+})
+
+test('commandExists source is identical between build.js and run-package-tests.cjs (drift guard)', () => {
+	const buildJsPath = join(REPO_ROOT, 'native', 'scripts', 'build.js')
+	const runPackageTestsPath = join(REPO_ROOT, 'scripts', 'run-package-tests.cjs')
+	const buildJsFn = extractFunctionSource(readFileSync(buildJsPath, 'utf8'), 'commandExists')
+	const runPackageTestsFn = extractFunctionSource(
+		readFileSync(runPackageTestsPath, 'utf8'),
+		'commandExists',
+	)
+	assert.equal(
+		normalizeFunctionSource(buildJsFn),
+		normalizeFunctionSource(runPackageTestsFn),
+		'commandExists has drifted between build.js and run-package-tests.cjs',
 	)
 })
 
