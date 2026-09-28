@@ -2,37 +2,17 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const require_ = createRequire(import.meta.url);
+const { native, isNativeAddonLoaded } = require_("../../dist/native.js");
 
-// Load the native addon directly
-const addonDir = path.resolve(__dirname, "..", "..", "..", "..", "native", "addon");
-const platformTag = `${process.platform}-${process.arch}`;
-const candidates = [
-  path.join(addonDir, `gsd_engine.${platformTag}.node`),
-  path.join(addonDir, "gsd_engine.dev.node"),
-];
+const addonSkip = isNativeAddonLoaded()
+  ? undefined
+  : "native addon not loadable: no local native/addon build and no resolvable @opengsd/engine-<platform> package";
 
-let native;
-for (const candidate of candidates) {
-  try {
-    native = require(candidate);
-    break;
-  } catch {
-    // try next
-  }
-}
-
-if (!native) {
-  console.error("Native addon not found. Run `npm run build:native -w @gsd/native` first.");
-  process.exit(1);
-}
-
-describe("native fd: fuzzyFind()", () => {
+describe("native fd: fuzzyFind()", { skip: addonSkip }, () => {
   test("finds files matching a query", (t) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gsd-fd-test-"));
     t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));

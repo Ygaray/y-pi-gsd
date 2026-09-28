@@ -63,12 +63,41 @@ function commandExists(command, args = ['--version']) {
 	return result.status === 0 || result.status === 1
 }
 
-function hasNativeAddon() {
+// Map Node.js platform/arch to the npm package suffix — copied verbatim from
+// `packages/native/src/native.ts`'s `platformPackageMap`. One of three
+// independent copies (this file, `native/scripts/build.js`, and `native.ts`)
+// pinned together by `scripts/__tests__/native-build-toolchain-gate.test.mjs`'s
+// drift guard.
+const PLATFORM_PACKAGE_MAP = {
+	'darwin-arm64': 'darwin-arm64',
+	'darwin-x64': 'darwin-x64',
+	'linux-x64': 'linux-x64-gnu',
+	'linux-arm64': 'linux-arm64-gnu',
+	'win32-x64': 'win32-x64-msvc',
+}
+
+function hasLocalNativeAddon(repoRoot = REPO_ROOT) {
 	const platformTag = `${process.platform}-${process.arch}`
 	return (
-		existsSync(join(REPO_ROOT, 'native', 'addon', `gsd_engine.${platformTag}.node`)) ||
-		existsSync(join(REPO_ROOT, 'native', 'addon', 'gsd_engine.dev.node'))
+		existsSync(join(repoRoot, 'native', 'addon', `gsd_engine.${platformTag}.node`)) ||
+		existsSync(join(repoRoot, 'native', 'addon', 'gsd_engine.dev.node'))
 	)
+}
+
+function hasPrebuiltNativeAddonPackage() {
+	const platformTag = `${process.platform}-${process.arch}`
+	const packageSuffix = PLATFORM_PACKAGE_MAP[platformTag]
+	if (!packageSuffix) return false
+	try {
+		require.resolve(`@opengsd/engine-${packageSuffix}`)
+		return true
+	} catch {
+		return false
+	}
+}
+
+function hasNativeAddon() {
+	return hasLocalNativeAddon() || hasPrebuiltNativeAddonPackage()
 }
 
 function looksLikePassingTestRun(output) {
@@ -256,4 +285,9 @@ module.exports = {
 	selectPackageTestFiles,
 	findDistTestFiles,
 	buildNodeTestArgs,
+	hasNativeAddon,
+	hasLocalNativeAddon,
+	hasPrebuiltNativeAddonPackage,
+	commandExists,
+	PLATFORM_PACKAGE_MAP,
 }
