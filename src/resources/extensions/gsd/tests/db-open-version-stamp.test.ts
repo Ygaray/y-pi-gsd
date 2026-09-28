@@ -72,10 +72,10 @@ test("v45→v55 migration stamps application_id, user_version, and schema_versio
   assert.equal(openDatabase(dbPath), true);
   const db = _getAdapter();
   assert.ok(db);
-  assert.equal(SCHEMA_VERSION, 56);
+  assert.equal(SCHEMA_VERSION, 57);
   assert.equal(pragmaInt(db, "application_id"), GSD_APPLICATION_ID);
-  assert.equal(pragmaInt(db, "user_version"), 56);
-  assert.equal(maxSchemaVersion(db), 56);
+  assert.equal(pragmaInt(db, "user_version"), 57);
+  assert.equal(maxSchemaVersion(db), 57);
   assert.ok(db.prepare("PRAGMA table_info(tasks)").all().some((column) => column["name"] === "required_workflow_tools"));
   assert.ok(db.prepare("PRAGMA table_info(slices)").all().some((column) => column["name"] === "surface"));
   // The migration left a verified same-directory backup of the v45 database
@@ -90,17 +90,17 @@ test("fresh databases get the same three V46 stamps as migrated databases", () =
   const db = _getAdapter();
   assert.ok(db);
   assert.equal(pragmaInt(db, "application_id"), GSD_APPLICATION_ID);
-  assert.equal(pragmaInt(db, "user_version"), 56);
-  assert.equal(maxSchemaVersion(db), 56);
+  assert.equal(pragmaInt(db, "user_version"), 57);
+  assert.equal(maxSchemaVersion(db), 57);
 });
 
-test("opening a newer (v57) database throws SchemaTooNewError with the exact message", () => {
+test("opening a newer (v58) database throws SchemaTooNewError with the exact message", () => {
   const dir = makeTempDir();
   const dbPath = join(dir, "gsd.db");
   assert.equal(openDatabase(dbPath), true);
   const db = _getAdapter();
   assert.ok(db);
-  recordSchemaVersion(db, 57);
+  recordSchemaVersion(db, 58);
   closeDatabase();
 
   let thrown: unknown;
@@ -112,12 +112,12 @@ test("opening a newer (v57) database throws SchemaTooNewError with the exact mes
   assert.ok(thrown instanceof SchemaTooNewError, `expected SchemaTooNewError, got ${String(thrown)}`);
   assert.equal(isSchemaTooNewError(thrown), true);
   assert.equal(thrown.name, "GSDSchemaTooNewError");
-  assert.equal(thrown.currentVersion, 57);
-  assert.equal(thrown.supportedVersion, 56);
-  assert.match(thrown.message, /newer than the v56 this gsd-pi supports/);
+  assert.equal(thrown.currentVersion, 58);
+  assert.equal(thrown.supportedVersion, 57);
+  assert.match(thrown.message, /newer than the v57 this gsd-pi supports/);
   assert.equal(
     thrown.message,
-    "gsd.db schema is v57, newer than the v56 this gsd-pi supports. " +
+    "gsd.db schema is v58, newer than the v57 this gsd-pi supports. " +
     "Rebuild your fork: run pnpm build before opening this project.",
   );
 });
@@ -130,7 +130,7 @@ test("openWorkflowDatabase maps refuse-newer to a schema-too-new result with the
   assert.equal(openDatabase(dbPath), true);
   const db = _getAdapter();
   assert.ok(db);
-  recordSchemaVersion(db, 57);
+  recordSchemaVersion(db, 58);
   closeDatabase();
 
   const result = openWorkflowDatabase(dir);
@@ -140,7 +140,7 @@ test("openWorkflowDatabase maps refuse-newer to a schema-too-new result with the
   assert.ok(result.error instanceof SchemaTooNewError);
   assert.equal(
     result.error.message,
-    "gsd.db schema is v57, newer than the v56 this gsd-pi supports. " +
+    "gsd.db schema is v58, newer than the v57 this gsd-pi supports. " +
     "Rebuild your fork: run pnpm build before opening this project.",
   );
 });

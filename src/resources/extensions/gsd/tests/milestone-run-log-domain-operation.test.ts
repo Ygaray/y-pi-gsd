@@ -71,7 +71,7 @@ test("schema: milestone_run_log table exists at schema v54+ on a fresh install",
     `).get()?.["count"] ?? 0),
     1,
   );
-  assert.equal(SCHEMA_VERSION, 56);
+  assert.equal(SCHEMA_VERSION, 57);
 });
 
 test("recording a running transition inserts one row with attempt-numbered identity and matching provenance", () => {
