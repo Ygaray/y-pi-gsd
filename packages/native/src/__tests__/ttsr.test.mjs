@@ -1,36 +1,15 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const require_ = createRequire(import.meta.url);
+const { native, isNativeAddonLoaded } = require_("../../dist/native.js");
 
-// Load the native addon directly
-const addonDir = path.resolve(__dirname, "..", "..", "..", "..", "native", "addon");
-const platformTag = `${process.platform}-${process.arch}`;
-const candidates = [
-  path.join(addonDir, `gsd_engine.${platformTag}.node`),
-  path.join(addonDir, "gsd_engine.dev.node"),
-];
+const addonSkip = isNativeAddonLoaded()
+  ? undefined
+  : "native addon not loadable: no local native/addon build and no resolvable @opengsd/engine-<platform> package";
 
-let native;
-for (const candidate of candidates) {
-  try {
-    native = require(candidate);
-    break;
-  } catch {
-    // try next
-  }
-}
-
-if (!native) {
-  console.error("Native addon not found. Run `npm run build:native -w @gsd/native` first.");
-  process.exit(1);
-}
-
-describe("native ttsr: ttsrCompileRules()", () => {
+describe("native ttsr: ttsrCompileRules()", { skip: addonSkip }, () => {
   test("compiles rules and returns a numeric handle", () => {
     const handle = native.ttsrCompileRules([
       { name: "rule1", conditions: ["foo", "bar"] },
@@ -55,7 +34,7 @@ describe("native ttsr: ttsrCompileRules()", () => {
   });
 });
 
-describe("native ttsr: ttsrCheckBuffer()", () => {
+describe("native ttsr: ttsrCheckBuffer()", { skip: addonSkip }, () => {
   test("returns matching rule names", () => {
     const handle = native.ttsrCompileRules([
       { name: "greet", conditions: ["hello\\s+world"] },
@@ -119,7 +98,7 @@ describe("native ttsr: ttsrCheckBuffer()", () => {
   });
 });
 
-describe("native ttsr: ttsrFreeRules()", () => {
+describe("native ttsr: ttsrFreeRules()", { skip: addonSkip }, () => {
   test("frees handle without error", () => {
     const handle = native.ttsrCompileRules([
       { name: "temp", conditions: ["tmp"] },

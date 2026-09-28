@@ -1,38 +1,17 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const require_ = createRequire(import.meta.url);
+const { native, isNativeAddonLoaded } = require_("../../dist/native.js");
 
-// Load the native addon directly
-const addonDir = path.resolve(__dirname, "..", "..", "..", "..", "native", "addon");
-const platformTag = `${process.platform}-${process.arch}`;
-const candidates = [
-  path.join(addonDir, `gsd_engine.${platformTag}.node`),
-  path.join(addonDir, "gsd_engine.dev.node"),
-];
+const addonSkip = isNativeAddonLoaded()
+  ? undefined
+  : "native addon not loadable: no local native/addon build and no resolvable @opengsd/engine-<platform> package";
 
-let native;
-for (const candidate of candidates) {
-  try {
-    native = require(candidate);
-    break;
-  } catch {
-    // try next
-  }
-}
-
-if (!native) {
-  console.error("Native addon not found. Run `npm run build:native -w @gsd/native` first.");
-  process.exit(1);
-}
-
-describe("native ps: listDescendants()", () => {
+describe("native ps: listDescendants()", { skip: addonSkip }, () => {
   test("returns an array for the current process", () => {
     const descendants = native.listDescendants(process.pid);
     assert.ok(Array.isArray(descendants));
@@ -61,7 +40,7 @@ describe("native ps: listDescendants()", () => {
   });
 });
 
-describe("native ps: killTree()", () => {
+describe("native ps: killTree()", { skip: addonSkip }, () => {
   test("kills a process and its children", async () => {
     // Spawn a shell that spawns a sleep subprocess.
     const child = spawn("sh", ["-c", "sleep 60"], { stdio: "ignore" });
@@ -90,7 +69,7 @@ describe("native ps: killTree()", () => {
   });
 });
 
-describe("native ps: processGroupId()", () => {
+describe("native ps: processGroupId()", { skip: addonSkip }, () => {
   test("returns a number for the current process", () => {
     const pgid = native.processGroupId(process.pid);
     if (process.platform === "win32") {
@@ -107,7 +86,7 @@ describe("native ps: processGroupId()", () => {
   });
 });
 
-describe("native ps: killProcessGroup()", () => {
+describe("native ps: killProcessGroup()", { skip: addonSkip }, () => {
   test("returns false for non-existent process group", () => {
     const result = native.killProcessGroup(2147483647, 15);
     assert.equal(result, false);
