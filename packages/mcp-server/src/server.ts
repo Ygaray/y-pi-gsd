@@ -259,6 +259,43 @@ export function resolveStatusSession(
   return { error: `Multiple tracked GSD sessions; pass sessionId or projectDir. Tracked sessions: ${hints}` };
 }
 
+/**
+ * INC-2026-09-29-02 fix 3 (Option A): DB-reconciling fallback for
+ * `gsd_result` / `gsd_status` when `resolveStatusSession` cannot find an
+ * in-memory session (e.g. the in-process session registry was wiped by an
+ * MCP-server restart) but a `projectDir` is available. The canonical
+ * Task/Attempt progress still lives durably in `.gsd/gsd.db`, so rather than
+ * a fatal "Session not found" dead end, this reconciles against the DB via
+ * the same bridge `gsd_progress` already uses (`readProjectProgressViaBridge`)
+ * and returns a payload that is unmistakably NOT a live session —
+ * `status: 'untracked'` + `reconciledFromDb: true` + a human-readable note.
+ * Never fabricates liveness.
+ *
+ * Returns null (never throws) when the bridge isn't configured, there's no
+ * DB, or it can't be opened/read — callers fall through to the existing
+ * "Session not found" error in that case.
+ */
+async function reconcileResultFromDb(
+  sessionId: string | undefined,
+  projectDir: string,
+): Promise<Record<string, unknown> | null> {
+  if (!hasWorkflowToolBridgeConfiguration()) return null;
+  try {
+    const progress = await readProjectProgressViaBridge(projectDir);
+    if (progress === null) return null;
+    return {
+      sessionId: sessionId ?? null,
+      projectDir,
+      status: 'untracked',
+      reconciledFromDb: true,
+      note: 'No in-process session is tracked for this projectDir (e.g. after an MCP-server restart). Progress below is reconciled from the GSD database (.gsd/gsd.db) — this is not a live session.',
+      progress,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // gsd_query filesystem reader
 // ---------------------------------------------------------------------------
@@ -1203,7 +1240,15 @@ export async function createMcpServer(
       const { sessionId, projectDir } = args as { sessionId?: string; projectDir?: string };
       try {
         const resolved = resolveStatusSession(sessionManager, { sessionId, projectDir });
-        if (!resolved.session) return errorContent(resolved.error ?? 'Session not found');
+        if (!resolved.session) {
+          // INC-2026-09-29-02 fix 3: no in-memory session survived (e.g. an
+          // MCP-server restart) — reconcile against the DB before failing.
+          if (projectDir) {
+            const reconciled = await reconcileResultFromDb(sessionId, projectDir);
+            if (reconciled) return jsonContent(reconciled);
+          }
+          return errorContent(resolved.error ?? 'Session not found');
+        }
         return jsonContent(getSessionStatusPayload(resolved.session));
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
@@ -1228,7 +1273,16 @@ export async function createMcpServer(
         // gsd_status (getSessionByDir / getOnlySession) instead of failing
         // fatally on a stale/mismatched sessionId.
         const resolved = resolveStatusSession(sessionManager, { sessionId, projectDir });
-        if (!resolved.session) return errorContent(resolved.error ?? 'Session not found');
+        if (!resolved.session) {
+          // INC-2026-09-29-02 fix 3: final tier — reconcile from the DB
+          // before giving up, so a wiped in-memory registry (server
+          // restart) still surfaces real progress instead of a dead end.
+          if (projectDir) {
+            const reconciled = await reconcileResultFromDb(sessionId, projectDir);
+            if (reconciled) return jsonContent(reconciled);
+          }
+          return errorContent(resolved.error ?? 'Session not found');
+        }
         const result = sessionManager.getResult(resolved.session.sessionId);
         return jsonContent(result);
       } catch (err) {
