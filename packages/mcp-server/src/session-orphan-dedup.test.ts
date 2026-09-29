@@ -392,3 +392,48 @@ describe('SessionManager.cleanup() — completed session must not be orphaned-an
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// CR-02 (34-REVIEW.md, filed there as WR-01): assess whether concurrent
+// `startSession()` calls for the same projectDir can race on the persisted
+// registry pid. Node.js async functions run their synchronous prefix
+// (everything before the first `await`) to completion before yielding —
+// `startSession()`'s "already active" guard (the `existing` check) and the
+// synchronous `this.sessions.set(resolvedDir, session)` insert are BOTH in
+// that prefix, with no `await` between them. So a second `startSession()`
+// call for the same projectDir can never observe the pre-insert state: by
+// the time any other code (including a second call to `startSession()`)
+// gets a turn, the first call has already either thrown past the guard or
+// inserted into `this.sessions` and suspended at its first internal
+// `await` (`client.start()`). This test proves that guarantee holds even
+// when the second call is fired without awaiting the first — the narrowest
+// window the review could describe — rather than merely asserting it in
+// prose. No code change: this closes CR-02 as accepted-with-rationale.
+// ---------------------------------------------------------------------------
+
+describe('SessionManager.startSession() — concurrent same-projectDir race (CR-02, accepted-with-rationale)', () => {
+  it('a second startSession() for the same projectDir, fired before the first is awaited, is rejected by the synchronous guard — never races the registry write', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-concurrent');
+
+    // Deliberately not awaited — the whole point is to fire it back-to-back
+    // with the second call, inside the same synchronous stretch of code.
+    const first = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      /already active/,
+      'a same-projectDir call issued before the first resolves must be rejected, not silently race it',
+    );
+
+    const sessionId = await first;
+
+    // Exactly one child was ever spawned, and the persisted registry entry
+    // matches the ONE session actually tracked in-memory — no
+    // overwrite-by-the-loser scenario occurred.
+    assert.equal(sm.allClients.length, 1, 'the rejected call must never have reached createClient()');
+    const entry = getSessionEntry(projectDir, sm.registryPath);
+    assert.equal(entry?.sessionId, sessionId);
+    assert.equal(entry?.pid, sm.lastClient!.pid);
+  });
+});
