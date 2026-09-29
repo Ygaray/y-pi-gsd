@@ -21,6 +21,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type { SessionManager } from './session-manager.js';
+import { projectRecentEvents } from './session-manager.js';
 import type { ManagedSession } from './types.js';
 import { isRemoteConfigured, tryRemoteQuestions } from './remote-questions.js';
 import type { RemoteToolResult } from './remote-questions.js';
@@ -177,7 +178,15 @@ function textContent(text: string): { content: Array<{ type: 'text'; text: strin
   return { content: [{ type: 'text' as const, text }] };
 }
 
-function getSessionStatusPayload(session: ManagedSession): Record<string, unknown> {
+// RELY-07 / INC-2026-09-29-02 (Phase 34 security audit): the status-flood
+// guard (dropping streaming *_delta fragments + capping per-event payload
+// size) was wired into SessionManager.getResult() only, which backs
+// gsd_result. gsd_status — the tool actually polled during the original
+// flood incident — went through this function and returned the raw,
+// unbounded event slice, so the flood could still occur via gsd_status.
+// Reuse the same `projectRecentEvents` projection here so both tools share
+// one bounding guarantee.
+export function getSessionStatusPayload(session: ManagedSession): Record<string, unknown> {
   const durationMs = Date.now() - session.startTime;
   const toolCallCount = session.events.filter(
     (e) => (e as Record<string, unknown>).type === 'tool_use' ||
@@ -192,7 +201,7 @@ function getSessionStatusPayload(session: ManagedSession): Record<string, unknow
       eventCount: session.events.length,
       toolCalls: toolCallCount,
     },
-    recentEvents: session.events.slice(-10),
+    recentEvents: projectRecentEvents(session.events, 10),
     pendingBlocker: session.pendingBlocker
       ? {
           id: session.pendingBlocker.id,

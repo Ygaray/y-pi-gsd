@@ -155,7 +155,7 @@ function boundEventPayload(event: SdkAgentEvent, maxBytes = MAX_STATUS_EVENT_PAY
  * `limit`, so meaningful events aren't crowded out by delta noise), and each
  * remaining event's payload is size-capped.
  */
-function projectRecentEvents(events: SdkAgentEvent[], limit: number): SdkAgentEvent[] {
+export function projectRecentEvents(events: SdkAgentEvent[], limit: number): SdkAgentEvent[] {
   const meaningful = events.filter((event) => !STREAMING_DELTA_EVENT_TYPES.has(event.type));
   return meaningful.slice(-limit).map((event) => boundEventPayload(event));
 }
