@@ -19,6 +19,14 @@ import type {
 } from './types.js';
 import { MAX_EVENTS, INIT_TIMEOUT_MS } from './types.js';
 import { signalAutoLockPid } from './pid-registry.js';
+import {
+  getSessionEntry,
+  isOrphanEntryAlive,
+  killOrphanSessionPid,
+  registerSessionEntry,
+  removeSessionEntry,
+  type SessionLivenessOptions,
+} from './session-persist.js';
 
 // ---------------------------------------------------------------------------
 // Inlined detection logic (from headless-events.ts — no internal package imports)
@@ -190,6 +198,19 @@ export class SessionManager {
       // map entry alone would orphan the child process.
       void existing.client.stop().catch(() => { /* swallow */ });
       this.sessions.delete(resolvedDir);
+      // INC-2026-09-29-02 fix 3 (Option B): this in-memory session owned the
+      // persisted registry row for resolvedDir — drop it now that we're
+      // reclaiming its child, so a future restart doesn't mistake it for an
+      // orphan.
+      removeSessionEntry(resolvedDir, this.getSessionRegistryPath());
+    } else {
+      // INC-2026-09-29-02 fix 3 (Option B): no in-memory session for this
+      // projectDir — but a persisted registry entry may reference a headless
+      // child that is still alive from a PRIOR MCP server instance (the
+      // in-memory Map is wiped on restart, so startSession()'s "already
+      // active" guard above can't see it). Reap it before starting a new
+      // driver so at most one driver ever runs per worktree.
+      this.reapPersistedOrphanSession(resolvedDir);
     }
 
     const cliPath = options.cliPath ?? SessionManager.resolveCLIPath();
@@ -230,6 +251,24 @@ export class SessionManager {
 
       session.sessionId = initResult.sessionId;
       session.status = 'running';
+
+      // INC-2026-09-29-02 fix 3 (Option B): persist this session's child pid
+      // now that it's known, so a subsequent MCP server restart can detect
+      // this driver as a live orphan (rather than launching a duplicate) if
+      // this server instance dies without a clean teardown.
+      const childPid = client.pid;
+      if (typeof childPid === 'number') {
+        registerSessionEntry(
+          {
+            sessionId: session.sessionId,
+            projectDir: resolvedDir,
+            pid: childPid,
+            startTime: new Date().toISOString(),
+            status: session.status,
+          },
+          this.getSessionRegistryPath(),
+        );
+      }
 
       // Wire event tracking
       const unsubscribeEvents = client.onEvent((event: SdkAgentEvent) => {
@@ -275,6 +314,58 @@ export class SessionManager {
    */
   protected createClient(options: { cliPath: string; cwd: string; args: string[] }): RpcClient {
     return new RpcClient(options);
+  }
+
+  /**
+   * Testability seam (INC-2026-09-29-02 fix 3 Option B) — override to point
+   * the persisted session registry at an isolated temp file instead of the
+   * real `GSD_HOME`/session-instances.json.
+   */
+  protected getSessionRegistryPath(): string | undefined {
+    return undefined;
+  }
+
+  /**
+   * Testability seam (INC-2026-09-29-02 fix 3 Option B) — override to inject
+   * fake `kill`/`getProcessStartTime` so tests never signal a real pid.
+   */
+  protected getSessionLivenessOptions(): SessionLivenessOptions {
+    return {};
+  }
+
+  /**
+   * Detect and reap an orphaned headless child left by a PRIOR MCP server
+   * instance for `resolvedDir` — see the module-level comment on
+   * session-persist.ts for the full incident context. No-op when there is no
+   * persisted entry, when the recorded pid is already dead, or when the
+   * recorded pid has been recycled by an unrelated process (start-time
+   * guard) — in all of those cases the stale row is simply dropped.
+   */
+  private reapPersistedOrphanSession(resolvedDir: string): void {
+    const registryPath = this.getSessionRegistryPath();
+    const entry = getSessionEntry(resolvedDir, registryPath);
+    if (!entry) return;
+
+    const livenessOptions = this.getSessionLivenessOptions();
+    if (!isOrphanEntryAlive(entry, livenessOptions)) {
+      removeSessionEntry(resolvedDir, registryPath);
+      return;
+    }
+
+    const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);
+    const label = result === 'killed'
+      ? `killed orphan pid=${entry.pid}`
+      : result === 'force-killed'
+        ? `force-killed orphan pid=${entry.pid}`
+        : result === 'already-dead'
+          ? `orphan pid=${entry.pid} already dead`
+          : result === 'invalid'
+            ? `ignored invalid/recycled orphan pid=${String(entry.pid)}`
+            : `failed to kill orphan pid=${entry.pid}: ${result.error}`;
+    process.stderr.write(
+      `[gsd-mcp-server] INC-2026-09-29-02: reaped orphaned headless session for ${resolvedDir} left by a prior MCP server instance — ${label}\n`,
+    );
+    removeSessionEntry(resolvedDir, registryPath);
   }
 
   /**
@@ -394,6 +485,10 @@ export class SessionManager {
 
     session.status = 'cancelled';
     session.unsubscribe?.();
+    // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped now
+    // — drop its persisted registry row so a future restart doesn't treat it
+    // as a live orphan.
+    removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
   }
 
   /**
@@ -441,6 +536,10 @@ export class SessionManager {
         );
         session.status = 'cancelled';
       }
+      // INC-2026-09-29-02 fix 3 (Option B): every session torn down here is
+      // genuinely stopped (or about to be) — drop its persisted registry row
+      // so the registry doesn't accumulate stale entries across restarts.
+      removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
     }
 
     await Promise.allSettled(stopPromises);
@@ -493,6 +592,11 @@ export class SessionManager {
     session.status = 'error';
     session.error = `Agent process exited unexpectedly (${reason})`;
     session.pendingBlocker = null;
+    // INC-2026-09-29-02 fix 3 (Option B): the child is gone — drop its
+    // persisted registry row so a future restart doesn't treat a dead pid as
+    // a live orphan (isOrphanEntryAlive would already reject a dead pid, but
+    // dropping it here keeps the registry from accumulating stale rows).
+    removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
   }
 
   private handleEvent(session: ManagedSession, event: SdkAgentEvent): void {

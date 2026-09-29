@@ -131,7 +131,11 @@ function defaultGetProcessCommand(pid: number): string | null {
   }
 }
 
-function defaultGetProcessStartTime(pid: number): number | null {
+// Exported for reuse by session-persist.ts (INC-2026-09-29-02 fix 3 Option B) —
+// the orphan-child registry needs the same pid-liveness + start-time-guard
+// technique used here, without duplicating the platform-specific `ps`/
+// PowerShell invocations.
+export function defaultGetProcessStartTime(pid: number): number | null {
   try {
     if (process.platform === 'win32') {
       const out = execFileSync(
@@ -233,7 +237,8 @@ public static class GsdProcCwd{
   }
 }
 
-function isSafePid(pid: unknown): pid is number {
+// Exported for reuse by session-persist.ts (INC-2026-09-29-02 fix 3 Option B).
+export function isSafePid(pid: unknown): pid is number {
   return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 1;
 }
 
@@ -297,7 +302,8 @@ function defaultListProcesses(): McpProcessSnapshot[] {
   }
 }
 
-function defaultWaitForExit(): void {
+// Exported for reuse by session-persist.ts (INC-2026-09-29-02 fix 3 Option B).
+export function defaultWaitForExit(): void {
   const shared = new Int32Array(new SharedArrayBuffer(4));
   Atomics.wait(shared, 0, 0, 250);
 }
@@ -347,7 +353,8 @@ function isSameProjectMcpProcess(command: string, cwd: string | null, projectDir
   return commandContainsProjectPath(command, projectDir);
 }
 
-function isPidAlive(
+// Exported for reuse by session-persist.ts (INC-2026-09-29-02 fix 3 Option B).
+export function isPidAlive(
   pid: number,
   sendSignal: (pid: number, signal?: NodeJS.Signals | 0) => void,
 ): boolean {

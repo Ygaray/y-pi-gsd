@@ -329,6 +329,16 @@ export class RpcClient {
 		return this.stderr;
 	}
 
+	/**
+	 * The spawned child process's pid, once `start()` has resolved.
+	 * `undefined` before start() or after the process has been torn down
+	 * (INC-2026-09-29-02 fix 3 Option B — callers persist this pid so a
+	 * restarted MCP server can detect and reap an orphaned child).
+	 */
+	get pid(): number | undefined {
+		return this.process?.pid;
+	}
+
 	// =========================================================================
 	// Command Methods
 	// =========================================================================
