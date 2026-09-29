@@ -170,6 +170,33 @@ export function recoveryRouteLever(route: TaskRecoveryRouteSnapshot): string {
 }
 
 /**
+ * RELY-03 recurrence (INC-2026-09-27-01): `gsd_task_settle`'s plain settle
+ * path (task-settle.ts's `applyTaskSettle`) settles a running Attempt as
+ * `interrupted`/`operator-settle` without ever calling
+ * recordFailureAndSelectRecovery — so readTaskRecoveryRoute always returns
+ * null for it, and the running-attempt gate's rejection carried no
+ * actionable lever at all beyond "re-enter `/gsd auto`", even when the
+ * deliverable is verifiably complete (e.g. a false verification failure
+ * triggered the settle). Name the evidence-gated escape hatch
+ * (task-settle.ts's `operator-attested` disposition, extended for this exact
+ * shape) instead of staying silent. Best-effort like its caller: empty
+ * string when the shape doesn't match.
+ */
+function operatorSettleAttestationLever(
+  attempt: NonNullable<ReturnType<typeof readLatestTaskAttempt>>,
+): string {
+  if (
+    attempt.state === "settled" && attempt.outcome === "interrupted" &&
+    attempt.resultFailureClass === "operator-settle"
+  ) {
+    return " No recovery route was ever recorded for this settled Attempt — if the deliverable is " +
+      "verifiably complete, close it with `gsd task settle <unit> --operator-attested --evidence " +
+      '\'{"command":"...","exitCode":0,"verdict":"pass"}\'` instead of re-entering `/gsd auto`.';
+  }
+  return "";
+}
+
+/**
  * Describe the latest Attempt's settled state and any recorded recovery
  * action so a session rejected by the running-attempt gate learns the
  * sanctioned exit instead of a bare rejection (#1973). Best-effort: an empty
@@ -184,7 +211,7 @@ function latestAttemptRecoveryContext(task: TaskCompletionIdentity): string {
         attempt.resultFailureClass ? ` failureClass=${attempt.resultFailureClass}` : ""}`
       : " still marked running";
     const route = readTaskRecoveryRoute(attempt.attemptId);
-    const lever = route ? recoveryRouteLever(route) : "";
+    const lever = route ? recoveryRouteLever(route) : operatorSettleAttestationLever(attempt);
     return ` Latest Attempt ${attempt.attemptId} is${settled}.${lever}`;
   } catch {
     return "";

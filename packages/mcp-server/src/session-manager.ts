@@ -106,6 +106,53 @@ function isBlockingUIRequest(event: Record<string, unknown>): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// gsd_status projection — recentEvents shaping (status-flood incident)
+//
+// A repeated `gsd_status` poll against a nested session re-emitted the raw
+// event ring buffer verbatim, including intra-message streaming deltas
+// (`toolcall_delta` et al. — one per streamed character/token chunk, never
+// meaningful standalone) and unbounded tool payloads. One session's status
+// was dumped 5 times in a row with growing 3.7 KB -> 47 KB payloads, flooding
+// the human-facing transcript and contributing to context bloat. The
+// projection below drops raw streaming fragments and caps per-event byte
+// size before events are surfaced through `getResult().recentEvents`.
+// ---------------------------------------------------------------------------
+
+/** Intra-message streaming deltas — noise in a point-in-time status snapshot. */
+const STREAMING_DELTA_EVENT_TYPES = new Set(['text_delta', 'thinking_delta', 'toolcall_delta']);
+
+/** Max serialized size (bytes) for a single event in a `gsd_status` snapshot. */
+const MAX_STATUS_EVENT_PAYLOAD_BYTES = 2_000;
+
+/**
+ * Cap an event's serialized size, replacing an oversized event with a
+ * truncated preview plus an explicit elided-byte count. Keeps `gsd_status`
+ * genuinely useful (recent meaningful events) without any single poll being
+ * able to emit tens of KB from one large tool call/result.
+ */
+function boundEventPayload(event: SdkAgentEvent, maxBytes = MAX_STATUS_EVENT_PAYLOAD_BYTES): SdkAgentEvent {
+  const serialized = JSON.stringify(event) ?? '';
+  if (serialized.length <= maxBytes) return event;
+  return {
+    type: event.type,
+    truncated: true,
+    preview: serialized.slice(0, maxBytes),
+    elidedBytes: serialized.length - maxBytes,
+  };
+}
+
+/**
+ * Project the raw event ring buffer into a bounded, human-safe set of recent
+ * events for `gsd_status`: streaming deltas are dropped (not just trimmed to
+ * `limit`, so meaningful events aren't crowded out by delta noise), and each
+ * remaining event's payload is size-capped.
+ */
+function projectRecentEvents(events: SdkAgentEvent[], limit: number): SdkAgentEvent[] {
+  const meaningful = events.filter((event) => !STREAMING_DELTA_EVENT_TYPES.has(event.type));
+  return meaningful.slice(-limit).map((event) => boundEventPayload(event));
+}
+
+// ---------------------------------------------------------------------------
 // SessionManager
 // ---------------------------------------------------------------------------
 
@@ -151,11 +198,7 @@ export class SessionManager {
     if (options.model) args.push('--model', options.model);
     if (options.bare) args.push('--bare');
 
-    const client = new RpcClient({
-      cliPath,
-      cwd: resolvedDir,
-      args,
-    });
+    const client = this.createClient({ cliPath, cwd: resolvedDir, args });
 
     // Build the session shell before async operations so we can track state
     const session: ManagedSession = {
@@ -189,9 +232,24 @@ export class SessionManager {
       session.status = 'running';
 
       // Wire event tracking
-      session.unsubscribe = client.onEvent((event: SdkAgentEvent) => {
+      const unsubscribeEvents = client.onEvent((event: SdkAgentEvent) => {
         this.handleEvent(session, event);
       });
+
+      // INC-2026-09-29-02: before this, a dead child process (crash,
+      // SIGTERM, OOM) never emitted any agent event, so SessionManager had
+      // zero wiring to notice — the session sat at a stale 'running' status
+      // forever (a zombie). Combined into the single `session.unsubscribe`
+      // below so every existing eviction/cancel/cleanup call site tears
+      // this down too, with no changes needed at those call sites.
+      const unsubscribeExit = client.onExit((info) => {
+        this.handleUnexpectedExit(session, info);
+      });
+
+      session.unsubscribe = () => {
+        unsubscribeEvents();
+        unsubscribeExit();
+      };
 
       // Kick off auto-mode
       const command = options.command ?? '/gsd auto';
@@ -208,6 +266,15 @@ export class SessionManager {
       // Keep session in map so callers can inspect the error
       throw new Error(`Failed to start session for ${resolvedDir}: ${session.error}`);
     }
+  }
+
+  /**
+   * Factory seam for `RpcClient` construction (INC-2026-09-29-02 testability).
+   * Subclasses can override to inject a duck-typed mock client without full
+   * module mocking, while still exercising the real `startSession()` wiring.
+   */
+  protected createClient(options: { cliPath: string; cwd: string; args: string[] }): RpcClient {
+    return new RpcClient(options);
   }
 
   /**
@@ -344,7 +411,7 @@ export class SessionManager {
       status: session.status,
       durationMs,
       cost: session.cost,
-      recentEvents: session.events.slice(-10),
+      recentEvents: projectRecentEvents(session.events, 10),
       pendingBlocker: session.pendingBlocker
         ? { id: session.pendingBlocker.id, method: session.pendingBlocker.method, message: session.pendingBlocker.message }
         : null,
@@ -403,6 +470,30 @@ export class SessionManager {
   // ---------------------------------------------------------------------------
   // Private: Event Handling
   // ---------------------------------------------------------------------------
+
+  /**
+   * INC-2026-09-29-02: the child process can die (crash, SIGTERM, OOM) with
+   * no corresponding agent event ever emitted. Only an *unexpected* exit —
+   * not one caused by our own stop()/abort()-driven teardown (eviction,
+   * cancelSession, cleanup) — transitions the session to a terminal 'error'
+   * status, so getResult() surfaces the dead session instead of a stale
+   * 'running'. A session that already reached a terminal status by other
+   * means (completed/cancelled/error) is left alone.
+   */
+  private handleUnexpectedExit(
+    session: ManagedSession,
+    info: { code: number | null; signal: NodeJS.Signals | null; expected: boolean }
+  ): void {
+    if (info.expected) return;
+    if (session.status === 'completed' || session.status === 'cancelled' || session.status === 'error') {
+      return;
+    }
+
+    const reason = info.signal ? `signal ${info.signal}` : `code ${info.code}`;
+    session.status = 'error';
+    session.error = `Agent process exited unexpectedly (${reason})`;
+    session.pendingBlocker = null;
+  }
 
   private handleEvent(session: ManagedSession, event: SdkAgentEvent): void {
     // Ring buffer: push and trim

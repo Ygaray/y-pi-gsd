@@ -52,6 +52,25 @@ export interface RpcClientOptions {
 
 export type RpcEventListener = (event: SdkAgentEvent) => void;
 
+/**
+ * Info delivered to an `onExit` listener (INC-2026-09-29-02).
+ *
+ * `expected` is true when the exit followed our own `stop()`-driven
+ * teardown (i.e. `_stopped` was already set before the child's native
+ * `exit` event fired) and false for anything else — a crash, an external
+ * SIGTERM/SIGKILL, an OOM kill. Consumers that only care about *unexpected*
+ * death (e.g. a session manager deciding whether to mark a session errored)
+ * should gate on `!expected` rather than trying to infer intent from
+ * `code`/`signal` alone.
+ */
+export interface RpcExitInfo {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	expected: boolean;
+}
+
+export type RpcExitListener = (info: RpcExitInfo) => void;
+
 /** Cap on retained stderr tail (bytes) to bound heap for long-lived agents. */
 const MAX_STDERR_BYTES = 64 * 1024;
 
@@ -64,6 +83,7 @@ export class RpcClient {
 	private stopReadingStdout: (() => void) | null = null;
 	private _stderrHandler?: (data: Buffer) => void;
 	private eventListeners: RpcEventListener[] = [];
+	private exitListeners: RpcExitListener[] = [];
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	private requestId = 0;
@@ -132,6 +152,17 @@ export class RpcClient {
 				const error = new Error(`Agent process exited unexpectedly (${reason}). Stderr: ${this.stderr}`);
 				this.rejectPendingRequests(error);
 			}
+
+			// INC-2026-09-29-02: notify exit subscribers unconditionally — a
+			// session with no in-flight RPC request still needs to learn its
+			// child died (e.g. crash while idle between prompts). `_stopped` is
+			// set by stop() before it kills the child, so by the time this
+			// handler runs it reliably distinguishes our own teardown from an
+			// unexpected death.
+			const expected = this._stopped;
+			for (const listener of this.exitListeners) {
+				listener({ code, signal, expected });
+			}
 		});
 
 		// Wait a moment for process to initialize
@@ -188,6 +219,26 @@ export class RpcClient {
 			const index = this.eventListeners.indexOf(listener);
 			if (index !== -1) {
 				this.eventListeners.splice(index, 1);
+			}
+		};
+	}
+
+	/**
+	 * Subscribe to child process exit (INC-2026-09-29-02).
+	 *
+	 * Fires for every child exit — both our own `stop()`-driven teardown and
+	 * an unexpected crash/kill — so a consumer (e.g. a session manager) can
+	 * detect a dead child without reaching into this class's internals. See
+	 * {@link RpcExitInfo} for how to distinguish expected vs. unexpected exits.
+	 *
+	 * Returns an unsubscribe function.
+	 */
+	onExit(listener: RpcExitListener): () => void {
+		this.exitListeners.push(listener);
+		return () => {
+			const index = this.exitListeners.indexOf(listener);
+			if (index !== -1) {
+				this.exitListeners.splice(index, 1);
 			}
 		};
 	}

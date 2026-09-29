@@ -10,6 +10,7 @@ import {
   applyBlockerAcceptedDisposition,
   applyOperatorAttestedDisposition,
   applyTaskSettle,
+  isOperatorSettleInterruptedResidue,
   planBlockerAcceptedDisposition,
   planOperatorAttestedDisposition,
   planTaskSettle,
@@ -58,6 +59,21 @@ function parseTaskSettleArgs(args: string): {
     operatorAttested,
     evidenceRaw,
   };
+}
+
+/**
+ * RELY-03 recurrence (INC-2026-09-27-01): a plain settle applied to an
+ * already-settled/interrupted/operator-settle Attempt with no recovery route
+ * used to report a bare "nothing to do" — the exact dead-end that forced a
+ * re-entry into `/gsd auto`. Append the `--operator-attested` next step when
+ * that shape applies so the CLI's own idle-repeat surfaces the escape hatch.
+ */
+function operatorAttestedHint(task: TaskSettleTask): string {
+  return isOperatorSettleInterruptedResidue(task)
+    ? " No recovery route was ever recorded for this settled Attempt — if the deliverable is " +
+      "verifiably complete, re-run with --operator-attested --evidence " +
+      '\'{"command":"...","exitCode":0,"verdict":"pass"}\'.'
+    : "";
 }
 
 function cliInvocation(): ExecutionInvocation {
@@ -215,7 +231,11 @@ export async function handleTaskSettle(
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
       if (plan.rows.length === 0 && plan.lifecycleRows.length === 0) {
-        ctx.ui.notify(`gsd task settle (dry run): ${unit} has no running Attempt — nothing to do.`, "info");
+        ctx.ui.notify(
+          `gsd task settle (dry run): ${unit} has no running Attempt — nothing to do.` +
+          operatorAttestedHint(parsed.task),
+          "info",
+        );
         return;
       }
       const lines = [
@@ -240,7 +260,11 @@ export async function handleTaskSettle(
       ...settleOptions,
     });
     if (!result.settled && !result.reconciled) {
-      ctx.ui.notify(`gsd task settle: ${unit} has no running Attempt — nothing to do.`, "info");
+      ctx.ui.notify(
+        `gsd task settle: ${unit} has no running Attempt — nothing to do.` +
+        operatorAttestedHint(parsed.task),
+        "info",
+      );
       return;
     }
     const parts: string[] = [];

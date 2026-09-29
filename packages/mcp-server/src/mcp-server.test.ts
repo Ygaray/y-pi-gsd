@@ -764,6 +764,54 @@ describe('SessionManager', () => {
     assert.equal(result.error, null);
   });
 
+  // Regression for the "internal, human-facing text flood" incident: a nested
+  // gsd_status poll re-emitted raw toolcall_delta streaming fragments verbatim,
+  // dumping one session's growing event buffer (3.7 KB -> 47 KB) into the
+  // human-facing transcript across repeated polls.
+  it('getResult recentEvents excludes raw toolcall_delta streaming fragments (status-flood incident)', async () => {
+    const sessionId = await sm.startSession('/tmp/delta-flood', { cliPath: '/usr/bin/gsd' });
+    const client = sm.lastClient!;
+
+    client.emitEvent({ type: 'toolcall_start', contentIndex: 1 });
+    for (let i = 0; i < 5; i++) {
+      client.emitEvent({ type: 'toolcall_delta', contentIndex: 1, delta: `/yahir/blackj${i}` });
+    }
+    client.emitEvent({
+      type: 'toolcall_end',
+      contentIndex: 1,
+      toolCall: { id: 'call-1', name: 'read_file', arguments: '{"path":"/yahir/blackjack.ts"}' },
+    });
+
+    const result = sm.getResult(sessionId);
+    const types = (result.recentEvents as Array<Record<string, unknown>>).map((e) => e.type);
+    assert.ok(
+      !types.includes('toolcall_delta'),
+      `expected no raw toolcall_delta fragments in recentEvents, got: ${JSON.stringify(types)}`
+    );
+    // The meaningful start/end events should still be present.
+    assert.ok(types.includes('toolcall_end'));
+  });
+
+  it('getResult recentEvents bounds oversized event payloads with an elided-bytes marker', async () => {
+    const sessionId = await sm.startSession('/tmp/oversized-payload', { cliPath: '/usr/bin/gsd' });
+    const client = sm.lastClient!;
+
+    const hugeArgs = 'x'.repeat(50_000);
+    client.emitEvent({
+      type: 'toolcall_end',
+      contentIndex: 0,
+      toolCall: { id: 'call-huge', name: 'write_file', arguments: hugeArgs },
+    });
+
+    const result = sm.getResult(sessionId);
+    const serialized = JSON.stringify(result.recentEvents);
+    assert.ok(
+      serialized.length < 10_000,
+      `expected recentEvents payload to be bounded, got ${serialized.length} bytes`
+    );
+    assert.match(serialized, /elided/);
+  });
+
   it('getResult errors for unknown session', () => {
     assert.throws(
       () => sm.getResult('unknown'),

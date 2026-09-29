@@ -24,6 +24,7 @@ import {
   applyBlockerAcceptedDisposition,
   applyOperatorAttestedDisposition,
   applyTaskSettle,
+  isOperatorSettleInterruptedResidue,
   planBlockerAcceptedDisposition,
   planOperatorAttestedDisposition,
   planTaskSettle,
@@ -1477,5 +1478,245 @@ test("operator-attested apply refuses when the route head or the recovery action
     row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
     "in_progress",
     "leg 2: the Task must remain un-closed after the refused apply",
+  );
+});
+
+// ── RELY-03 recurrence: operator-settle/interrupted has no recovery route ──
+// ── (INC-2026-09-27-01) ─────────────────────────────────────────────────────
+//
+// gsd_task_settle's plain settle path (applyTaskSettle, exercised above)
+// settles a running Attempt as interrupted/operator-settle WITHOUT ever
+// calling recordFailureAndSelectRecovery — unlike seedRetryRoutedResidue and
+// seedNonRetryRoutedResidue, which explicitly route the failure. That is the
+// live incident shape: a settled Attempt with no recovery route at all,
+// where gsd_task_complete's running-attempt gate and gsd_task_recovery_resume
+// both dead-end, forcing a re-entry into `/gsd auto` even when the
+// deliverable is verifiably complete.
+
+function seedOperatorSettleInterruptedResidue(): { attemptId: string; resultId: string } {
+  const { attemptId } = seedRunningAttempt();
+  const applied = applyTaskSettle({
+    invocation: invocation("fixture/operator-settle"),
+    task: TASK,
+    reason: "false verification failure settled the Attempt out from under the session",
+  });
+  assert.equal(applied.settled, true, "fixture precondition: applyTaskSettle must settle the running Attempt");
+  assert.ok(applied.resultId, "fixture precondition: applyTaskSettle must produce a Result id");
+  // Mirror the live incident: the Task was mid-execution (legacy tasks.status
+  // in_progress) when the false verification failure triggered the settle.
+  // applyTaskSettle without reconcileLifecycle never touches legacy
+  // tasks.status itself (matching seedRetryRoutedResidue/
+  // seedNonRetryRoutedResidue/seedBlockerDiscoveredResidue above).
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  return { attemptId, resultId: applied.resultId! };
+}
+
+test("seedOperatorSettleInterruptedResidue fixture reads back as settled/interrupted/operator-settle at route with no recovery route", () => {
+  const { attemptId } = seedOperatorSettleInterruptedResidue();
+  const settled = readTaskAttempt(attemptId);
+  assert.equal(settled?.state, "settled");
+  assert.equal(settled?.outcome, "interrupted");
+  assert.equal(settled?.resultFailureClass, "operator-settle");
+  assert.equal(settled?.nextStage, "route");
+  assert.equal(readTaskRecoveryRoute(attemptId), null, "the plain settle path must never route the failure");
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "legacy tasks.status must remain in_progress",
+  );
+});
+
+test("RED: resolveTaskCompletionAuthority dead-ends on a settled operator-settle/interrupted Attempt with no actionable lever before the fix (documents the incident repro)", () => {
+  // This test intentionally documents the PRE-fix dead-end shape by asserting
+  // on the parts of the message that are common to both the dead-end and the
+  // fixed message. The fixed message is asserted precisely in the next test;
+  // this one only pins the base rejection shape so a future regression that
+  // drops the base wording is also caught.
+  seedOperatorSettleInterruptedResidue();
+  assert.throws(
+    () => resolveTaskCompletionAuthority(TASK, "completion/operator-settle-dead-end"),
+    /Canonical Task completion has no running Attempt to close.*Re-enter `\/gsd auto`.*settled with outcome=interrupted failureClass=operator-settle/s,
+  );
+});
+
+test("resolveTaskCompletionAuthority names the operator-attested escape hatch for a settled operator-settle/interrupted Attempt with no recovery route (RELY-03, INC-2026-09-27-01)", () => {
+  seedOperatorSettleInterruptedResidue();
+  let thrown: Error | undefined;
+  try {
+    resolveTaskCompletionAuthority(TASK, "completion/operator-settle-lever");
+  } catch (err) {
+    thrown = err as Error;
+  }
+  assert.ok(thrown, "the running-attempt gate must still reject completion");
+  assert.match(
+    thrown.message,
+    /No recovery route was ever recorded for this settled Attempt/,
+    "the dead-end message must now name an actionable escape hatch instead of staying silent",
+  );
+  assert.match(thrown.message, /--operator-attested/);
+  assert.match(thrown.message, /"exitCode":0,"verdict":"pass"/);
+});
+
+test("isOperatorSettleInterruptedResidue reads true for the operator-settle shape and false otherwise", () => {
+  seedOperatorSettleInterruptedResidue();
+  assert.equal(isOperatorSettleInterruptedResidue(TASK), true);
+});
+
+test("isOperatorSettleInterruptedResidue reads false for a retry-routed failure (not operator-settle)", () => {
+  seedRetryRoutedResidue();
+  assert.equal(isOperatorSettleInterruptedResidue(TASK), false);
+});
+
+test("isOperatorSettleInterruptedResidue reads false once the Task is closed", () => {
+  const { attemptId, resultId } = seedOperatorSettleInterruptedResidue();
+  applyOperatorAttestedDisposition({
+    invocation: invocation("operator-settle/residue-probe/apply"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "operator verified manually",
+  });
+  assert.equal(isOperatorSettleInterruptedResidue(TASK), false);
+  assert.ok(attemptId);
+  assert.ok(resultId);
+});
+
+test("operator-attested dry-run accepts a settled operator-settle/interrupted Attempt with no recovery route, superseding nothing", () => {
+  const { attemptId, resultId } = seedOperatorSettleInterruptedResidue();
+
+  const plan = planOperatorAttestedDisposition(
+    TASK,
+    PASSING_EVIDENCE,
+    "verified the deliverable manually after a false verification failure settled the Attempt",
+  );
+
+  assert.equal(plan.rows.length, 1);
+  assert.equal(plan.alreadyAttested, false);
+  assert.equal(plan.rows[0].attemptId, attemptId);
+  assert.equal(plan.rows[0].resultId, resultId);
+  assert.equal(plan.rows[0].currentStatus, "in_progress");
+  assert.equal(plan.rows[0].targetStatus, "operator-attested");
+  assert.equal(plan.rows[0].lifecycleFrom, "in_progress");
+  assert.equal(plan.rows[0].routeConsumed, true);
+  assert.equal(
+    plan.rows[0].supersededRecoveryActionId,
+    null,
+    "an operator-settled Attempt was never routed, so nothing is superseded",
+  );
+  assert.deepEqual(plan.rows[0].evidence, PASSING_EVIDENCE);
+});
+
+test("operator-attested apply closes a settled operator-settle/interrupted Attempt, matches shadow, consumes the route head, and is idempotent", () => {
+  const { attemptId, resultId } = seedOperatorSettleInterruptedResidue();
+
+  const applied = applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/operator-settle/apply-1"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "verified the deliverable manually",
+  });
+  assert.equal(applied.attested, true);
+  assert.equal(applied.alreadyAttested, false);
+  assert.equal(applied.attemptId, attemptId);
+  assert.equal(applied.resultId, resultId);
+  assert.equal(applied.routeConsumed, true);
+
+  assert.equal(
+    row("SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = 'T01'").status,
+    "operator-attested",
+  );
+  assert.equal(row("SELECT status AS status FROM tasks WHERE id = 'T01'").status, "operator-attested");
+  assert.equal(isClosedStatus("operator-attested"), true);
+  assert.equal(
+    compareLifecycleShadow("operator-attested", "operator-attested").kind,
+    "match",
+    "both vocabularies must agree so closeout reads no shadow drift",
+  );
+  assert.equal(readLatestTaskAttemptSnapshotStage(), "closeout", "the route head must be consumed");
+
+  const provenance = row(`
+    SELECT payload_json FROM workflow_domain_events WHERE event_type = 'task.operator.attested'
+  `);
+  const payload = JSON.parse(String(provenance.payload_json)) as Record<string, unknown>;
+  assert.equal(payload["disposition"], "operator-attested");
+  assert.equal(payload["attemptId"], attemptId);
+  assert.equal(payload["resultId"], resultId);
+  assert.equal(payload["supersededRecoveryActionId"], undefined, "nothing was ever routed to supersede");
+
+  // The interrupted Attempt/Result remain immutable history — no fabricated verdict.
+  const settled = readTaskAttempt(attemptId);
+  assert.equal(settled?.state, "settled");
+  assert.equal(settled?.outcome, "interrupted");
+  assert.equal(settled?.resultFailureClass, "operator-settle");
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count,
+    1,
+    "the disposition must not fabricate a second Result",
+  );
+
+  // The dead-end is actually gone: gsd_task_complete's running-attempt gate
+  // no longer applies (the Task is closed), and a resolveTaskCompletionAuthority
+  // call against the now-closed Task no longer needs the escape hatch.
+  assert.equal(isOperatorSettleInterruptedResidue(TASK), false);
+
+  const again = applyOperatorAttestedDisposition({
+    invocation: invocation("operator-attested/operator-settle/apply-2"),
+    task: TASK,
+    evidence: PASSING_EVIDENCE,
+    reason: "verified the deliverable manually",
+  });
+  assert.equal(again.attested, false);
+  assert.equal(again.alreadyAttested, true);
+  assert.equal(
+    row(`
+      SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.operator.attested'
+    `).count,
+    1,
+    "a repeated applied run is a no-op",
+  );
+});
+
+test("operator-attested still enforces the evidence gate for a settled operator-settle/interrupted Attempt", () => {
+  seedOperatorSettleInterruptedResidue();
+  const before = taskStateSnapshot("T01");
+  assert.throws(
+    () => planOperatorAttestedDisposition(
+      TASK,
+      { command: "npm test", exitCode: 1, verdict: "pass" },
+      "manual check",
+    ),
+    /operator-attested requires evidence\.exitCode to be exactly the integer 0; found 1\b/,
+  );
+  assertUnchangedTaskState("T01", before);
+});
+
+test("operator-attested refuses a settled operator-settle/interrupted Attempt that was unexpectedly routed anyway", () => {
+  const { attemptId, resultId } = seedOperatorSettleInterruptedResidue();
+  recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/operator-settle-routed"),
+    attemptId,
+    resultId,
+    owner: "agent",
+    classification: { failureKind: "operator-settle" },
+    summary: "unexpected route on an operator-settled Attempt",
+    evidence: { detail: "unexpected" },
+    rationale: "defensive fixture: a route should never exist for this shape",
+  });
+  const route = readTaskRecoveryRoute(attemptId);
+  assert.ok(route, "fixture must produce a recovery route");
+
+  assert.throws(
+    () => planOperatorAttestedDisposition(TASK, PASSING_EVIDENCE, "manual check"),
+    /operator-attested requires an operator-settled interrupted Attempt with no recorded recovery route/,
+  );
+});
+
+test("operator-attested's dead-Attempt refusal message still names 'settled as failed at the route stage' verbatim for older regex consumers, and now also names the RELY-03 shape (compat)", () => {
+  const other = { milestoneId: "M001", sliceId: "S01", taskId: "T02" };
+  seedInProgressNoAttempt("T02");
+  assert.throws(
+    () => planOperatorAttestedDisposition(other, PASSING_EVIDENCE, "operator verified manually"),
+    /operator-attested requires the latest Attempt of M001\/S01\/T02 settled as failed at the route stage; found no Attempt at no Kernel head\..*interrupted\/operator-settle at the route stage with no recovery route is also accepted/s,
   );
 });

@@ -205,7 +205,7 @@ function getSessionStatusPayload(session: ManagedSession): Record<string, unknow
   };
 }
 
-function resolveStatusSession(
+export function resolveStatusSession(
   sessionManager: SessionManager,
   input: { sessionId?: string; projectDir?: string },
 ): { session?: ManagedSession; error?: string } {
@@ -214,7 +214,22 @@ function resolveStatusSession(
 
   if (sessionId) {
     const session = sessionManager.getSession(sessionId);
-    return session ? { session } : { error: `Session not found: ${sessionId}` };
+    if (session) return { session };
+
+    // INC-2026-09-29-02: a sessionId miss doesn't mean the session is gone —
+    // it can be stale (e.g. after an MCP-server reconnect) while the session
+    // itself is still tracked. Apply the same recovery fallbacks used below
+    // for the no-sessionId path before declaring it unrecoverable.
+    if (projectDir) {
+      const byDir = sessionManager.getSessionByDir(projectDir);
+      if (byDir) return { session: byDir };
+    }
+    const only = sessionManager.getOnlySession();
+    if (only) return { session: only };
+
+    return {
+      error: `Session not found: ${sessionId} (sessionId is stale and no recoverable session was found by projectDir or as the sole tracked session)`,
+    };
   }
 
   if (projectDir) {
@@ -1204,11 +1219,17 @@ export async function createMcpServer(
     'Get the result of a GSD session. Returns partial results if the session is still running.',
     {
       sessionId: z.string().describe('Session ID returned from gsd_execute'),
+      projectDir: z.string().optional().describe('Absolute path to the project directory (fallback recovery when sessionId is stale/mismatched)'),
     },
     async (args: Record<string, unknown>) => {
-      const { sessionId } = args as { sessionId: string };
+      const { sessionId, projectDir } = args as { sessionId: string; projectDir?: string };
       try {
-        const result = sessionManager.getResult(sessionId);
+        // INC-2026-09-29-02: resolve through the same fallback chain as
+        // gsd_status (getSessionByDir / getOnlySession) instead of failing
+        // fatally on a stale/mismatched sessionId.
+        const resolved = resolveStatusSession(sessionManager, { sessionId, projectDir });
+        if (!resolved.session) return errorContent(resolved.error ?? 'Session not found');
+        const result = sessionManager.getResult(resolved.session.sessionId);
         return jsonContent(result);
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));

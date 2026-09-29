@@ -24,6 +24,7 @@ import {
 } from "../task-execution-domain-operation.ts";
 import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
+import { applyTaskSettle } from "../task-settle.ts";
 
 const tempDirs = new Set<string>();
 
@@ -165,6 +166,22 @@ function seedRetryRoutedResidue(): { attemptId: string; resultId: string } {
     rationale: "agent-owner transient-execution routes to retry",
   });
   return { attemptId, resultId: settlement.resultId };
+}
+
+// RELY-03 recurrence (INC-2026-09-27-01): the plain `gsd task settle` path
+// (no --operator-attested / --blocker-accepted flag) settles the running
+// Attempt as interrupted/operator-settle without ever routing the failure —
+// exercised via applyTaskSettle directly to mirror the live incident's exact
+// call path, not a hand-rolled settleTaskAttempt shortcut.
+function seedOperatorSettleInterruptedResidue(): { attemptId: string } {
+  const { attemptId } = seedRunningAttempt();
+  const applied = applyTaskSettle({
+    invocation: internalExecutionInvocation("test/commands-task-settle-operator-attested/operator-settle"),
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    reason: "false verification failure settled the Attempt out from under the session",
+  });
+  assert.equal(applied.settled, true, "fixture precondition: applyTaskSettle must settle the running Attempt");
+  return { attemptId };
 }
 
 function seedBlockerDiscoveredResidue(): { attemptId: string; resultId: string } {
@@ -313,6 +330,47 @@ test("--operator-attested with a non-zero exit code notifies the domain layer's 
 });
 
 // ── Test G: --blocker-accepted remains unregressed ─────────────────────────
+
+// ── Test H: --operator-attested closes the RELY-03 operator-settle shape ──
+// ── (INC-2026-09-27-01) ────────────────────────────────────────────────────
+
+test("--operator-attested --apply closes a settled operator-settle/interrupted Attempt with no recovery route", async () => {
+  const base = makeBase();
+  await withCommandCwd(base, async () => {
+    seedOperatorSettleInterruptedResidue();
+    const ctx = makeMockCtx();
+
+    await handleTaskSettle(
+      `${UNIT} --reason "operator verified after a false verification failure" --apply --operator-attested --evidence ${EVIDENCE_JSON}`,
+      ctx,
+      base,
+    );
+
+    assert.equal(ctx._notifications.length, 1);
+    assert.equal(ctx._notifications[0].type, "info");
+    assert.match(ctx._notifications[0].message, /closed on operator attestation/);
+    assert.equal(taskRow().status, "operator-attested");
+  });
+});
+
+// ── Test I: the plain settle command's idle-repeat now names the escape ───
+// ── hatch instead of a bare "nothing to do" dead end ──────────────────────
+
+test("a plain settle re-run against an already-settled operator-settle Attempt hints at --operator-attested instead of a bare dead end", async () => {
+  const base = makeBase();
+  await withCommandCwd(base, async () => {
+    seedOperatorSettleInterruptedResidue();
+    const ctx = makeMockCtx();
+
+    await handleTaskSettle(`${UNIT} --reason "operator repair" --apply`, ctx, base);
+
+    assert.equal(ctx._notifications.length, 1);
+    assert.equal(ctx._notifications[0].type, "info");
+    assert.match(ctx._notifications[0].message, /has no running Attempt — nothing to do/);
+    assert.match(ctx._notifications[0].message, /--operator-attested --evidence/);
+    assert.notEqual(taskRow().status, "operator-attested", "the hint must not itself close the Task");
+  });
+});
 
 test("--blocker-accepted still works unchanged on a blocker-discovered fixture", async () => {
   const base = makeBase();

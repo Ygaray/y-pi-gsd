@@ -723,6 +723,23 @@ function hasShellLikeToken(token: string): boolean {
 }
 
 /**
+ * Punctuation-only tokens that introduce a natural-language clause after a
+ * runnable command, e.g. `./gradlew testDebugUnitTest — all existing classes
+ * stay green plus new ReshuffleTest passes` (BlackJackTrainer incident: the
+ * gate executed this whole line via `bash -c`, Gradle choked on the
+ * description tokens as bogus CLI args, and the resulting failure was
+ * misrecorded as a genuine test failure). These dash characters are Unicode
+ * punctuation, not ASCII `-`, so they don't start with `-` and are invisible
+ * to `hasShellLikeToken` — and they aren't letters/numbers either, so without
+ * this allowance a single dash token fails the "every tail token is a plain
+ * word" check below and the whole prose-tail heuristic never fires. A literal
+ * ASCII `--` stays out of this set on purpose: `npm test -- --grep smoke`
+ * uses it as a real argument separator and must keep reading as a command —
+ * `hasShellLikeToken` already treats a leading `-` as command evidence.
+ */
+const PROSE_DASH_SEPARATORS = new Set(["—", "–", "―"]);
+
+/**
  * Long natural-language runs after a known command word are prose in any
  * language (#1994). Require four or more word-only tail tokens with no shell
  * metacharacters so short invocations like `go build with tags` stay commands.
@@ -731,7 +748,10 @@ function looksLikeNaturalLanguageTail(tokens: string[]): boolean {
   const tail = tokens.slice(1);
   if (tail.length < 4) return false;
   if (tail.some(hasShellLikeToken)) return false;
-  return tail.every((token) => /^[\p{L}\p{N}_'-]+$/u.test(token.replace(/[.,;:!?]+$/, "")));
+  return tail.every((token) => {
+    if (PROSE_DASH_SEPARATORS.has(token)) return true;
+    return /^[\p{L}\p{N}_'-]+$/u.test(token.replace(/[.,;:!?]+$/, ""));
+  });
 }
 
 function knownPrefixInvocationIsCommand(
@@ -964,8 +984,21 @@ function isShellCommandNotFound(exitCode: number, stderr: string): boolean {
     || /is not recognized as an internal or external command/i.test(stderr);
 }
 
+/**
+ * Exit codes that a parse/syntax failure can plausibly surface under. Node's
+ * `-e`/`--eval` reports a syntax error with exit 1 (already covered by the
+ * pre-existing test suite); `bash` and `dash`/`sh` always exit **2** on a
+ * genuine shell syntax error (confirmed against both shells — see the
+ * BlackJackTrainer incident writeup) and never exit 1. The gate wraps every
+ * command in `bash -c "$1"`/`sh -c "$1"` (see runVerificationGate below), so
+ * a malformed verify string that reaches the shell will exit 2, not 1 — the
+ * original `exitCode !== 1` guard silently dropped every real shell-level
+ * syntax error, letting it fall through as an ordinary `checks-failed`
+ * verdict instead of the non-retryable `execution-fault` this classification
+ * exists to produce (verification-verdict.ts).
+ */
 function isShellParseFailure(exitCode: number, stdout: string, stderr: string): boolean {
-  if (exitCode !== 1 || stdout.trim() !== "") return false;
+  if ((exitCode !== 1 && exitCode !== 2) || stdout.trim() !== "") return false;
   return /unterminated string constant/i.test(stderr)
     || /syntax error: unterminated quoted string/i.test(stderr)
     || /unexpected eof while looking for matching/i.test(stderr)

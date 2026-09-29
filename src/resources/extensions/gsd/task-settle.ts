@@ -791,6 +791,20 @@ export function applyBlockerAcceptedDisposition(input: {
 // Attempt — so a verified completion and an operator-attested one remain
 // distinguishable in the DB (D-03). It never fabricates a passing Technical
 // Verdict and never satisfies verdict-gated completion.
+//
+// RELY-03 recurrence (INC-2026-09-27-01): a second settled shape has the
+// identical dead-end. `applyTaskSettle`'s plain settle path above (outcome
+// `interrupted`, failureClass `operator-settle`) never calls
+// recordFailureAndSelectRecovery — it settles the running Attempt and stops,
+// so the resulting route-stage checkpoint carries NO recovery action at all.
+// `gsd_task_recovery_resume` has nothing to resume (no recoveryActionId was
+// ever recorded) and `gsd_task_complete` dead-ends on "no running Attempt to
+// close … re-enter `/gsd auto`" even when the deliverable is verifiably
+// complete (e.g. a false verification failure triggered the settle). This
+// disposition now also accepts that exact shape — settled/interrupted/
+// operator-settle at the route stage with no recorded recovery route — under
+// the same evidence gate, so an operator can close the Task without
+// re-entering `/gsd auto`.
 
 /** Evidence contract pinned at Task 1's checkpoint: all three fields required. */
 export interface OperatorAttestationEvidence {
@@ -813,6 +827,55 @@ export interface TaskOperatorAttestedRow {
   supersededRecoveryActionId: string | null;
   evidence: OperatorAttestationEvidence;
   rationale: string;
+  /**
+   * True for the original settled/failed + `retry`-routed shape (a recovery
+   * route must still read back "retry" at apply time); false for the
+   * RELY-03 settled/interrupted/operator-settle shape (INC-2026-09-27-01),
+   * which expects no recorded recovery route at all. Threads the plan's
+   * shape decision through to the apply's in-transaction re-validation so it
+   * re-checks the correct invariant rather than assuming "retry".
+   */
+  expectsRoutedRetry: boolean;
+}
+
+/**
+ * The two settled-Attempt shapes `operator-attested` may close (Task 1 D-02,
+ * extended by RELY-03 / INC-2026-09-27-01):
+ *  - `retry-failure`: settled/failed at the route stage, routed to "retry".
+ *  - `operator-settle-interrupted`: settled/interrupted/operator-settle at
+ *    the route stage with NO recovery route recorded at all — the shape
+ *    `applyTaskSettle`'s plain settle path (above) leaves behind, since it
+ *    never calls recordFailureAndSelectRecovery.
+ * Returns null when the Attempt matches neither shape.
+ */
+type OperatorAttestedShape = "retry-failure" | "operator-settle-interrupted";
+
+function classifyOperatorAttestedShape(
+  attempt: ReturnType<typeof readLatestTaskAttempt>,
+): OperatorAttestedShape | null {
+  if (!attempt || attempt.state !== "settled" || attempt.nextStage !== "route") return null;
+  if (attempt.outcome === "failed") return "retry-failure";
+  if (attempt.outcome === "interrupted" && attempt.resultFailureClass === "operator-settle") {
+    return "operator-settle-interrupted";
+  }
+  return null;
+}
+
+/**
+ * Read-only CLI hint probe (commands-task-settle.ts, RELY-03 /
+ * INC-2026-09-27-01): true when the latest Attempt of `task` is the
+ * settled/interrupted/operator-settle shape with no recorded recovery
+ * route — the exact dead-end `gsd_task_complete` and `gsd_task_recovery_resume`
+ * both refuse. Deliberately does NOT require or validate evidence (unlike
+ * planOperatorAttestedDisposition, D-03) — it only decides whether the
+ * plain settle command's "nothing to do" messaging should point at
+ * `--operator-attested` as the next step, never whether to skip its
+ * evidence gate.
+ */
+export function isOperatorSettleInterruptedResidue(task: TaskSettleTask): boolean {
+  const attempt = readLatestTaskAttempt(task);
+  if (classifyOperatorAttestedShape(attempt) !== "operator-settle-interrupted") return false;
+  return readTaskRecoveryRoute(attempt!.attemptId) === null;
 }
 
 export interface TaskOperatorAttestedPlan {
@@ -913,16 +976,22 @@ export function planOperatorAttestedDisposition(
     );
   }
   const attempt = readLatestTaskAttempt(task);
-  if (
-    !attempt || attempt.state !== "settled" || attempt.outcome !== "failed" ||
-    attempt.nextStage !== "route"
-  ) {
+  const shape = classifyOperatorAttestedShape(attempt);
+  if (!attempt || !shape) {
     throw new Error(
       `gsd_task_settle: operator-attested requires the latest Attempt of ${unitId(task)} settled ` +
       `as failed at the route stage; found ` +
-      `${attempt ? `${attempt.state}/${attempt.outcome ?? "no-result"}` : "no Attempt"} at ` +
+      `${attempt
+        ? `${attempt.state}/${attempt.outcome ?? "no-result"}${
+          attempt.outcome === "interrupted" && attempt.resultFailureClass
+            ? `/${attempt.resultFailureClass}`
+            : ""
+        }`
+        : "no Attempt"} at ` +
       `${attempt?.nextStage ?? "no Kernel head"}. ` +
-      "gsd_task_recovery_resume is the separate successor-Attempt path for abort/remediate routes.",
+      "gsd_task_recovery_resume is the separate successor-Attempt path for abort/remediate routes. " +
+      "(RELY-03, INC-2026-09-27-01): a latest Attempt settled as interrupted/operator-settle at the " +
+      "route stage with no recovery route is also accepted.",
     );
   }
   if (!attempt.resultId) {
@@ -934,15 +1003,28 @@ export function planOperatorAttestedDisposition(
   // D-02: filter specifically on the routed recovery action being "retry" —
   // a broad "any settled/failed Attempt" filter would over-widen and overlap
   // blocker-accepted (blocker-discovered) and gsd_task_recovery_resume
-  // (abort/remediate).
+  // (abort/remediate). The RELY-03 operator-settle-interrupted shape is
+  // never routed at all (applyTaskSettle's plain settle path never calls
+  // recordFailureAndSelectRecovery), so it expects no recovery route rather
+  // than a "retry" one; if one unexpectedly exists, name the path that
+  // actually owns it instead of silently overriding it.
   const route = readTaskRecoveryRoute(attempt.attemptId);
-  if (!route || route.action !== "retry") {
+  if (shape === "retry-failure" && (!route || route.action !== "retry")) {
     throw new Error(
       `gsd_task_settle: operator-attested requires the routed recovery action for Attempt ` +
       `${attempt.attemptId} of ${unitId(task)} to be "retry"; found ` +
       `${route ? route.action : "no routed recovery action"}. ` +
       "A \"blocker-discovered\" route is closed by blocker-accepted; an \"abort\"/\"remediate\" " +
       "route is resumed by gsd_task_recovery_resume.",
+    );
+  }
+  if (shape === "operator-settle-interrupted" && route) {
+    throw new Error(
+      `gsd_task_settle: operator-attested requires an operator-settled interrupted Attempt with ` +
+      `no recorded recovery route for ${unitId(task)}; Attempt ${attempt.attemptId} was already ` +
+      `routed to "${route.action}". A "retry" route is closed by the settled/failed operator-attested ` +
+      "path above; an \"abort\"/\"remediate\" route is resumed by gsd_task_recovery_resume; a " +
+      "\"blocker-discovered\" route is closed by blocker-accepted.",
     );
   }
   const head = readRouteHead(task);
@@ -962,9 +1044,10 @@ export function planOperatorAttestedDisposition(
       targetStatus: "operator-attested",
       lifecycleFrom: state.lifecycleStatus,
       routeConsumed: true,
-      supersededRecoveryActionId: route.recoveryActionId,
+      supersededRecoveryActionId: route?.recoveryActionId ?? null,
       evidence: validatedEvidence,
       rationale: reason,
+      expectsRoutedRetry: shape === "retry-failure",
     }],
     alreadyAttested: false,
   };
@@ -1024,12 +1107,14 @@ export function applyOperatorAttestedDisposition(input: {
   }, (context) => {
     // Consume the route head first: the terminal closeout decision makes the
     // historical failure unreachable for recovery routing. Re-validate BOTH
-    // the route head (still `route`, still this Attempt) AND that the
-    // recovery route's action is still `retry` before writing — strictly
-    // stronger than the blocker-accepted precedent, which re-checks only the
-    // head; this closes the TOCTOU window a concurrent retry claim or a
-    // fresh recovery route could open between the dry-run plan and this
-    // apply (T-31-05).
+    // the route head (still `route`, still this Attempt) AND the routed
+    // recovery state before writing — strictly stronger than the
+    // blocker-accepted precedent, which re-checks only the head; this closes
+    // the TOCTOU window a concurrent retry claim or a fresh recovery route
+    // could open between the dry-run plan and this apply (T-31-05). The
+    // RELY-03 operator-settle/interrupted shape (INC-2026-09-27-01) expects
+    // NO recovery route rather than a "retry" one (row.expectsRoutedRetry
+    // carries the plan's shape decision through to this re-check).
     const head = readRouteHead(input.task);
     if (!head || head.next_stage !== "route" || head.attempt_id !== row.attemptId) {
       throw new Error(
@@ -1038,13 +1123,24 @@ export function applyOperatorAttestedDisposition(input: {
       );
     }
     const route = readTaskRecoveryRoute(row.attemptId);
-    if (!route || route.action !== "retry") {
-      throw new Error(
-        `gsd_task_settle: the routed recovery action of ${entityId} changed after the dry-run ` +
-        "plan; retry the operation",
-      );
+    let supersededRecoveryActionId: string | null;
+    if (row.expectsRoutedRetry) {
+      if (!route || route.action !== "retry") {
+        throw new Error(
+          `gsd_task_settle: the routed recovery action of ${entityId} changed after the dry-run ` +
+          "plan; retry the operation",
+        );
+      }
+      supersededRecoveryActionId = route.recoveryActionId;
+    } else {
+      if (route) {
+        throw new Error(
+          `gsd_task_settle: a recovery route appeared for the operator-settled interrupted Attempt ` +
+          `of ${entityId} after the dry-run plan; retry the operation`,
+        );
+      }
+      supersededRecoveryActionId = null;
     }
-    const supersededRecoveryActionId = route.recoveryActionId;
     const closeout = appendKernelCheckpoint(context, {
       lifecycleId: head.lifecycle_id,
       attemptId: row.attemptId,

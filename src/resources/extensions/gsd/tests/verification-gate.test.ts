@@ -1352,6 +1352,77 @@ test("discoverCommands: #1671 reporter line is not executed; #1724 rg line is", 
   assert.equal(rg.source, "task-plan");
 });
 
+// ─── Command-with-prose-tail after an em dash (BlackJackTrainer incident) ──
+//
+// A real-world task-plan Verify line: a genuine runnable command followed by
+// an em dash and a natural-language description of what "green" means. The
+// gate previously executed this whole line via `bash -c`/spawn — Gradle
+// choked on the description tokens as bogus CLI args and the resulting
+// failure was mis-recorded as a genuine test failure, cascading into an
+// unrecoverable dead-end. `looksLikeNaturalLanguageTail` requires every tail
+// token to match a letter/number word pattern, but an em dash is punctuation
+// (`\p{Pd}`), not a letter — so it failed the "every token is a plain word"
+// check and the whole line fell through to "looks like a command".
+const INC_GRADLEW_EMDASH_VERIFY =
+  "./gradlew testDebugUnitTest — all existing classes stay green plus new ReshuffleTest passes";
+
+test("isLikelyCommand: em-dash-introduced prose tail is rejected, not run as a command", () => {
+  assert.equal(isLikelyCommand(INC_GRADLEW_EMDASH_VERIFY), false);
+
+  // Positive controls: legitimate compound commands and real flags must stay
+  // commands — the em-dash fix must not widen the prose heuristic to catch
+  // ordinary shell syntax.
+  assert.equal(isLikelyCommand("./gradlew testDebugUnitTest"), true);
+  assert.equal(isLikelyCommand("./gradlew testDebugUnitTest --info"), true);
+  assert.equal(isLikelyCommand("tsc --noEmit"), true);
+  assert.equal(isLikelyCommand("git status --untracked-files=all"), true);
+  assert.equal(isLikelyCommand("npm test && npm run lint"), true);
+  assert.equal(isLikelyCommand("npm test || echo failed"), true);
+  assert.equal(isLikelyCommand("npm test | tail -5"), true);
+  assert.equal(isLikelyCommand("npm test -- --grep smoke"), true);
+});
+
+test("discoverCommands: em-dash-introduced prose tail is not executed as task-plan (BlackJackTrainer incident)", () => {
+  const dir = makeTempDir("gsd-verify-blackjack");
+  const result = discoverCommands({ cwd: dir, taskPlanVerify: INC_GRADLEW_EMDASH_VERIFY });
+  assert.deepEqual(result.commands, [], "prose tail must not become a runnable check");
+  assert.notEqual(result.source, "task-plan");
+});
+
+test("runVerificationGate: em-dash-introduced prose tail never reaches spawnSync (BlackJackTrainer incident)", () => {
+  const dir = makeTempDir("gsd-verify-blackjack-run");
+  const result = runVerificationGate({ cwd: dir, taskPlanVerify: INC_GRADLEW_EMDASH_VERIFY });
+  assert.deepEqual(result.checks, [], "no command should have been spawned");
+  assert.equal(result.discoverySource, "task-plan-prose");
+  assert.equal(result.passed, true);
+});
+
+// ─── Shell syntax error must not masquerade as a genuine check failure ─────
+//
+// Even with the classifier fix above, a garbage verify string can still
+// reach the shell (e.g. via preference commands, or a task-plan candidate
+// that slips past the heuristics with unbalanced quoting). When the shell
+// itself rejects the command, that is a tooling/classification fault, not a
+// verdict on the project under test — `failureClass: "shell-parse"` is how
+// this file tells `verification-verdict.ts` to report an "execution-fault"
+// (non-retryable) instead of "checks-failed" (retryable, treated as a real
+// regression). Both `bash` and `dash`/`sh` exit **2** on a syntax error
+// (never exit 1, which is reserved for the Node.js `-e` parse-error case
+// already covered above) — `isShellParseFailure`'s `exitCode !== 1` guard
+// therefore silently dropped every real shell-level syntax error.
+test("runVerificationGate: real shell syntax error (exit 2) is tagged shell-parse, not a plain check failure", () => {
+  const dir = makeTempDir("gsd-verify-shell-syntax");
+  const result = withRtkDisabled(() => runVerificationGate({
+    cwd: dir,
+    preferenceCommands: ["echo 'ReshuffleTest passes"],
+  }));
+
+  assert.equal(result.passed, false);
+  assert.equal(result.checks[0]?.exitCode, 2);
+  assert.match(result.checks[0]?.stderr ?? "", /unexpected eof while looking for matching|unterminated quoted string/i);
+  assert.equal(result.checks[0]?.failureClass, "shell-parse");
+});
+
 const ISSUE_1798_VERIFY = `grep -q '"version": "1.0.0"' manifest.json && node --input-type=module --eval "import fs from 'node:fs'
 const m = JSON.parse(fs.readFileSync('manifest.json','utf8'))
 if (m.priority !== 100) throw new Error('priority')

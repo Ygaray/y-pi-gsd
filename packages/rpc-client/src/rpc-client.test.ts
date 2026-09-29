@@ -365,6 +365,73 @@ describe("RpcClient construction", () => {
 });
 
 // ============================================================================
+// onExit() Tests (INC-2026-09-29-02)
+// ============================================================================
+
+describe("onExit", () => {
+	it("fires with expected:true when the child exits following our own stop()", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
+		const scriptPath = join(dir, "agent.js");
+		writeFileSync(scriptPath, "setInterval(() => {}, 1000);\n");
+
+		const client = new RpcClient({ cliPath: scriptPath });
+		const received: Array<{ code: number | null; signal: NodeJS.Signals | null; expected: boolean }> = [];
+		client.onExit((info) => received.push(info));
+
+		try {
+			await client.start();
+			await client.stop();
+
+			assert.equal(received.length, 1);
+			assert.equal(received[0].expected, true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("fires with expected:false when the child exits without our stop() (crash/external kill)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
+		const scriptPath = join(dir, "agent.js");
+		// Exit immediately with a nonzero code to simulate a crash.
+		writeFileSync(scriptPath, "process.exit(143);\n");
+
+		const client = new RpcClient({ cliPath: scriptPath });
+		const received: Array<{ code: number | null; signal: NodeJS.Signals | null; expected: boolean }> = [];
+		client.onExit((info) => received.push(info));
+
+		try {
+			// start() itself throws because the process exits immediately —
+			// that's fine, we only care that onExit still fired with the exit info.
+			await assert.rejects(client.start());
+			assert.equal(received.length, 1);
+			assert.equal(received[0].code, 143);
+			assert.equal(received[0].expected, false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("unsubscribe stops further notifications", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
+		const scriptPath = join(dir, "agent.js");
+		writeFileSync(scriptPath, "setInterval(() => {}, 1000);\n");
+
+		const client = new RpcClient({ cliPath: scriptPath });
+		const received: unknown[] = [];
+		const unsubscribe = client.onExit((info) => received.push(info));
+		unsubscribe();
+
+		try {
+			await client.start();
+			await client.stop();
+			assert.equal(received.length, 0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+// ============================================================================
 // events() Generator Tests
 // ============================================================================
 
