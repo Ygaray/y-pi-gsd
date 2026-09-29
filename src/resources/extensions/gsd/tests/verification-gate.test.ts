@@ -1423,6 +1423,38 @@ test("runVerificationGate: real shell syntax error (exit 2) is tagged shell-pars
   assert.equal(result.checks[0]?.failureClass, "shell-parse");
 });
 
+// CR-03 (34-REVIEW.md, filed there as WR-02): a real tool that itself exits
+// 2 with a stderr message that merely *contains* one of the five
+// shell-syntax phrases (e.g. its own "syntax error near unexpected token"
+// diagnostic) must NOT be misclassified as a non-retryable shell-parse
+// execution-fault — only the shell wrapper's OWN diagnostic (always
+// prefixed `verification-gate:`, the argv0 `runVerificationGate` execs the
+// shell with — see `looksLikeShellWrapperDiagnostic`) should count for the
+// exit-2 branch. This is a plain command exit (valid shell syntax
+// throughout, the wrapper never emits its own diagnostic), so it must be
+// tagged as an ordinary checks-failed result. The true-positive direction
+// (a genuine shell syntax error still classifies as shell-parse) is already
+// covered by the "real shell syntax error (exit 2)" test above — same
+// production code path, so no separate regression duplicate is needed here.
+test("runVerificationGate: a real tool exiting 2 with stderr that coincidentally matches a shell-syntax phrase is NOT misclassified as shell-parse (#CR-03)", () => {
+  const dir = makeTempDir("gsd-verify-cr03-false-positive");
+  const result = withRtkDisabled(() => runVerificationGate({
+    cwd: dir,
+    preferenceCommands: [
+      `node -e "console.error('mytool: syntax error near unexpected token \\'plugin-x\\''); process.exit(2)"`,
+    ],
+  }));
+
+  assert.equal(result.passed, false);
+  assert.equal(result.checks[0]?.exitCode, 2);
+  assert.match(result.checks[0]?.stderr ?? "", /syntax error near unexpected token/i);
+  assert.notEqual(
+    result.checks[0]?.failureClass,
+    "shell-parse",
+    "a wrapped tool's own exit-2 stderr must not be mistaken for the wrapper's own syntax-error diagnostic",
+  );
+});
+
 const ISSUE_1798_VERIFY = `grep -q '"version": "1.0.0"' manifest.json && node --input-type=module --eval "import fs from 'node:fs'
 const m = JSON.parse(fs.readFileSync('manifest.json','utf8'))
 if (m.priority !== 100) throw new Error('priority')

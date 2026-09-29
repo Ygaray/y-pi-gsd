@@ -997,13 +997,49 @@ function isShellCommandNotFound(exitCode: number, stderr: string): boolean {
  * verdict instead of the non-retryable `execution-fault` this classification
  * exists to produce (verification-verdict.ts).
  */
+/**
+ * True when `stderr` looks like it came from the `bash -c "$1"`/`sh -c "$1"`
+ * wrapper's OWN syntax-error diagnostic, rather than from a wrapped
+ * command's own stderr output. `runVerificationGate` below always execs the
+ * shell with argv0 explicitly set to `verification-gate` (the trailing
+ * `"verification-gate"` arg after `-c "$1"`) — both bash and dash/sh use
+ * argv0, not their binary name, as the prefix on their own diagnostic line
+ * (confirmed against real bash and dash output: `verification-gate: -c:
+ * line 1: unexpected EOF while looking for matching \`''` /
+ * `verification-gate: 1: Syntax error: Unterminated quoted string` — see
+ * CR-03, 34-REVIEW.md), so that fixed literal is what a genuine wrapper
+ * diagnostic looks like here, never `bash:`/`sh:`/`dash:`.
+ */
+function looksLikeShellWrapperDiagnostic(stderr: string): boolean {
+  return /^\s*verification-gate:/i.test(stderr);
+}
+
+/**
+ * CR-03 (34-REVIEW.md, filed as WR-02): the exit-2 branch below is a plain
+ * substring/regex test over `stderr`, so a real tool that itself exits 2
+ * with a stderr message that happens to contain one of the five phrases
+ * (most plausibly its own "...syntax error..." diagnostic) would be
+ * misclassified as the non-retryable shell-parse execution-fault instead of
+ * an ordinary checks-failed result. Exit 2 is exclusively the shell
+ * wrapper's own exit code for a genuine parse failure (see the module
+ * comment above), so — for exit 2 only — additionally require the message
+ * to actually look like the wrapper's own diagnostic
+ * (`looksLikeShellWrapperDiagnostic`), not merely a wrapped command's
+ * stderr. Exit 1 is untouched: it is the pre-existing, narrower branch
+ * reserved for Node's `-e`/`--eval` parse-error case, whose own diagnostic
+ * never carries a `bash:`/`sh:`/`dash:` prefix, so no such anchor is
+ * possible (or was ever proposed) for it.
+ */
 function isShellParseFailure(exitCode: number, stdout: string, stderr: string): boolean {
   if ((exitCode !== 1 && exitCode !== 2) || stdout.trim() !== "") return false;
-  return /unterminated string constant/i.test(stderr)
+  const matchesSyntaxPhrase = /unterminated string constant/i.test(stderr)
     || /syntax error: unterminated quoted string/i.test(stderr)
     || /unexpected eof while looking for matching/i.test(stderr)
     || /syntax error near unexpected token/i.test(stderr)
     || /was unexpected at this time/i.test(stderr);
+  if (!matchesSyntaxPhrase) return false;
+  if (exitCode === 2 && !looksLikeShellWrapperDiagnostic(stderr)) return false;
+  return true;
 }
 
 /**
