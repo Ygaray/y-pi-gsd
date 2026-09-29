@@ -79,6 +79,13 @@ class MockRpcClient {
     return () => {};
   }
 
+  /** Drive `handleEvent()` for CR-01's completed-session cleanup coverage. */
+  emitEvent(event: Record<string, unknown>): void {
+    for (const listener of this.eventListeners) {
+      listener(event);
+    }
+  }
+
   async prompt(message: string): Promise<void> {
     this.prompted.push(message);
   }
@@ -314,6 +321,74 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     assert.ok(
       sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
       'orphan must be reaped before the new driver is allowed to start — otherwise two drivers run concurrently',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CR-01 (34-REVIEW.md): SessionManager.cleanup() must not delete a session's
+// persisted registry row without first stopping its child. Before this fix,
+// `cleanup()` unconditionally called `removeSessionEntry()` for every
+// session but only called `client.stop()` for a subset of statuses —
+// `completed` fell through both: its child was never stopped AND the one
+// registry row that could have identified it as an orphan on the next
+// server start was erased, reopening the double-driver failure mode fix 3B
+// (RELY-09) was built to close.
+// ---------------------------------------------------------------------------
+
+describe('SessionManager.cleanup() — completed session must not be orphaned-and-forgotten (CR-01)', () => {
+  it('a natural "auto-mode complete" notification stops the child and drops the registry row immediately — the root fix, not just at shutdown', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-completed-immediate');
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const client = sm.lastClient!;
+
+    assert.ok(getSessionEntry(projectDir, sm.registryPath), 'precondition: registry row must exist while running');
+    assert.equal(client.stopped, false, 'precondition: child must still be running pre-completion');
+
+    // Drive the session to 'completed' via the real terminal-notification
+    // path in handleEvent() — not a status write, so this exercises the
+    // exact route production code uses.
+    client.emitEvent({
+      type: 'extension_ui_request',
+      method: 'notify',
+      message: 'auto-mode complete',
+    });
+
+    const session = sm.getInternalSession(projectDir)!;
+    assert.equal(session.status, 'completed');
+    assert.equal(client.stopped, true, 'natural completion must stop the child immediately, not leak it until shutdown');
+    assert.equal(
+      getSessionEntry(projectDir, sm.registryPath),
+      undefined,
+      'registry row must be dropped immediately once the child is actually stopped',
+    );
+  });
+
+  it('cleanup() stops a completed session\'s child defensively even if it somehow reached completed without being stopped elsewhere', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-completed-defensive');
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const client = sm.lastClient!;
+    const session = sm.getInternalSession(projectDir)!;
+
+    // Simulate reaching 'completed' via a path that bypasses the
+    // terminal-notification stop call above, so cleanup()'s own
+    // unconditional-stop guarantee is exercised in isolation — cleanup()
+    // must never assume a 'completed' session's child is already stopped.
+    session.status = 'completed';
+    assert.equal(client.stopped, false, 'precondition: child not yet stopped');
+    assert.ok(getSessionEntry(projectDir, sm.registryPath), 'precondition: registry row must exist pre-cleanup');
+
+    await sm.cleanup();
+
+    assert.equal(client.stopped, true, 'cleanup() must stop a completed session\'s child, not leak it');
+    assert.equal(
+      getSessionEntry(projectDir, sm.registryPath),
+      undefined,
+      'registry row removal is fine once the child is actually stopped',
     );
   });
 });

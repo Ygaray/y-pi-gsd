@@ -522,23 +522,27 @@ export class SessionManager {
 
     for (const session of this.sessions.values()) {
       session.unsubscribe?.();
-      // A paused session still owns a live headless child process (its RpcClient
-      // is retained for resume). On shutdown that process must be reclaimed too,
-      // otherwise pausing then stopping leaks it.
-      if (
-        session.status === 'running' ||
-        session.status === 'starting' ||
-        session.status === 'blocked' ||
-        session.status === 'paused'
-      ) {
-        stopPromises.push(
-          session.client.stop().catch(() => { /* swallow */ })
-        );
-        session.status = 'cancelled';
-      }
-      // INC-2026-09-29-02 fix 3 (Option B): every session torn down here is
-      // genuinely stopped (or about to be) — drop its persisted registry row
-      // so the registry doesn't accumulate stale entries across restarts.
+      // A paused OR completed session still owns a live headless child
+      // process (its RpcClient is retained for resume — and, in the
+      // `completed` case, because the terminal-notification branch in
+      // `handleEvent()` never calls `client.stop()` itself; the underlying
+      // RPC agent is long-lived and does not exit on its own). Excluding
+      // `completed` here (CR-01, 34-REVIEW.md) used to leak that child AND
+      // erase the one registry row that could have identified it as an
+      // orphan on the next server start — reopening the double-driver
+      // failure mode fix 3B (RELY-09) closed. `error`/`cancelled` sessions
+      // have already had `client.stop()` called on the path that put them
+      // in that status, but `RpcClient.stop()` is a no-op once
+      // `this.process` is already null, so stopping them again is harmless
+      // — simplest to just stop unconditionally rather than track "already
+      // stopped" as a separate bit of state.
+      stopPromises.push(
+        session.client.stop().catch(() => { /* swallow */ })
+      );
+      session.status = 'cancelled';
+      // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped
+      // (or being stopped, above) — drop its persisted registry row so the
+      // registry doesn't accumulate stale entries across restarts.
       removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
     }
 
@@ -638,6 +642,14 @@ export class SessionManager {
       } else {
         session.status = 'completed';
         session.unsubscribe?.();
+        // CR-01 (34-REVIEW.md): natural completion never otherwise stops
+        // the underlying headless child — the RPC agent is long-lived and
+        // does not exit on its own after 'auto-mode complete'. Reclaim it
+        // and drop the persisted registry row immediately, rather than
+        // leaking it until the next same-projectDir launch (the eviction
+        // branch in startSession()) or full server shutdown (cleanup()).
+        void session.client.stop().catch(() => { /* swallow */ });
+        removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
       }
       return;
     }
