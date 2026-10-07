@@ -105,3 +105,43 @@ export function mapSdkRateLimitInfo(info: unknown): ClaudeCodeRateLimitMapping |
 		return null;
 	}
 }
+
+/**
+ * Formats one `GSD_DEBUG_RATELIMIT_EVENT` observation line (D-03/D-05, 38-CONTEXT.md).
+ *
+ * Reads only six named `rate_limit_info` fields off the payload individually -- `status`,
+ * `rateLimitType`, `utilization`, `resetsAt`, `isUsingOverage`, `surpassedThreshold` -- plus the
+ * mapping outcome. It never serialises the object it was handed and never reads the SDK message
+ * envelope (`uuid`, `session_id`): that envelope carries per-session identifiers with no business
+ * in an operator's terminal, exactly the scoping discipline the `GSD_DEBUG_RATELIMIT_HEADERS`
+ * prefix allowlist enforces for the header path (T-38-02).
+ *
+ * Never throws for any input, including a non-object payload -- this is a debug-only formatter
+ * that must not be able to abort the turn it is observing.
+ */
+export function formatRateLimitEventDebugLine(
+	seq: number,
+	elapsedMs: number,
+	info: unknown,
+	mapped: ClaudeCodeRateLimitMapping | null,
+): string {
+	try {
+		const payload = info !== null && typeof info === "object" ? (info as SDKRateLimitInfo) : undefined;
+		const status = payload?.status;
+		const rateLimitType = payload?.rateLimitType;
+		const utilization = payload?.utilization;
+		const resetsAt = payload?.resetsAt;
+		const isUsingOverage = payload?.isUsingOverage;
+		const surpassedThreshold = payload?.surpassedThreshold;
+		const mappingText = mapped
+			? `windowKey=${mapped.windowKey} usedPercent=${mapped.window.usedPercent}`
+			: "mapping=none";
+		return (
+			`[GSD_DEBUG_RATELIMIT_EVENT] seq=${seq} elapsedMs=${elapsedMs} status=${status} ` +
+			`rateLimitType=${rateLimitType} utilization=${utilization} resetsAt=${resetsAt} ` +
+			`isUsingOverage=${isUsingOverage} surpassedThreshold=${surpassedThreshold} ${mappingText}`
+		);
+	} catch {
+		return "[GSD_DEBUG_RATELIMIT_EVENT] <unformattable payload>";
+	}
+}

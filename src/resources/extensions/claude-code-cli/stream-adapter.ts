@@ -95,7 +95,7 @@ import type {
 	SDKResultMessage,
 	SDKUserMessage,
 } from "./sdk-types.js";
-import { mapSdkRateLimitInfo } from "./rate-limit-event.js";
+import { formatRateLimitEventDebugLine, mapSdkRateLimitInfo } from "./rate-limit-event.js";
 
 export {
 	buildFinalAssistantContent,
@@ -162,6 +162,13 @@ export interface ConcurrentClaudeCodeProcess {
 }
 
 const warnedConcurrentClaudeCodeCwds = new Set<string>();
+
+// GSD_DEBUG_RATELIMIT_EVENT observation channel (D-03/D-05, 38-CONTEXT.md): deliberately has no
+// fires-once guard, unlike GSD_DEBUG_RATELIMIT_HEADERS -- a single observation answers D-03's
+// encoding question but cannot answer D-05's cadence question, which needs every occurrence
+// across one live multi-turn session (38-RESEARCH.md Pitfall D).
+let rateLimitEventDebugSeq = 0;
+let rateLimitEventDebugFirstEventMs: number | null = null;
 
 function hasArgValue(argv: string[], flag: string, value: string): boolean {
 	return argv.some((arg, index) =>
@@ -2990,6 +2997,16 @@ async function pumpSdkMessages(
 							// through the same cast idiom the `case "system"` arm above uses.
 							const event = msg as unknown as { rate_limit_info?: unknown };
 							const mapped = mapSdkRateLimitInfo(event.rate_limit_info);
+							if (process.env.GSD_DEBUG_RATELIMIT_EVENT === "1") {
+								rateLimitEventDebugSeq += 1;
+								if (rateLimitEventDebugFirstEventMs === null) {
+									rateLimitEventDebugFirstEventMs = Date.now();
+								}
+								const elapsedMs = Date.now() - rateLimitEventDebugFirstEventMs;
+								console.error(
+									formatRateLimitEventDebugLine(rateLimitEventDebugSeq, elapsedMs, event.rate_limit_info, mapped),
+								);
+							}
 							if (mapped) {
 								onRateLimitEvent?.(mapped.window, mapped.windowKey);
 							}

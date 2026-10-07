@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mapSdkRateLimitInfo } from "../rate-limit-event.ts";
+import { formatRateLimitEventDebugLine, mapSdkRateLimitInfo } from "../rate-limit-event.ts";
 
 describe("mapSdkRateLimitInfo — window-key resolution", () => {
 	test("five_hour maps to the session key", () => {
@@ -163,5 +163,45 @@ describe("mapSdkRateLimitInfo — never-throw contract on non-object payloads", 
 			result = mapSdkRateLimitInfo([1, 2, 3]);
 		});
 		assert.equal(result, null);
+	});
+});
+
+describe("formatRateLimitEventDebugLine — T-38-02 scoping", () => {
+	test("the formatted line contains the utilization value and the mapped percent", () => {
+		const info = { status: "allowed", rateLimitType: "five_hour", utilization: 0.42 };
+		const mapped = mapSdkRateLimitInfo(info);
+		const line = formatRateLimitEventDebugLine(1, 0, info, mapped);
+		assert.ok(line.includes("0.42"));
+		assert.ok(line.includes("42"));
+	});
+
+	test("the formatted line omits the envelope identifier values even when the payload also carries them", () => {
+		const info = {
+			status: "allowed",
+			rateLimitType: "five_hour",
+			utilization: 0.42,
+			uuid: "envelope-uuid-should-not-appear",
+			session_id: "envelope-session-id-should-not-appear",
+		};
+		const mapped = mapSdkRateLimitInfo(info);
+		const line = formatRateLimitEventDebugLine(1, 0, info, mapped);
+		assert.ok(!line.includes("envelope-uuid-should-not-appear"));
+		assert.ok(!line.includes("envelope-session-id-should-not-appear"));
+	});
+
+	test("an unmapped payload still produces a line naming the no-mapping marker", () => {
+		const info = { status: "allowed", rateLimitType: "overage", utilization: 0.5 };
+		const mapped = mapSdkRateLimitInfo(info);
+		assert.equal(mapped, null);
+		const line = formatRateLimitEventDebugLine(1, 0, info, mapped);
+		assert.ok(line.includes("mapping=none"));
+	});
+
+	test("a non-object payload produces a line without throwing", () => {
+		let line: string | undefined;
+		assert.doesNotThrow(() => {
+			line = formatRateLimitEventDebugLine(1, 0, undefined, null);
+		});
+		assert.ok(typeof line === "string" && line.length > 0);
 	});
 });
