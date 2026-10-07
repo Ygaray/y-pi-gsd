@@ -197,6 +197,44 @@ export type OrphanReapOutcome =
   | 'settled-alive'
   | 'kill-failed';
 
+/**
+ * Discriminant for `SessionDeclinedError` (WR-02, 39-REVIEW.md). `startSession()`
+ * throws `Error` with the same "Session already active ..." prefix for three
+ * semantically different situations, distinguishable before this type only by
+ * substring-matching the parenthetical remainder of the message:
+ *
+ * - `'active'` — a genuinely running in-memory session exists; a hard stop,
+ *   not retryable without first resolving/cancelling the existing session.
+ * - `'reap-in-progress'` — a concurrent `startSession()` call for the same
+ *   resolvedDir is already inside the awaited orphan reap; retryable once
+ *   that call resolves.
+ * - `'settled-alive'` — a confirmed-alive orphan's Task Attempt was settled
+ *   and its pid deliberately spared; explicitly recoverable by re-issuing
+ *   the call.
+ * - `'kill-failed'` — the orphan reap's kill signal itself failed; the
+ *   registry row was preserved so re-issuing the call will retry the kill.
+ */
+export type SessionDeclineReason = 'active' | 'reap-in-progress' | 'settled-alive' | 'kill-failed';
+
+/**
+ * Thrown by `startSession()` whenever it declines to start a new session for
+ * a `projectDir` (WR-02, 39-REVIEW.md). Callers that need to distinguish the
+ * four decline cases programmatically can branch on `.reason` instead of
+ * parsing the human-readable message prose, while every caller that merely
+ * surfaces `err.message` (e.g. the MCP tool layer) keeps working unchanged —
+ * this is a plain `Error` subclass, so `instanceof Error` and `.message`
+ * behave exactly as before.
+ */
+export class SessionDeclinedError extends Error {
+  readonly reason: SessionDeclineReason;
+
+  constructor(reason: SessionDeclineReason, message: string) {
+    super(message);
+    this.name = 'SessionDeclinedError';
+    this.reason = reason;
+  }
+}
+
 export class SessionManager {
   /** Sessions keyed by projectDir for duplicate-start prevention */
   private sessions = new Map<string, ManagedSession>();
@@ -235,7 +273,8 @@ export class SessionManager {
       // states (paused, error, completed, cancelled) are evicted so the caller can
       // start a fresh session for the same projectDir.
       if (existing.status === 'starting' || existing.status === 'running' || existing.status === 'blocked') {
-        throw new Error(
+        throw new SessionDeclinedError(
+          'active',
           `Session already active for ${resolvedDir} (sessionId: ${existing.sessionId}, status: ${existing.status})`
         );
       }
@@ -255,7 +294,7 @@ export class SessionManager {
       // already inside the awaited reap below — reject it exactly like the
       // in-memory "already active" case above (CR-02 guarantee, preserved
       // across the now-async reap).
-      throw new Error(`Session already active for ${resolvedDir} (reap in progress)`);
+      throw new SessionDeclinedError('reap-in-progress', `Session already active for ${resolvedDir} (reap in progress)`);
     } else {
       // INC-2026-09-29-02 fix 3 (Option B): no in-memory session for this
       // projectDir — but a persisted registry entry may reference a headless
@@ -286,7 +325,8 @@ export class SessionManager {
         const detail = reapOutcome === 'settled-alive'
           ? `its dangling Task Attempt was settled and the live process was deliberately left running rather than signalled; re-issuing this call will reclaim the now-settled pid`
           : `the kill signal failed (see server logs for the underlying error) and the process may still be alive; its registry row was preserved so re-issuing this call will retry the kill`;
-        throw new Error(
+        throw new SessionDeclinedError(
+          reapOutcome,
           `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; ${detail})`
         );
       }
