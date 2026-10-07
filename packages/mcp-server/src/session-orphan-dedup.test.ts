@@ -25,6 +25,7 @@ import { SessionManager } from './session-manager.js';
 import { getSessionEntry, registerSessionEntry, type SessionLivenessOptions, type SessionRegistryEntry } from './session-persist.js';
 import {
   reconcileOrphanAttempt,
+  computeWorkerStartTimeBound,
   type OrphanReconcileBridge,
   type OrphanReconcileDeps,
   type OrphanReconcileResult,
@@ -771,9 +772,17 @@ describe('orphan-reconcile.ts — reconcileOrphanAttempt (module-level, D-04)', 
     assert.equal(calls.settleRunningAttemptsForWorker.length, 0);
 
     // Pitfall 4 (executable proof): the bound parameters are exactly the
-    // entry's pid, the stubbed host, and the stubbed normalized project root.
+    // entry's pid, the stubbed host, the stubbed normalized project root,
+    // and the WR-01 started-at skew bound derived from the entry's startTime.
+    const expectedBound = computeWorkerStartTimeBound(baseEntry.startTime);
     assert.deepEqual(calls.prepareParams, [
-      { ':pid': baseEntry.pid, ':host': 'test-host', ':project_root': 'normalized:/proj' },
+      {
+        ':pid': baseEntry.pid,
+        ':host': 'test-host',
+        ':project_root': 'normalized:/proj',
+        ':start_time_min': expectedBound.min,
+        ':start_time_max': expectedBound.max,
+      },
     ]);
   });
 
@@ -791,8 +800,15 @@ describe('orphan-reconcile.ts — reconcileOrphanAttempt (module-level, D-04)', 
     assert.equal(result, 'no-attempt');
     assert.equal(calls.settleRunningAttemptsForWorker.length, 1);
 
+    const expectedBound = computeWorkerStartTimeBound(baseEntry.startTime);
     assert.deepEqual(calls.prepareParams, [
-      { ':pid': baseEntry.pid, ':host': 'test-host', ':project_root': 'normalized:/proj' },
+      {
+        ':pid': baseEntry.pid,
+        ':host': 'test-host',
+        ':project_root': 'normalized:/proj',
+        ':start_time_min': expectedBound.min,
+        ':start_time_max': expectedBound.max,
+      },
     ]);
   });
 
@@ -856,6 +872,41 @@ describe('orphan-reconcile.ts — reconcileOrphanAttempt (module-level, D-04)', 
     // Both rows must have been attempted (the loop keeps going past the
     // throw rather than aborting on the first row after it).
     assert.deepEqual(calls, ['worker-ok', 'worker-throws']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WR-01 (39-REVIEW.md): computeWorkerStartTimeBound — the bounded-skew
+// window ORPHAN_RECONCILE_WORKER_ATTEMPT_SQL binds against `workers.started_at`
+// so a recycled pid within the same host+project (an earlier, already-dead
+// `gsd auto` process's `workers` row never cleaned up, later reassigned to an
+// unrelated orphan) is excluded from the match. Exercised as a pure function
+// since the SQL filter itself can only be proven against a real SQLite file,
+// which is out of scope for this fake-bridge suite (D-04).
+// ---------------------------------------------------------------------------
+
+describe('orphan-reconcile.ts — computeWorkerStartTimeBound (WR-01, 39-REVIEW.md)', () => {
+  it('produces an inclusive window of +/- 60s around a parseable recorded start time', () => {
+    const recorded = '2026-10-07T12:00:00.000Z';
+    const { min, max } = computeWorkerStartTimeBound(recorded);
+    assert.equal(min, '2026-10-07T11:59:00.000Z');
+    assert.equal(max, '2026-10-07T12:01:00.000Z');
+
+    // A `workers.started_at` recorded by a genuinely different, unrelated
+    // process whose start time falls outside this window (e.g. the
+    // long-running-workspace pid-recycling scenario WR-01 describes) must
+    // compare as excluded under simple ISO8601 lexicographic ordering.
+    const unrelatedStartedAt = '2026-10-07T11:00:00.000Z'; // an hour earlier
+    assert.ok(unrelatedStartedAt < min, 'an unrelated earlier process must fall below the window');
+  });
+
+  it('falls back to an unbounded window when the recorded start time cannot be parsed, rather than excluding every row', () => {
+    const { min, max } = computeWorkerStartTimeBound('not-a-valid-timestamp');
+    // Any real ISO8601 started_at value must compare within [min, max] —
+    // this cross-check must only ever narrow, never become a silent
+    // false-negative source when the input is malformed.
+    const anyRealStartedAt = '2026-10-07T12:00:00.000Z';
+    assert.ok(anyRealStartedAt >= min && anyRealStartedAt <= max);
   });
 });
 

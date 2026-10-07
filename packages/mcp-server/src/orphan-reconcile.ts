@@ -106,6 +106,42 @@ export function normalizeOrphanProjectRoot(dir: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Started-at bound (WR-01, 39-REVIEW.md): host+project_root scoping alone
+// does not close pid recycling WITHIN the same host+project (e.g. a
+// long-running dev workspace where an earlier, already-dead `gsd auto`
+// process's `workers` row was never cleaned up, and the OS later reassigns
+// that exact pid to a brand-new, unrelated orphan process for the SAME
+// project). Mirrors the bounded-skew guard `killOrphanSessionPid` already
+// applies (STALE_PID_START_SKEW_MS in session-persist.ts/pid-registry.ts)
+// — this is not a re-derived OS liveness check (forbidden, PD-4); it is a
+// DB-side identity guard applied to the row this query is about to act on.
+// `workers.started_at` (recorded by the child's own registerAutoWorker call)
+// is not expected to equal `entry.startTime` (recorded by the MCP server
+// moments earlier, after the init handshake) to the millisecond, so an exact
+// match would be too fragile — a bounded window is used instead.
+const WORKER_START_TIME_SKEW_MS = 60_000;
+
+/**
+ * Compute an inclusive ISO8601 [min, max] bound around `recordedStartTime`
+ * for the `workers.started_at` cross-check. Falls back to an unbounded
+ * window (effectively a no-op filter) when `recordedStartTime` cannot be
+ * parsed, since ORPHAN_RECONCILE_WORKER_ATTEMPT_SQL's other predicates
+ * (host + pid + project_root_realpath) already carry the primary identity
+ * burden — this cross-check must only ever narrow, never itself become a
+ * silent false-negative source when the input is malformed.
+ */
+export function computeWorkerStartTimeBound(recordedStartTime: string): { min: string; max: string } {
+  const recordedMs = Date.parse(recordedStartTime);
+  if (!Number.isFinite(recordedMs)) {
+    return { min: '0000-01-01T00:00:00.000Z', max: '9999-12-31T23:59:59.999Z' };
+  }
+  return {
+    min: new Date(recordedMs - WORKER_START_TIME_SKEW_MS).toISOString(),
+    max: new Date(recordedMs + WORKER_START_TIME_SKEW_MS).toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The pid-keyed join (host + project-root scoped — see module header)
 // ---------------------------------------------------------------------------
 
@@ -120,6 +156,8 @@ export const ORPHAN_RECONCILE_WORKER_ATTEMPT_SQL = `
   WHERE worker.pid = :pid
     AND worker.host = :host
     AND worker.project_root_realpath = :project_root
+    AND worker.started_at >= :start_time_min
+    AND worker.started_at <= :start_time_max
     AND attempt.attempt_state = 'running'
     AND lifecycle.item_kind = 'task'
 `;
@@ -161,6 +199,8 @@ export async function reconcileOrphanAttempt(
       return 'db-unavailable';
     }
 
+    const startTimeBound = computeWorkerStartTimeBound(entry.startTime);
+
     const rows = bridge
       .getDb()
       .prepare(ORPHAN_RECONCILE_WORKER_ATTEMPT_SQL)
@@ -168,6 +208,8 @@ export async function reconcileOrphanAttempt(
         ':pid': entry.pid,
         ':host': getHostname(),
         ':project_root': normalizeProjectRoot(resolvedDir),
+        ':start_time_min': startTimeBound.min,
+        ':start_time_max': startTimeBound.max,
       }) as Array<{ worker_id: string }>;
 
     if (rows.length === 0) {
