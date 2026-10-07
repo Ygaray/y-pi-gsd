@@ -18,11 +18,17 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { SessionManager } from './session-manager.js';
-import { getSessionEntry, registerSessionEntry, type SessionLivenessOptions } from './session-persist.js';
+import { getSessionEntry, registerSessionEntry, type SessionLivenessOptions, type SessionRegistryEntry } from './session-persist.js';
+import {
+  reconcileOrphanAttempt,
+  type OrphanReconcileBridge,
+  type OrphanReconcileDeps,
+  type OrphanReconcileResult,
+} from './orphan-reconcile.js';
 import type { RpcClient } from '@opengsd/rpc-client';
 import type { ManagedSession } from './types.js';
 
@@ -116,6 +122,11 @@ class TestableSessionManager extends SessionManager {
   /** pids considered "alive" by the fake liveness probe (defaults: none). */
   alivePids = new Set<number>();
 
+  /** Queued reconcile results — consumed FIFO, one per reconcile call. */
+  reconcileResults: OrphanReconcileResult[] = [];
+  /** Every reconcile call this manager made, for Pitfall-1 fall-through assertions. */
+  reconcileCalls: Array<{ pid: number; resolvedDir: string }> = [];
+
   constructor(registryPath: string) {
     super();
     this.registryPath = registryPath;
@@ -157,6 +168,26 @@ class TestableSessionManager extends SessionManager {
 
   getInternalSession(projectDir: string): ManagedSession | undefined {
     return this.getSessionByDir(projectDir);
+  }
+
+  /**
+   * Fourth testability seam (D-04): fakes the DB-based reconcile decision so
+   * these tests never touch a real SQLite file or spawned RpcClient. Pushes
+   * every call onto `reconcileCalls` and returns the next queued result,
+   * defaulting an empty queue to `'no-attempt'` so every pre-existing kill-
+   * path test case in this file keeps passing unchanged.
+   */
+  protected override async reconcileOrphanAttempt(
+    entry: SessionRegistryEntry,
+    resolvedDir: string,
+  ): Promise<OrphanReconcileResult> {
+    this.reconcileCalls.push({ pid: entry.pid, resolvedDir });
+    return this.reconcileResults.shift() ?? 'no-attempt';
+  }
+
+  /** Drives the reap directly, without going through startSession(). */
+  async reapOrphanForTest(resolvedDir: string): Promise<void> {
+    return this.reapPersistedOrphanSession(resolvedDir);
   }
 }
 
@@ -284,6 +315,113 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
       !sm.killedPids.some((k) => k.pid === recycledPid && (k.signal === 'SIGTERM' || k.signal === 'SIGKILL')),
       'must never signal a pid whose actual start time postdates the recorded one',
     );
+  });
+
+  it('settles a live orphan\'s Attempt instead of killing it (EXEC-01, Phase 39)', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-settled');
+    const orphanPid = 40010;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-settled',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+    sm.reconcileResults.push('settled');
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    // The orphan's Attempt was settled — it must NOT be killed (no SIGTERM or
+    // SIGKILL). A signal-0 liveness probe from isOrphanEntryAlive() is
+    // expected and is not a kill.
+    assert.ok(
+      !sm.killedPids.some((k) => k.pid === orphanPid && (k.signal === 'SIGTERM' || k.signal === 'SIGKILL')),
+      `expected orphan pid ${orphanPid} to receive no SIGTERM/SIGKILL, got: ${JSON.stringify(sm.killedPids)}`,
+    );
+
+    // The stale registry entry is still cleared, and exactly one new driver
+    // client was created.
+    const entry = getSessionEntry(projectDir, sm.registryPath);
+    assert.ok(entry);
+    assert.notEqual(entry?.pid, orphanPid);
+    assert.equal(entry?.pid, sm.lastClient!.pid);
+    assert.equal(sm.allClients.length, 1);
+
+    // The new seam was actually consulted — the decision is not bypassed.
+    assert.ok(
+      sm.reconcileCalls.some((c) => c.pid === orphanPid && c.resolvedDir === resolve(projectDir)),
+      `expected a reconcile call for pid ${orphanPid}, got: ${JSON.stringify(sm.reconcileCalls)}`,
+    );
+  });
+
+  it('kills a live orphan when there is no Attempt to settle — models the D-02 non-auto-mode orphan with no `workers` row (EXEC-01, Phase 39)', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-no-attempt');
+    const orphanPid = 40011;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-no-attempt',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+    sm.reconcileResults.push('no-attempt');
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    assert.ok(
+      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
+      `expected orphan pid ${orphanPid} to receive SIGTERM, got: ${JSON.stringify(sm.killedPids)}`,
+    );
+    assert.equal(
+      sm.reconcileCalls.filter((c) => c.pid === orphanPid).length,
+      1,
+      'the kill must be reached by falling through a real reconcile attempt, not by skipping it',
+    );
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, sm.lastClient!.pid);
+  });
+
+  it('kills a live orphan when the reconcile cannot reach the database (EXEC-01, Phase 39)', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-db-unavailable');
+    const orphanPid = 40012;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-db-unavailable',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+    sm.reconcileResults.push('db-unavailable');
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    assert.ok(
+      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
+      `expected orphan pid ${orphanPid} to receive SIGTERM, got: ${JSON.stringify(sm.killedPids)}`,
+    );
+    assert.equal(
+      sm.reconcileCalls.filter((c) => c.pid === orphanPid).length,
+      1,
+      'the kill must be reached by falling through a real reconcile attempt, not by skipping it',
+    );
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, sm.lastClient!.pid);
   });
 
   it('REGRESSION GUARD: without orphan detection, a duplicate driver could start for the same projectDir after a simulated restart', async () => {
@@ -435,5 +573,145 @@ describe('SessionManager.startSession() — concurrent same-projectDir race (CR-
     const entry = getSessionEntry(projectDir, sm.registryPath);
     assert.equal(entry?.sessionId, sessionId);
     assert.equal(entry?.pid, sm.lastClient!.pid);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// orphan-reconcile.ts — reconcileOrphanAttempt, exercised directly against a
+// hand-built fake bridge (D-04: no real SQLite file anywhere in this suite).
+// Covers Task 2's non-settled-outcome test map: a rejecting bridge load, a
+// false ensureDbOpen, zero query rows, and an empty settled-id array all map
+// onto the correct outcome, and the bound query parameters are asserted
+// executably (Pitfall 4).
+// ---------------------------------------------------------------------------
+
+interface FakeOrphanReconcileBridgeCalls {
+  ensureDbOpen: string[];
+  getDb: number;
+  settleRunningAttemptsForWorker: string[];
+  prepareParams: Array<Record<string, unknown>>;
+}
+
+function createFakeOrphanReconcileBridge(config: {
+  ensureDbOpenResult?: boolean;
+  queryRows?: Array<{ worker_id: string }>;
+  settledIdsByWorker?: Record<string, string[]>;
+} = {}): { bridge: OrphanReconcileBridge; calls: FakeOrphanReconcileBridgeCalls } {
+  const calls: FakeOrphanReconcileBridgeCalls = {
+    ensureDbOpen: [],
+    getDb: 0,
+    settleRunningAttemptsForWorker: [],
+    prepareParams: [],
+  };
+  const bridge: OrphanReconcileBridge = {
+    async ensureDbOpen(projectDir: string) {
+      calls.ensureDbOpen.push(projectDir);
+      return config.ensureDbOpenResult ?? true;
+    },
+    getDb() {
+      calls.getDb++;
+      return {
+        prepare(_sql: string) {
+          return {
+            all(params?: Record<string, unknown>) {
+              calls.prepareParams.push(params ?? {});
+              return config.queryRows ?? [];
+            },
+          };
+        },
+      };
+    },
+    settleRunningAttemptsForWorker(workerId: string) {
+      calls.settleRunningAttemptsForWorker.push(workerId);
+      return config.settledIdsByWorker?.[workerId] ?? [];
+    },
+  };
+  return { bridge, calls };
+}
+
+describe('orphan-reconcile.ts — reconcileOrphanAttempt (module-level, D-04)', () => {
+  const baseEntry: SessionRegistryEntry = {
+    sessionId: 'session-under-test',
+    projectDir: '/tmp/does-not-matter',
+    pid: 50099,
+    startTime: new Date().toISOString(),
+    status: 'running',
+  };
+  const stubHostname = () => 'test-host';
+  const stubNormalizeProjectRoot = (dir: string) => `normalized:${dir}`;
+
+  it('returns \'db-unavailable\' when loadBridge rejects, rather than propagating the rejection', async () => {
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => {
+        throw new Error('bridge import failed');
+      },
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
+    assert.equal(result, 'db-unavailable');
+  });
+
+  it('returns \'db-unavailable\' when ensureDbOpen resolves false, and never calls getDb', async () => {
+    const { bridge, calls } = createFakeOrphanReconcileBridge({ ensureDbOpenResult: false });
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
+    assert.equal(result, 'db-unavailable');
+    assert.equal(calls.getDb, 0);
+  });
+
+  it('returns \'no-attempt\' when the pid-join query returns zero rows, and never calls settleRunningAttemptsForWorker', async () => {
+    const { bridge, calls } = createFakeOrphanReconcileBridge({ queryRows: [] });
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
+    assert.equal(result, 'no-attempt');
+    assert.equal(calls.settleRunningAttemptsForWorker.length, 0);
+
+    // Pitfall 4 (executable proof): the bound parameters are exactly the
+    // entry's pid, the stubbed host, and the stubbed normalized project root.
+    assert.deepEqual(calls.prepareParams, [
+      { ':pid': baseEntry.pid, ':host': 'test-host', ':project_root': 'normalized:/proj' },
+    ]);
+  });
+
+  it('returns \'no-attempt\' (not \'settled\') when the matched worker\'s settle returns an empty array — the count, not the absence of a throw, decides', async () => {
+    const { bridge, calls } = createFakeOrphanReconcileBridge({
+      queryRows: [{ worker_id: 'worker-1' }],
+      settledIdsByWorker: { 'worker-1': [] },
+    });
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
+    assert.equal(result, 'no-attempt');
+    assert.equal(calls.settleRunningAttemptsForWorker.length, 1);
+
+    assert.deepEqual(calls.prepareParams, [
+      { ':pid': baseEntry.pid, ':host': 'test-host', ':project_root': 'normalized:/proj' },
+    ]);
+  });
+
+  it('returns \'settled\' when the matched worker\'s settle returns at least one attempt id', async () => {
+    const { bridge } = createFakeOrphanReconcileBridge({
+      queryRows: [{ worker_id: 'worker-1' }],
+      settledIdsByWorker: { 'worker-1': ['attempt-1'] },
+    });
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
+    assert.equal(result, 'settled');
   });
 });

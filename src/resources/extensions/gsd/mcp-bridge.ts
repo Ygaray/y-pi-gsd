@@ -25,6 +25,7 @@ export {
   upsertMilestonePlanning,
 } from "./gsd-db.js";
 export { invalidateStateCache, isReusableGhostMilestone } from "./state.js";
+export { settleRunningAttemptsForWorker } from "./task-execution-domain-operation.js";
 export { loadEffectiveGSDPreferences } from "./preferences.js";
 export {
   saveDecisionToDb,

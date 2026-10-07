@@ -26,7 +26,9 @@ import {
   registerSessionEntry,
   removeSessionEntry,
   type SessionLivenessOptions,
+  type SessionRegistryEntry,
 } from './session-persist.js';
+import { reconcileOrphanAttempt, type OrphanReconcileResult } from './orphan-reconcile.js';
 
 // ---------------------------------------------------------------------------
 // Inlined detection logic (from headless-events.ts — no internal package imports)
@@ -169,6 +171,20 @@ export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
 
   /**
+   * Synchronous reservation guard (EXEC-01, Phase 39 ripple). The orphan
+   * reconcile the fresh-start branch now awaits (`reapPersistedOrphanSession`)
+   * yields control back to the microtask queue even when it resolves
+   * immediately — breaking the pre-existing CR-02 guarantee that a second
+   * same-projectDir `startSession()` fired before the first is awaited can
+   * never observe an empty `this.sessions` map. This set closes that window:
+   * it is reserved synchronously, before the first await, and released once
+   * the real session is inserted into `this.sessions` (or on any early
+   * failure), so a concurrent call for the same `resolvedDir` during the
+   * reap is still rejected exactly like the "already active" in-memory case.
+   */
+  private startingLocks = new Set<string>();
+
+  /**
    * Start a new GSD auto-mode session for the given project directory.
    *
    * Rejects if a session already exists for this projectDir.
@@ -203,6 +219,12 @@ export class SessionManager {
       // reclaiming its child, so a future restart doesn't mistake it for an
       // orphan.
       removeSessionEntry(resolvedDir, this.getSessionRegistryPath());
+    } else if (this.startingLocks.has(resolvedDir)) {
+      // A concurrent startSession() call for this same resolvedDir is
+      // already inside the awaited reap below — reject it exactly like the
+      // in-memory "already active" case above (CR-02 guarantee, preserved
+      // across the now-async reap).
+      throw new Error(`Session already active for ${resolvedDir} (reap in progress)`);
     } else {
       // INC-2026-09-29-02 fix 3 (Option B): no in-memory session for this
       // projectDir — but a persisted registry entry may reference a headless
@@ -210,7 +232,12 @@ export class SessionManager {
       // in-memory Map is wiped on restart, so startSession()'s "already
       // active" guard above can't see it). Reap it before starting a new
       // driver so at most one driver ever runs per worktree.
-      this.reapPersistedOrphanSession(resolvedDir);
+      this.startingLocks.add(resolvedDir);
+      try {
+        await this.reapPersistedOrphanSession(resolvedDir);
+      } finally {
+        this.startingLocks.delete(resolvedDir);
+      }
     }
 
     const cliPath = options.cliPath ?? SessionManager.resolveCLIPath();
@@ -334,20 +361,47 @@ export class SessionManager {
   }
 
   /**
+   * Testability seam (EXEC-01, Phase 39) — override to inject a fake
+   * reconcile result (`'settled' | 'no-attempt' | 'db-unavailable'`) without
+   * touching a real SQLite file. Production implementation delegates to
+   * `orphan-reconcile.ts`'s `reconcileOrphanAttempt`.
+   */
+  protected reconcileOrphanAttempt(
+    entry: SessionRegistryEntry,
+    resolvedDir: string,
+  ): Promise<OrphanReconcileResult> {
+    return reconcileOrphanAttempt(entry, resolvedDir);
+  }
+
+  /**
    * Detect and reap an orphaned headless child left by a PRIOR MCP server
    * instance for `resolvedDir` — see the module-level comment on
    * session-persist.ts for the full incident context. No-op when there is no
    * persisted entry, when the recorded pid is already dead, or when the
    * recorded pid has been recycled by an unrelated process (start-time
    * guard) — in all of those cases the stale row is simply dropped.
+   *
+   * A confirmed-alive orphan's DB-side Task Attempt is reconciled (settled)
+   * before anything signals its pid (EXEC-01, Phase 39, D-03 insertion
+   * point) — the pid is only killed when that reconcile conclusively reports
+   * there is nothing to settle or that the database could not be reached.
    */
-  private reapPersistedOrphanSession(resolvedDir: string): void {
+  protected async reapPersistedOrphanSession(resolvedDir: string): Promise<void> {
     const registryPath = this.getSessionRegistryPath();
     const entry = getSessionEntry(resolvedDir, registryPath);
     if (!entry) return;
 
     const livenessOptions = this.getSessionLivenessOptions();
     if (!isOrphanEntryAlive(entry, livenessOptions)) {
+      removeSessionEntry(resolvedDir, registryPath);
+      return;
+    }
+
+    const reconcileResult = await this.reconcileOrphanAttempt(entry, resolvedDir);
+    if (reconcileResult === 'settled') {
+      process.stderr.write(
+        `[gsd-mcp-server] INC-2026-09-29-02: reconciled orphaned headless session for ${resolvedDir} left by a prior MCP server instance — settled its Attempt, pid=${entry.pid} left alive\n`,
+      );
       removeSessionEntry(resolvedDir, registryPath);
       return;
     }
