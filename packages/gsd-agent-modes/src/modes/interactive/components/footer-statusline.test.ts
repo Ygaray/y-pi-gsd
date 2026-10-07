@@ -353,6 +353,100 @@ describe("FooterComponent stacked render", () => {
 			`expected row 2 to carry the contextOrange ANSI sequence at 72% context, got: ${JSON.stringify(row2)}`,
 		);
 	});
+
+	it("SL-03: row budget independence — a wide session countdown does not shrink the context row", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+
+		const narrowSession = createSession({ sessionName: "demo", rateLimitStatus: undefined });
+		const narrowFooter = new FooterComponent(narrowSession, createFooterData(1));
+		const narrowLines = narrowFooter.render(width);
+
+		// Widest possible countdown form: a multi-day reset far enough out to render as "999d".
+		const wideSession = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 42, resetsAtEpochSec: nowEpochSec + 999 * 86400 + 1000 },
+				weekly: null,
+			},
+		});
+		const wideFooter = new FooterComponent(wideSession, createFooterData(1));
+		const wideLines = wideFooter.render(width);
+
+		assert.equal(
+			narrowLines[1],
+			wideLines[1],
+			"the context row (index 1) must be byte-identical regardless of the session countdown's width — under the old joined row, widening the session segment necessarily shrank context's available width",
+		);
+	});
+
+	it("SL-03: every row measures exactly the width at 60, 93, and 120 cells", () => {
+		for (const width of [60, 93, 120]) {
+			const session = createSession({
+				sessionName: "a-long-session-name-to-force-truncation",
+				modelId: "a-very-long-model-identifier-string-for-truncation",
+				provider: "a-long-provider-name",
+			});
+			const footer = new FooterComponent(session, createFooterData(2));
+
+			const lines = footer.render(width);
+			assert.equal(lines.length, 4, `expected 4 rows at width ${width}, got ${lines.length}`);
+			for (const [index, line] of lines.entries()) {
+				assert.equal(
+					visibleWidth(line),
+					width,
+					`expected row ${index} to measure exactly ${width} cells at width ${width}, got: ${JSON.stringify(line)}`,
+				);
+			}
+		}
+	});
+
+	it("SL-03: the footer never exceeds 5 rows", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		const dir = mkdtempSync(join(tmpdir(), "footer-max-content-"));
+		writeStateMd(dir, stateMdFixture("Max Content Milestone"));
+
+		const session = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 42, resetsAtEpochSec: nowEpochSec + 3600 },
+				weekly: { usedPercent: 10, resetsAtEpochSec: nowEpochSec + 86400 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = withCwd(dir, () => footer.render(width));
+		assert.equal(
+			lines.length,
+			5,
+			`expected the maximum-content render (both usage windows + milestone row) to stay at 5 rows, got ${lines.length}`,
+		);
+
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("SL-03: a partial usage state renders two independently correct rows", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		const session = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 55, resetsAtEpochSec: nowEpochSec + 3600 },
+				weekly: null,
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		const sessionPlain = stripVTControlCharacters(lines[2]!);
+		const weeklyPlain = stripVTControlCharacters(lines[3]!);
+
+		assert.match(sessionPlain, /session: [█░]{10} 55%/, `expected a real bar+percent on the session row, got: ${sessionPlain}`);
+		assert.doesNotMatch(sessionPlain, /unavailable/, `session row must not carry the weekly row's unavailable content, got: ${sessionPlain}`);
+		assert.match(weeklyPlain, /weekly: unavailable/, `expected the unavailable literal on the weekly row, got: ${weeklyPlain}`);
+		assert.doesNotMatch(weeklyPlain, /[█░]{10}/, `weekly row must not carry the session row's bar content, got: ${weeklyPlain}`);
+	});
 });
 
 /** Byte-for-byte-shaped (not byte-for-byte content) `.planning/STATE.md` fixture — real field names, a
