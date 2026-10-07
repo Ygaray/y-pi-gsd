@@ -397,13 +397,19 @@ export class SessionManager {
       return;
     }
 
+    // CR-01 (39-REVIEW.md): a 'settled' outcome only clears the orphan's
+    // dangling DB-side Attempt row — it must NOT spare the still-alive pid
+    // from being killed. Leaving the pid alive while startSession() goes on
+    // to spawn a brand-new driver for the same resolvedDir would reopen the
+    // exact "at most one driver per worktree" invariant this whole reap
+    // exists to guarantee. Settle-then-kill is the intended order: settle
+    // the Attempt first (so the kill signal doesn't race a dangling
+    // `running` row), then always reclaim the pid exactly as before.
     const reconcileResult = await this.reconcileOrphanAttempt(entry, resolvedDir);
     if (reconcileResult === 'settled') {
       process.stderr.write(
-        `[gsd-mcp-server] INC-2026-09-29-02: reconciled orphaned headless session for ${resolvedDir} left by a prior MCP server instance — settled its Attempt, pid=${entry.pid} left alive\n`,
+        `[gsd-mcp-server] INC-2026-09-29-02: reconciled orphaned headless session for ${resolvedDir} left by a prior MCP server instance — settled its Attempt, now reclaiming pid=${entry.pid}\n`,
       );
-      removeSessionEntry(resolvedDir, registryPath);
-      return;
     }
 
     const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);

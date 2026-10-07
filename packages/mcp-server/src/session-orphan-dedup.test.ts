@@ -317,7 +317,7 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     );
   });
 
-  it('settles a live orphan\'s Attempt instead of killing it (EXEC-01, Phase 39)', async () => {
+  it('settles a live orphan\'s Attempt BEFORE killing it, so no second driver ever runs alongside a still-alive pid (CR-01, 39-REVIEW.md)', async () => {
     const sm = createManager();
     const projectDir = join(tmp, 'proj-settled');
     const orphanPid = 40010;
@@ -337,16 +337,19 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
 
     await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
 
-    // The orphan's Attempt was settled — it must NOT be killed (no SIGTERM or
-    // SIGKILL). A signal-0 liveness probe from isOrphanEntryAlive() is
-    // expected and is not a kill.
+    // CR-01 (39-REVIEW.md): a 'settled' outcome must NOT spare the
+    // still-alive pid from being killed — only the DB-side Attempt row is
+    // settled. If the pid were left alive while startSession() goes on to
+    // spawn the brand-new driver below, TWO live drivers would run against
+    // the same resolvedDir, directly violating the "at most one driver per
+    // worktree" invariant this whole reap exists to guarantee.
     assert.ok(
-      !sm.killedPids.some((k) => k.pid === orphanPid && (k.signal === 'SIGTERM' || k.signal === 'SIGKILL')),
-      `expected orphan pid ${orphanPid} to receive no SIGTERM/SIGKILL, got: ${JSON.stringify(sm.killedPids)}`,
+      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
+      `expected orphan pid ${orphanPid} to receive SIGTERM after its Attempt was settled, got: ${JSON.stringify(sm.killedPids)}`,
     );
 
     // The stale registry entry is still cleared, and exactly one new driver
-    // client was created.
+    // client was ever created — never two live drivers for one resolvedDir.
     const entry = getSessionEntry(projectDir, sm.registryPath);
     assert.ok(entry);
     assert.notEqual(entry?.pid, orphanPid);
@@ -512,8 +515,8 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     );
   });
 
-  it('kills the orphan on the losing pass of a concurrent reap so nothing leaks', async () => {
-    // The race must not resolve to BOTH passes declining to kill — that
+  it('kills the orphan exactly once across a concurrent reap race so nothing leaks', async () => {
+    // The race must not resolve to NEITHER pass killing the pid — that
     // would be a leak, not a safety win (project prohibition, Pitfall 3).
     const sm = createManager();
     const projectDir = join(tmp, 'proj-race-kill');
@@ -537,13 +540,15 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
       sm.reapOrphanForTest(projectDir),
     ]);
 
-    // The winner settles and declines to kill; the loser finds nothing left
-    // to settle and still reaps — the net outcome is settled-exactly-once
-    // with no leaked live process. Killing after a durable settle loses no
-    // work, which is the distinction EXEC-01 draws.
+    // CR-01 (39-REVIEW.md): both passes now reach killOrphanSessionPid
+    // regardless of which one won the settle race — settling only clears
+    // the DB-side Attempt, it never spares the pid. Whichever pass acts on
+    // the still-alive pid first delivers the real SIGTERM; the other finds
+    // it already dead. The net outcome is settled-exactly-once AND
+    // killed-exactly-once, with no leaked live process either way.
     assert.ok(
       sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
-      `expected the losing pass to SIGTERM the orphan pid, got: ${JSON.stringify(sm.killedPids)}`,
+      `expected one of the racing passes to SIGTERM the orphan pid, got: ${JSON.stringify(sm.killedPids)}`,
     );
     assert.equal(
       getSessionEntry(projectDir, sm.registryPath),
