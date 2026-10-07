@@ -20,13 +20,6 @@ const FORBIDDEN_PATHS = [
   'src/export-html',
 ]
 const ALLOWLIST = new Set([
-  join(ROOT, 'packages/pi-coding-agent/src/core/extension-session-types.ts'),
-  join(ROOT, 'packages/pi-coding-agent/src/core/keybindings.ts'),
-  join(ROOT, 'packages/pi-coding-agent/src/core/fallback-resolver.ts'),
-  join(ROOT, 'packages/pi-coding-agent/src/core/blob-store.ts'),
-  join(ROOT, 'packages/pi-coding-agent/src/core/artifact-manager.ts'),
-  join(ROOT, 'packages/pi-coding-agent/src/core/lifecycle-hooks.ts'),
-  join(ROOT, 'packages/pi-coding-agent/src/core/system-prompt.ts'),
   join(ROOT, 'packages/pi-coding-agent/src/core/gsd-seam-types.ts'),
   join(ROOT, 'packages/pi-coding-agent/src/core/gsd-extension-types.ts'),
   join(ROOT, 'packages/pi-coding-agent/src/core/extensions/loader.ts'),
