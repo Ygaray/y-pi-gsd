@@ -439,6 +439,21 @@ test("RENDER-02 SC-5: mixed-stream thinking+text+tool-call+tool-result survives 
 		`AssistantMessageComponent count in chatContainer (${assistantComponentCount}) must match tracked text-run segment count (${textRunSegmentCount}) — a mismatch is the orphan leak`,
 	);
 
+	// Phase 37 Plan 03, Task 1 (D-03 branch C — VERDICT: no-separate-defect,
+	// per 37-01-SUMMARY.md's `## D-03 Diagnosis`): RENDER-02's real-session
+	// duplication was downstream of RENDER-01's text-run orphan leak, closed
+	// by plan 37-02's reclaim + unconditional generation-gated drain — not an
+	// independent duplicate/orphaned ToolExecutionComponent instance and not
+	// body-accumulation inside tool-execution.ts. This plan lands no
+	// production fix in either chat-segment-walker.ts or tool-execution.ts;
+	// this assertion makes that green status load-bearing rather than
+	// incidental by pinning the SAME component instance across the shrink.
+	assert.strictEqual(
+		regrownComponent,
+		pendingComponent,
+		"D-03 branch C: the identical ToolExecutionComponent instance must back the tool across the whole shrink+regrow cycle — no new instance is ever minted for a reused content.id",
+	);
+
 	tui.stop();
 });
 
@@ -733,6 +748,170 @@ test("D-02 Test 6: a turn WITH an MCP tool call still prunes provisional pre-too
 		countRowsContaining(scrollback, "FINALMARK"),
 		1,
 		"the real final answer must still render exactly once",
+	);
+
+	tui.stop();
+});
+
+// ── Phase 37 Plan 03, Task 1: D-03 verdict `no-separate-defect` (branch C) ──
+//
+// 37-01-SUMMARY.md's `## D-03 Diagnosis` section records VERDICT:
+// no-separate-defect — every RENDER-02-specific arbiter in the SC-5 case
+// above (the ToolExecutionComponent instance count, and the BODYMARK/ARGSMARK
+// row counts) already passed at 37-01's HEAD; the only failure was the
+// RENDER-01 orphan-leak assertion, closed by plan 37-02 as a byproduct (see
+// 37-02-SUMMARY.md). Branch C therefore fires: no production fix lands in
+// this plan, in either chat-segment-walker.ts or tool-execution.ts. The
+// cases below make that green status load-bearing (not incidental) and lock
+// in P-03/edge coverage for the no-fix-needed decision.
+
+test("RENDER-02 P-03: an in-flight tool component (no result yet) survives a shrink that drops its block from the desired list", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEAD prose" },
+		{ type: "toolCall", id: "tool-p03-1", name: "bash", arguments: { command: "echo P03MARK" } },
+	]);
+	const component = host.pendingTools.get("tool-p03-1");
+	assert.ok(component, "sanity: the tool call must have registered a pending component");
+	assert.ok(component!.isInFlight(), "sanity: no result has been applied yet — the component must report in-flight");
+
+	// Shrink: strictly shorter blocks array that drops the tool-call block
+	// entirely from the desired list (desiredToolIndices no longer names it).
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "LEAD prose" }]);
+
+	assert.ok(
+		chatContainer.children.includes(component!),
+		"P-03: an in-flight tool component must never be removed from chatContainer, even when its block is dropped from the desired list",
+	);
+	assert.strictEqual(
+		host.pendingTools.get("tool-p03-1"),
+		component,
+		"P-03: an in-flight tool component must remain reachable through host.pendingTools",
+	);
+
+	tui.stop();
+});
+
+// Test 3, as the plan's Task 1 <behavior> literally describes it ("a
+// completed tool component whose block is genuinely absent from the regrown
+// desired list IS detached from chatContainer"), is Branch A's fix-location
+// guarantee (see this task's acceptance_criteria: "Branch A only: a tool
+// segment dropped ... also has host.chatContainer.removeChild(...) called").
+// Branch C fired instead, per the VERDICT above, so no removeChild cleanup
+// was added for this path. Empirically probing the real HEAD behavior (no
+// production file touched by this probe) confirms the walker's tool branch
+// never removes any tool segment — in-flight or completed — once a block
+// disappears from content entirely: the component stays a live
+// chatContainer child, stays in host.pendingTools, and its body stays in
+// scrollback. This is the SAME retention-over-removal default Task 2's own
+// action text names as the established safe direction (plan 37-02's P-01:
+// "retain rather than remove"), so this is pinned here as a deliberate
+// regression lock on the real no-fix behavior, not a defect this plan is
+// authorized to change. See this plan's SUMMARY.md for the full finding.
+test("RENDER-02 Test 3 (documents D-03 branch-C behavior): a completed tool genuinely absent from the regrown desired list is retained, not duplicated", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEAD prose" },
+		{ type: "toolCall", id: "tool-absent-1", name: "bash", arguments: { command: "echo ABSENTMARK" } },
+	]);
+	const component = host.pendingTools.get("tool-absent-1");
+	assert.ok(component, "sanity: the tool call must have registered a pending component");
+	component!.updateResult({ content: [{ type: "text", text: "ABSENTBODY" }], isError: false });
+	tui.requestRender();
+	await terminal.waitForRender();
+
+	// Shrink, then regrow WITHOUT the tool block anywhere in the new content
+	// — genuinely absent, not reused under the same id.
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "LEAD prose" }]);
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEAD prose" },
+		{ type: "text", text: "TRAILING prose, no tool" },
+	]);
+
+	assert.ok(
+		chatContainer.children.includes(component!),
+		"as-shipped (D-03 no-separate-defect, no Branch-A cleanup added): a genuinely-dropped completed tool's component is retained, never removed",
+	);
+	assert.strictEqual(
+		host.pendingTools.get("tool-absent-1"),
+		component,
+		"the retained component stays the SAME instance reachable through host.pendingTools — never a stale pointer, never a duplicate",
+	);
+	const toolInstanceCount = chatContainer.children.filter((c) => c instanceof ToolExecutionComponent).length;
+	assert.strictEqual(
+		toolInstanceCount,
+		1,
+		"exactly one ToolExecutionComponent must exist — retained-but-orphaned is acceptable, a SECOND instance for the same id is not",
+	);
+
+	tui.stop();
+});
+
+test("RENDER-02 Test 4: two distinct tool calls in one turn each end with exactly one component after shrink+regrow", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Delta 1: thinking + two distinct tool calls + trailing text.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "T4THINK considering two tools" },
+		{ type: "toolCall", id: "tool-t4-a", name: "bash", arguments: { command: "echo T4ARGSA" } },
+		{ type: "toolCall", id: "tool-t4-b", name: "bash", arguments: { command: "echo T4ARGSB" } },
+	]);
+	const componentA = host.pendingTools.get("tool-t4-a");
+	const componentB = host.pendingTools.get("tool-t4-b");
+	assert.ok(componentA, "sanity: tool A must have registered a pending component");
+	assert.ok(componentB, "sanity: tool B must have registered a pending component");
+	assert.notStrictEqual(componentA, componentB, "sanity: the two distinct tool ids must back distinct components");
+	componentA!.updateResult({ content: [{ type: "text", text: "T4BODYA" }], isError: false });
+	componentB!.updateResult({ content: [{ type: "text", text: "T4BODYB" }], isError: false });
+	tui.requestRender();
+	await terminal.waitForRender();
+
+	// Shrink: strictly shorter, retaining both ids.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "toolCall", id: "tool-t4-a", name: "bash", arguments: { command: "echo T4ARGSA" } },
+		{ type: "toolCall", id: "tool-t4-b", name: "bash", arguments: { command: "echo T4ARGSB" } },
+	]);
+
+	// Regrow: both tool ids again, plus a trailing answer.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "T4THINK considering two tools" },
+		{ type: "toolCall", id: "tool-t4-a", name: "bash", arguments: { command: "echo T4ARGSA" } },
+		{ type: "toolCall", id: "tool-t4-b", name: "bash", arguments: { command: "echo T4ARGSB" } },
+		{ type: "text", text: "T4ANSWER final answer" },
+	]);
+	host.pendingTools.get("tool-t4-a")!.updateResult({ content: [{ type: "text", text: "T4BODYA" }], isError: false });
+	host.pendingTools.get("tool-t4-b")!.updateResult({ content: [{ type: "text", text: "T4BODYB" }], isError: false });
+	tui.requestRender();
+	await terminal.waitForRender();
+
+	const scrollback = terminal.getScrollBuffer();
+	const toolInstanceCount = chatContainer.children.filter((c) => c instanceof ToolExecutionComponent).length;
+	assert.strictEqual(
+		toolInstanceCount,
+		2,
+		`exactly two ToolExecutionComponent instances must exist (one per distinct id) — cleanup must never collapse two legitimate tools into one, observed ${toolInstanceCount}`,
+	);
+	assert.strictEqual(countRowsContaining(scrollback, "T4BODYA"), 1, "tool A's body must appear exactly once");
+	assert.strictEqual(countRowsContaining(scrollback, "T4BODYB"), 1, "tool B's body must appear exactly once");
+	assert.strictEqual(countRowsContaining(scrollback, "T4ARGSA"), 1, "tool A's args/command echo must appear exactly once");
+	assert.strictEqual(countRowsContaining(scrollback, "T4ARGSB"), 1, "tool B's args/command echo must appear exactly once");
+
+	// Test 5 (RENDER-01 non-regression in this richer two-tool mixed scenario):
+	assert.strictEqual(countRowsContaining(scrollback, "T4ANSWER"), 1, "the trailing final answer must appear exactly once");
+	const textRunSegmentCount = rs.renderedSegments.filter((s) => s.kind === "text-run").length;
+	const assistantComponentCount = chatContainer.children.filter((c) => c instanceof AssistantMessageComponent).length;
+	assert.strictEqual(
+		assistantComponentCount,
+		textRunSegmentCount,
+		`AssistantMessageComponent count (${assistantComponentCount}) must match tracked text-run segment count (${textRunSegmentCount}) — RENDER-01 must not regress in a two-tool mixed turn`,
 	);
 
 	tui.stop();
