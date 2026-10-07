@@ -193,6 +193,166 @@ test("RENDER-01 SC-4: collapse+regrow reuses the assistant component (RED at HEA
 	tui.stop();
 });
 
+// ── Phase 37 Plan 02, Task 2: D-01 reclaim-before-replace tests 2-6 ───
+
+test("D-01 Test 2: reclaimed component is not re-added to chatContainer (no duplicate addChild)", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha" },
+	]);
+	const component = rs.renderedSegments.find((s) => s.kind === "text-run")?.component;
+	assert.ok(component, "sanity: delta 1 must render a text-run component");
+
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "GROWTEXT alpha" }]);
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha beta" },
+	]);
+
+	const occurrences = chatContainer.children.filter((c) => c === component).length;
+	assert.strictEqual(
+		occurrences,
+		1,
+		"the reclaimed component must be a child of chatContainer exactly once — reclaim must never call addChild on a component that is already a live child",
+	);
+
+	tui.stop();
+});
+
+test("D-01 Test 3: reclaimed component's range reflects the regrown startIndex/endIndex (not truncated)", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha" },
+	]);
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "GROWTEXT alpha" }]);
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha beta" },
+	]);
+
+	const scrollback = terminal.getScrollBuffer();
+	assert.ok(
+		countRowsContaining(scrollback, "GROWTEXT alpha beta") >= 1,
+		"the fully regrown text must appear in scrollback — truncation at the pre-shrink length means setRange()/updateContent() did not run on the reclaimed component",
+	);
+
+	tui.stop();
+});
+
+test("D-01 Test 4 (P-02): shrink orphaning both a thinking run and a text run never cross-reclaims across contentType", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Delta 1: thinking@0 + text@1 — two distinct text-run segments.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "THINKSENTINEL alpha" },
+		{ type: "text", text: "TEXTSENTINEL alpha" },
+	]);
+	const thinkingComponentBefore = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "thinking")?.component;
+	const textComponentBefore = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "text")?.component;
+	assert.ok(thinkingComponentBefore, "sanity: delta 1 must render a thinking text-run");
+	assert.ok(textComponentBefore, "sanity: delta 1 must render a text text-run");
+	assert.notStrictEqual(thinkingComponentBefore, textComponentBefore, "sanity: thinking and text components must be distinct");
+
+	// Delta 2: shrink to ONE block (thinking only) — strictly shorter (1 < 2),
+	// fires the primary shrink branch, orphaning BOTH segments. The orphan
+	// array is then [thinkingOrphan, textOrphan] in that order (push order
+	// mirrors rs.renderedSegments' creation order) — textOrphan is LAST, so an
+	// end-backwards scan that ignored contentType would wrongly reclaim it for
+	// this thinking-only desired segment. The contentType gate must skip it
+	// and find thinkingOrphan instead.
+	await driveDelta(host, rs, tui, terminal, [{ type: "thinking", thinking: "THINKSENTINEL alpha" }]);
+
+	// Delta 3: regrow to thinking@0 + text@1, same original shape — the text
+	// segment (still orphaned, untouched by delta 2) must now be reclaimed.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "THINKSENTINEL alpha" },
+		{ type: "text", text: "TEXTSENTINEL alpha" },
+	]);
+
+	const thinkingComponentAfter = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "thinking")?.component;
+	const textComponentAfter = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "text")?.component;
+
+	assert.strictEqual(
+		thinkingComponentAfter,
+		thinkingComponentBefore,
+		"the thinking segment's component must never be displaced by the text reclaim",
+	);
+	assert.strictEqual(
+		textComponentAfter,
+		textComponentBefore,
+		"the text segment must be reclaimed from its own orphan, never minted fresh nor cross-reclaimed from the thinking orphan",
+	);
+	assert.notStrictEqual(
+		thinkingComponentAfter,
+		textComponentAfter,
+		"P-02: a thinking orphan must never be reclaimed for a text desired segment, or the reverse",
+	);
+
+	const scrollback = terminal.getScrollBuffer();
+	assert.strictEqual(countRowsContaining(scrollback, "THINKSENTINEL"), 1, "THINKSENTINEL must appear exactly once");
+	assert.strictEqual(countRowsContaining(scrollback, "TEXTSENTINEL"), 1, "TEXTSENTINEL must appear exactly once");
+
+	tui.stop();
+});
+
+test("D-01 Test 5: an empty rs.orphanedSegments leaves the append loop minting exactly as at HEAD (no-op, not a throw)", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	assert.strictEqual(rs.orphanedSegments.length, 0, "sanity: no orphans exist before the first delta");
+
+	await assert.doesNotReject(async () => {
+		await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "FRESHMARK no orphan to reclaim" }]);
+	});
+
+	assert.strictEqual(
+		countRowsContaining(terminal.getScrollBuffer(), "FRESHMARK"),
+		1,
+		"a fresh segment with no orphan candidates must still mint and render normally",
+	);
+
+	tui.stop();
+});
+
+test("D-01 Test 6: a reclaimed segment is removed from rs.orphanedSegments and present in rs.renderedSegments", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha" },
+	]);
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "GROWTEXT alpha" }]);
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha beta" },
+	]);
+
+	assert.strictEqual(
+		rs.orphanedSegments.length,
+		0,
+		"the reclaimed segment must be spliced out of rs.orphanedSegments by reclaimOrphanedTextRun itself",
+	);
+	assert.ok(
+		rs.renderedSegments.some((s) => s.kind === "text-run" && s.contentType === "text"),
+		"the reclaimed segment must be present in rs.renderedSegments so Task 3's drain can never remove a component that is live again",
+	);
+
+	tui.stop();
+});
+
 // ── Task 2: RENDER-02 SC-5 mixed-stream ───────────────────────────────
 //
 // Structural-then-textual assertion ordering is deliberate and is the

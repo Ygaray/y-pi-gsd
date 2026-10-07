@@ -130,6 +130,40 @@ export function scanNewContentBlocks(
 	}
 }
 
+/**
+ * Scans `rs.orphanedSegments` from the END backwards for a text-run orphan
+ * whose `contentType` exactly matches `desiredSeg`'s — the narrowest rule the
+ * tests admit (RESEARCH Open Design Point 1). Last-in-first-reclaimed matches
+ * the single-collapse-then-restream shape this bug targets, where one shrink
+ * moves the whole `renderedSegments` array across in order. The `contentType`
+ * equality clause is prohibition P-02's enforcement point — an exact `===` on
+ * the two literal union values, never loose or normalized — so a `thinking`
+ * orphan can never be reclaimed for a `text` desired segment, or the reverse.
+ * Matching never considers `cachedText`, `startIndex`, or text length:
+ * `startIndex` restarts at 0 after a collapse and `cachedText` is by
+ * definition the pre-collapse snapshot, so neither survives the event this
+ * matcher must see through.
+ *
+ * On a match, splices the entry out of `rs.orphanedSegments` (so it can never
+ * be double-reclaimed and can never be seen by Task 3's drain), clears its
+ * `orphanedAtGeneration`, and returns it. On no match, returns `undefined` and
+ * leaves `rs.orphanedSegments` untouched.
+ */
+function reclaimOrphanedTextRun(
+	rs: StreamingRenderState,
+	desiredSeg: Extract<DesiredSegment, { kind: "text-run" }>,
+): Extract<RenderedSegment, { kind: "text-run" }> | undefined {
+	for (let i = rs.orphanedSegments.length - 1; i >= 0; i--) {
+		const candidate = rs.orphanedSegments[i];
+		if (candidate.kind === "text-run" && candidate.contentType === desiredSeg.contentType) {
+			rs.orphanedSegments.splice(i, 1);
+			candidate.orphanedAtGeneration = undefined;
+			return candidate;
+		}
+	}
+	return undefined;
+}
+
 export function runSegmentWalker(
 	host: ChatStreamHost,
 	rs: StreamingRenderState,
@@ -240,6 +274,26 @@ export function runSegmentWalker(
 				) {
 					continue;
 				}
+				const reclaimed = reclaimOrphanedTextRun(rs, seg);
+				if (reclaimed) {
+					// D-01: reuse the orphaned component in place via the same
+					// setRange()/updateContent() reconcile path the update loop
+					// below already uses for never-orphaned segments — never
+					// addChild (it is already a live child, per
+					// applySubTurnContentShrink's own comment) and never
+					// markFirstVisibleAssistantOutput (it was already visible).
+					reclaimed.startIndex = seg.startIndex;
+					reclaimed.endIndex = seg.endIndex;
+					reclaimed.component.setRange({ startIndex: reclaimed.startIndex, endIndex: reclaimed.endIndex });
+					reclaimed.component.updateContent(host.streamingMessage);
+					reclaimed.cachedText = segmentText;
+					reclaimed.cachedTextLength = segmentText.length;
+					reclaimed.createdAtGeneration = rs.shrinkGeneration;
+					rs.renderedSegments.push(reclaimed);
+					host.streamingComponent = reclaimed.component;
+					reconcileChatTurnConnections(host.chatContainer.children);
+					continue;
+				}
 				const comp = new AssistantMessageComponent(
 					undefined,
 					host.hideThinkingBlock,
@@ -260,6 +314,7 @@ export function runSegmentWalker(
 					component: comp,
 					cachedText: segmentText,
 					cachedTextLength: segmentText.length,
+					createdAtGeneration: rs.shrinkGeneration,
 				});
 				host.streamingComponent = comp;
 				reconcileChatTurnConnections(host.chatContainer.children);
