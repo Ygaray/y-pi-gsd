@@ -246,10 +246,19 @@ export class SessionManager {
    * immediately — breaking the pre-existing CR-02 guarantee that a second
    * same-projectDir `startSession()` fired before the first is awaited can
    * never observe an empty `this.sessions` map. This set closes that window:
-   * it is reserved synchronously, before the first await, and released once
-   * the real session is inserted into `this.sessions` (or on any early
-   * failure), so a concurrent call for the same `resolvedDir` during the
-   * reap is still rejected exactly like the "already active" in-memory case.
+   * it is reserved synchronously, before the first await.
+   *
+   * WR-03 (39-REVIEW.md): it is released in the `finally` block immediately
+   * after the awaited `reapPersistedOrphanSession()` call resolves — well
+   * BEFORE `this.sessions.set(resolvedDir, session)` is reached, not "once
+   * the real session is inserted" as an earlier version of this comment
+   * claimed. The gap between that release and the `this.sessions.set(...)`
+   * insert (the decline check, `resolveCLIPath()`, `createClient()`,
+   * building the session shell) is safe today ONLY because every statement
+   * in it is synchronous with no intervening `await` — a future change that
+   * adds an `await` in that stretch would silently reopen the exact race
+   * this lock exists to close. Keep that stretch synchronous, or move the
+   * lock's release to cover it, before adding any `await` there.
    */
   private startingLocks = new Set<string>();
 
