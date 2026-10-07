@@ -11,7 +11,8 @@ import { registerToolCompatibility } from "@gsd/pi-coding-agent";
 
 import { DISCUSS_TOOLS_ALLOWLIST } from "../constants.ts";
 import { buildMinimalAutoGsdToolSet, buildMinimalGsdToolSet, buildMinimalGsdWorkflowToolSet, buildRequestScopedGsdToolSet, buildRunUatGsdToolSet, MINIMAL_AUTO_BASE_TOOL_NAMES, MINIMAL_GSD_TOOL_NAMES, requestHasGsdCustomType, restoreGsdWorkflowTools, scopeGsdWorkflowToolsForDispatch } from "../bootstrap/register-hooks.ts";
-import { DRIVER_PLANE_TOOL_NAMES, excludeDriverPlaneTools, isDriverPlaneToolName } from "../driver-plane-tools.ts";
+import * as registerHooks from "../bootstrap/register-hooks.ts";
+import { DRIVER_PLANE_TOOL_NAMES, excludeDriverPlaneTools, isDriverPlaneToolName, resolveFallbackToolSetAdjustment } from "../driver-plane-tools.ts";
 import { filterToolsForProvider } from "../model-router.ts";
 import { applyUnitSkillVisibility } from "../skill-scope.ts";
 import { drainLogs } from "../workflow-logger.ts";
@@ -1076,4 +1077,79 @@ test("buildMinimalAutoGsdToolSet does not warn about driver-plane tools when onl
     !logs.some((entry) => DRIVER_PLANE_TOOL_NAMES.some((name) => entry.message.includes(name))),
     `expected no warning naming a driver-plane tool, got ${JSON.stringify(logs)}`,
   );
+});
+
+// ── SURF-01 Task 3: the adjust_tool_set fallback branch and the drift gate. ──
+
+test("resolveFallbackToolSetAdjustment forces a defined toolNames return when the driver plane is removed (D-03)", () => {
+  assert.deepEqual(
+    resolveFallbackToolSetAdjustment(["bash", "read", "mcp__gsd-workflow__gsd_execute"], false),
+    { toolNames: ["bash", "read"] },
+  );
+});
+
+test("resolveFallbackToolSetAdjustment returns undefined when nothing driver-plane is present and surfaceReduced is false", () => {
+  assert.equal(resolveFallbackToolSetAdjustment(["bash", "read"], false), undefined);
+});
+
+test("resolveFallbackToolSetAdjustment preserves existing surfaceReduced semantics when no driver-plane tool is present", () => {
+  assert.deepEqual(resolveFallbackToolSetAdjustment(["bash", "read"], true), { toolNames: ["bash", "read"] });
+});
+
+test("resolveFallbackToolSetAdjustment subtracts the driver plane when surfaceReduced is already true", () => {
+  assert.deepEqual(
+    resolveFallbackToolSetAdjustment(["bash", "mcp__gsd-workflow__gsd_query"], true),
+    { toolNames: ["bash"] },
+  );
+});
+
+test("resolveFallbackToolSetAdjustment's internal D-04 guard makes the subtraction a no-op under PI_GSD_FULL_TOOLS=1", () => {
+  process.env.PI_GSD_FULL_TOOLS = "1";
+  try {
+    assert.equal(
+      resolveFallbackToolSetAdjustment(["bash", "mcp__gsd-workflow__gsd_execute"], false),
+      undefined,
+    );
+    assert.deepEqual(
+      resolveFallbackToolSetAdjustment(["bash", "mcp__gsd-workflow__gsd_execute"], true),
+      { toolNames: ["bash", "mcp__gsd-workflow__gsd_execute"] },
+    );
+  } finally {
+    delete process.env.PI_GSD_FULL_TOOLS;
+  }
+});
+
+test("adjust_tool_set's fallback return routes through resolveFallbackToolSetAdjustment (source wiring guard)", () => {
+  // A behavioral test cannot reach the hook body directly — there is no test
+  // seam for the handler and building one would need a full ExtensionAPI
+  // mock — so this source-text assertion is the durable substitute.
+  const source = readRegisterHooksSource();
+  assert.ok(
+    source.includes("return resolveFallbackToolSetAdjustment(providerCompatible, surfaceReduced)"),
+    "adjust_tool_set's fallback return must route through resolveFallbackToolSetAdjustment",
+  );
+});
+
+test("every exported build…ToolSet in register-hooks.ts is covered by the driver-plane exclusion gate (drift guard)", () => {
+  const COVERED_BUILDERS = new Set([
+    "buildMinimalGsdToolSet",
+    "buildMinimalAutoGsdToolSet",
+    "buildRunUatGsdToolSet",
+    "buildMinimalGsdWorkflowToolSet",
+    "buildRequestScopedGsdToolSet",
+  ]);
+  const actualBuilders = new Set(
+    Object.keys(registerHooks).filter((name) => /^build.*ToolSet$/.test(name)),
+  );
+
+  for (const name of COVERED_BUILDERS) {
+    assert.ok(actualBuilders.has(name), `expected register-hooks.ts to still export ${name}`);
+  }
+  for (const name of actualBuilders) {
+    assert.ok(
+      COVERED_BUILDERS.has(name),
+      `register-hooks.ts exports a new build*ToolSet function (${name}) not yet wired through ` +
+        "excludeDriverPlaneTools — add it to this test's COVERED_BUILDERS set and wire the call site",
+    );
+  }
 });
