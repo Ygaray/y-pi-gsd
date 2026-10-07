@@ -56,6 +56,7 @@
     "undici": "7.28.0",
     "yaml": "2.9.0"
   },
+  "//": "WR-01 (35-REVIEW.md): the @gsd/agent-core workspace dependency was removed from this block (Phase 35 / EXEC-02, cutting the pi-coding-agent<->gsd-agent-core cycle). src/core/extensions/loader.ts:90-93's import.meta.resolve(\"@gsd/agent-core\") fallback branch now has no declared dependency edge to resolve against for any install shape where the sibling gsd-agent-core/dist directory isn't present on disk. Flagged, not fixed: loader.ts's runtime behavior is intentionally untouched here.",
   "devDependencies": {
     "@types/cross-spawn": "6.0.6",
     "@types/diff": "7.0.2",

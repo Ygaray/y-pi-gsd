@@ -3,6 +3,7 @@
 
 const { readFileSync, readdirSync, existsSync } = require('fs')
 const { join } = require('path')
+const PI_SEAM = require('./pi-seam.json')
 
 const ROOT = join(__dirname, '..')
 const PI_PACKAGES = ['pi-agent-core', 'pi-ai', 'pi-tui', 'pi-coding-agent']
@@ -82,6 +83,35 @@ for (const pkg of PI_PACKAGES) {
 if (pathViolations.length) {
   process.stderr.write('Pi seam violations (GSD-owned paths still in pi-coding-agent):\n')
   for (const p of pathViolations) process.stderr.write(`  - ${p}\n`)
+  process.exit(1)
+}
+
+// WR-02 (35-REVIEW.md): cheap consistency assertion tying pi-seam.json's
+// protectedPiCoreFiles to this script's own ALLOWLIST, scoped to the 6 facades
+// Phase 35 (EXEC-02) relocated from gsd-agent-core into pi-coding-agent/src/core/.
+// NOTE: a general "protected implies never allowlisted" rule is FALSE for this
+// repo (several unrelated GSD-authored files, e.g. gsd-seam-types.ts, are both
+// protected and legitimately allowlisted for reasons outside this phase) — so
+// this check is intentionally narrow, not repo-wide. For exactly these 6 names,
+// pi-seam.json protection + ALLOWLIST absence together are what prove the
+// relocation is real (no shim exception) and permanent (protected from a future
+// upstream vendoring overwrite). Catches a future PR that re-adds one of them to
+// ALLOWLIST (reintroducing a shim-shaped exception) while pi-seam.json still
+// (correctly) protects it.
+const RELOCATED_FACADES = [
+  'keybindings.ts',
+  'fallback-resolver.ts',
+  'lifecycle-hooks.ts',
+  'blob-store.ts',
+  'artifact-manager.ts',
+  'system-prompt.ts',
+]
+const missingProtection = RELOCATED_FACADES.filter((f) => !PI_SEAM.protectedPiCoreFiles.includes(f))
+const staleAllowlisted = RELOCATED_FACADES.filter((f) => ALLOWLIST.has(join(ROOT, 'packages/pi-coding-agent/src/core', f)))
+if (missingProtection.length || staleAllowlisted.length) {
+  process.stderr.write('Pi seam/boundary drift in Phase 35 relocated facades:\n')
+  for (const f of missingProtection) process.stderr.write(`  - ${f}: no longer listed in pi-seam.json protectedPiCoreFiles\n`)
+  for (const f of staleAllowlisted) process.stderr.write(`  - ${f}: re-added to ALLOWLIST (shim-shaped exception reintroduced)\n`)
   process.exit(1)
 }
 

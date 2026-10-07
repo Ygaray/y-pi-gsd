@@ -11,24 +11,12 @@ const UP = join(ROOT, '.cache/pi-upstream/packages/coding-agent/src')
 const CORE = join(ROOT, 'packages/pi-coding-agent/src/core')
 const UTILS = join(ROOT, 'packages/pi-coding-agent/src/utils')
 
-const PROTECTED = new Set([
-  'keybindings.ts',
-  'fallback-resolver.ts',
-  'lifecycle-hooks.ts',
-  'blob-store.ts',
-  'artifact-manager.ts',
-  'system-prompt.ts',
-  'model-discovery.ts',
-  'models-json-writer.ts',
-  'package-commands.ts',
-  'db-snapshot.ts',
-  'capability-patches.ts',
-  'gsd-seam-types.ts',
-  'gsd-extension-types.ts',
-  'session-cwd.ts',
-  'extensions/types.ts',
-  'extensions/extension-upstream-types.ts',
-])
+// WR-02 (35-REVIEW.md): single source of truth — derived from pi-seam.json's
+// protectedPiCoreFiles instead of a hand-duplicated literal, so this list and
+// scripts/pi-seam.json cannot silently drift apart. scripts/verify-pi-boundary.cjs
+// asserts the same list is also a superset-consistent subset of its ALLOWLIST.
+const PI_SEAM = require('./pi-seam.json')
+const PROTECTED = new Set(PI_SEAM.protectedPiCoreFiles)
 
 function backupProtected() {
   const out = {}
