@@ -916,3 +916,231 @@ test("RENDER-02 Test 4: two distinct tool calls in one turn each end with exactl
 
 	tui.stop();
 });
+
+// ── Phase 37 Plan 03, Task 2: spec-less edge-coverage probe, resolved ──
+//
+// Empty/single-element input and the length/equality definition for both
+// RENDER-01 (text-run reclaim) and RENDER-02 (tool identity), per the
+// frontmatter must_haves "RENDER-01 / empty input", "RENDER-02 / empty
+// input", and "RENDER-02 / encoding". Any production change here is at most
+// a defensive early-return guard, or a strictly MORE conservative removal
+// condition (prohibition P-01 — retain rather than remove) — never a
+// relaxation of an existing removal condition.
+
+test("Edge Test 1: a zero-length contentBlocks shrink, then runSegmentWalker, throws nothing and leaves no duplicate components", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "GROWTEXT alpha" },
+	]);
+
+	await assert.doesNotReject(async () => {
+		await driveDelta(host, rs, tui, terminal, []);
+	});
+
+	// A zero-length regrow has nothing desired, so nothing is appended and
+	// nothing supersedes the displaced orphan — per P-01 (retain rather than
+	// remove), it stays a live, untracked child rather than being dropped.
+	// The must-hold guarantee here is "no duplicate", not "zero children":
+	// exactly the ONE pre-shrink component, never a second instance minted
+	// for the same content.
+	const assistantComponentCount = chatContainer.children.filter((c) => c instanceof AssistantMessageComponent).length;
+	assert.strictEqual(
+		assistantComponentCount,
+		1,
+		"a zero-length contentBlocks shrink must never duplicate a component — the single pre-shrink orphan is retained (P-01), not minted again",
+	);
+
+	tui.stop();
+});
+
+test("Edge Test 2: a shrink to a single-element contentBlocks array, then a regrow, reclaims rather than mints", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "SOLOTEXT alpha" },
+	]);
+	const componentBefore = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "text" && s.cachedText?.includes("SOLOTEXT"))
+		?.component;
+	assert.ok(componentBefore, "sanity: delta 1 must render the SOLOTEXT text-run");
+
+	// Shrink to a single-element array (strictly shorter: 1 < 2).
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "SOLOTEXT alpha" }]);
+
+	// Regrow restoring the original two-block shape.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: "SOLOTEXT alpha beta" },
+	]);
+	const componentAfter = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "text" && s.cachedText?.includes("SOLOTEXT"))
+		?.component;
+
+	assert.strictEqual(
+		componentAfter,
+		componentBefore,
+		"the pre-shrink component object must be reclaimed in place, not re-minted, across a single-element-array shrink",
+	);
+
+	tui.stop();
+});
+
+test("Edge Test 3: drainOrphanedSegments (via runSegmentWalker) with an empty rs.orphanedSegments is a no-op and throws nothing", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+	host.streamingMessage.content = [{ type: "text", text: "EDGESOLO content" }];
+
+	assert.strictEqual(rs.orphanedSegments.length, 0, "sanity: no orphans exist before this pass");
+
+	assert.doesNotThrow(() => {
+		runSegmentWalker(host as any, rs, "date-time-iso");
+	});
+
+	assert.strictEqual(rs.orphanedSegments.length, 0, "the existing length guard must still short-circuit to a no-op");
+
+	tui.stop();
+});
+
+test("Edge Test 4: reclaimOrphanedTextRun (via the append loop) with an empty rs.orphanedSegments mints exactly as at HEAD", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	assert.strictEqual(rs.orphanedSegments.length, 0, "sanity: no orphans exist before the first delta");
+
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "EDGEFRESH no orphan to reclaim" }]);
+
+	assert.strictEqual(
+		countRowsContaining(terminal.getScrollBuffer(), "EDGEFRESH"),
+		1,
+		"a fresh segment with no orphan candidates must still mint and render normally",
+	);
+	assert.strictEqual(rs.orphanedSegments.length, 0, "no orphan is fabricated by a no-match reclaim attempt");
+
+	tui.stop();
+});
+
+test("Edge Test 5 (RENDER-02 empty input): empty arguments object + empty result content array, driven through shrink+regrow with the same content.id, yields exactly one component and raises no exception", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await assert.doesNotReject(async () => {
+		await driveDelta(host, rs, tui, terminal, [
+			{ type: "text", text: "LEAD prose" },
+			{ type: "toolCall", id: "tool-empty-1", name: "bash", arguments: {} },
+		]);
+		const component = host.pendingTools.get("tool-empty-1");
+		assert.ok(component, "sanity: the empty-arguments tool call must still register a pending component");
+		component!.updateResult({ content: [], isError: false });
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		// Shrink, then regrow with the identical id.
+		await driveDelta(host, rs, tui, terminal, [{ type: "toolCall", id: "tool-empty-1", name: "bash", arguments: {} }]);
+		await driveDelta(host, rs, tui, terminal, [
+			{ type: "text", text: "LEAD prose" },
+			{ type: "toolCall", id: "tool-empty-1", name: "bash", arguments: {} },
+		]);
+		host.pendingTools.get("tool-empty-1")!.updateResult({ content: [], isError: false });
+		tui.requestRender();
+		await terminal.waitForRender();
+	});
+
+	const toolInstanceCount = chatContainer.children.filter((c) => c instanceof ToolExecutionComponent).length;
+	assert.strictEqual(
+		toolInstanceCount,
+		1,
+		`exactly one ToolExecutionComponent must exist for the empty-arguments/empty-result tool, observed ${toolInstanceCount}`,
+	);
+
+	tui.stop();
+});
+
+test("Edge Test 6 (RENDER-01 encoding): an astral-plane character + combining mark is reclaimed and re-rendered with its adjacent ASCII sentinel present exactly once", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Built from explicit escape sequences (astral-plane code point + a
+	// combining acute accent), not pasted glyphs, so the file stays
+	// ASCII-safe in a diff. The assertion below targets the adjacent ASCII
+	// sentinels, never this multi-code-unit region itself — row-level
+	// scroll-buffer matching over wide/combining characters is
+	// terminal-width-dependent and would make the case flaky.
+	const multiCodeUnitRegion = "\u{1F600}́";
+	const encodingText = `ENCSENTBEFORE ${multiCodeUnitRegion} ENCSENTAFTER`;
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: encodingText },
+	]);
+	const componentBefore = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "text")?.component;
+	assert.ok(componentBefore, "sanity: delta 1 must render the encoding text-run");
+
+	// Shrink (strictly shorter) then regrow (strictly longer), reusing the
+	// same multi-code-unit content — reclaim must turn on contentType
+	// equality only, never on byte-length or a normalized comparison.
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: encodingText }]);
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "LEADTEXT one" },
+		{ type: "text", text: encodingText },
+	]);
+	const componentAfter = rs.renderedSegments.find((s) => s.kind === "text-run" && s.contentType === "text")?.component;
+
+	assert.strictEqual(
+		componentAfter,
+		componentBefore,
+		"the multi-code-unit content must not perturb reclaim — same component instance across the shrink+regrow cycle",
+	);
+
+	const scrollback = terminal.getScrollBuffer();
+	assert.strictEqual(
+		countRowsContaining(scrollback, "ENCSENTBEFORE"),
+		1,
+		"the ASCII sentinel immediately before the multi-code-unit region must appear exactly once",
+	);
+	assert.strictEqual(
+		countRowsContaining(scrollback, "ENCSENTAFTER"),
+		1,
+		"the ASCII sentinel immediately after the multi-code-unit region must appear exactly once",
+	);
+
+	tui.stop();
+});
+
+test("Edge Test 7 (RENDER-02 encoding): two tool-call ids differing only by letter case are distinct identities, each with its own component", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "toolCall", id: "tool-case-a", name: "bash", arguments: { command: "echo lower" } },
+		{ type: "toolCall", id: "tool-case-A", name: "bash", arguments: { command: "echo upper" } },
+	]);
+
+	const componentLower = host.pendingTools.get("tool-case-a");
+	const componentUpper = host.pendingTools.get("tool-case-A");
+	assert.ok(componentLower, "sanity: the lowercase-id tool call must register a pending component");
+	assert.ok(componentUpper, "sanity: the uppercase-id tool call must register a pending component");
+	assert.notStrictEqual(
+		componentLower,
+		componentUpper,
+		"a Map-key exact-equality lookup must never fold case — ids differing only by case are distinct identities",
+	);
+
+	const toolInstanceCount = chatContainer.children.filter((c) => c instanceof ToolExecutionComponent).length;
+	assert.strictEqual(
+		toolInstanceCount,
+		2,
+		`exactly two ToolExecutionComponent instances must exist for the two case-distinct ids, observed ${toolInstanceCount}`,
+	);
+
+	tui.stop();
+});
