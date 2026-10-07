@@ -134,6 +134,28 @@ export interface SDKOtherMessage {
 	[key: string]: unknown;
 }
 
+/** `rate_limit_info` payload carried by `SDKRateLimitEvent`. Field names/optionality are
+ * verbatim from the installed `sdk.d.ts` (38-RESEARCH.md `## Code Examples`). */
+export interface SDKRateLimitInfo {
+	status: "allowed" | "allowed_warning" | "rejected";
+	resetsAt?: number;
+	rateLimitType?: "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet" | "overage";
+	utilization?: number;
+	overageStatus?: "allowed" | "allowed_warning" | "rejected";
+	overageResetsAt?: number;
+	overageDisabledReason?: string;
+	isUsingOverage?: boolean;
+	surpassedThreshold?: number;
+}
+
+/** SDK message emitted when the provider reports live usage against the operator's quota windows. */
+export interface SDKRateLimitEvent {
+	type: "rate_limit_event";
+	rate_limit_info: SDKRateLimitInfo;
+	uuid: UUID;
+	session_id: string;
+}
+
 /**
  * Union of all SDK message types this extension handles.
  * Mirrors the real `SDKMessage` from `@anthropic-ai/claude-agent-sdk`.
@@ -146,4 +168,5 @@ export type SDKMessage =
 	| SDKStatusMessage
 	| SDKPartialAssistantMessage
 	| SDKToolProgressMessage
+	| SDKRateLimitEvent
 	| SDKOtherMessage;

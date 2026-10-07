@@ -95,6 +95,7 @@ import type {
 	SDKResultMessage,
 	SDKUserMessage,
 } from "./sdk-types.js";
+import { mapSdkRateLimitInfo } from "./rate-limit-event.js";
 
 export {
 	buildFinalAssistantContent,
@@ -120,6 +121,10 @@ interface ClaudeCodeStreamOptions extends SimpleStreamOptions {
 	extensionUIContext?: ExtensionUIContext;
 	onExternalToolCall?: (toolCall: ToolCall) => Promise<void> | void;
 	onExternalToolResult?: (event: { toolCall: ToolCall; result: ExternalToolResultPayload }) => Promise<void> | void;
+	onRateLimitEvent?: (
+		window: { usedPercent: number; resetsAtEpochSec: number | null },
+		windowKey: "session" | "weekly",
+	) => void;
 	_findConcurrentClaudeCodeProcessesForTest?: (cwd: string) => ConcurrentClaudeCodeProcess[];
 	_sdkQueryForTest?: (args: {
 		prompt: string | AsyncIterable<unknown>;
@@ -2553,6 +2558,7 @@ async function pumpSdkMessages(
 		const uiContext = claudeOptions?.extensionUIContext ?? capturedClaudeCodeUIContext;
 		const onExternalToolCall = claudeOptions?.onExternalToolCall;
 		const onExternalToolResult = claudeOptions?.onExternalToolResult;
+		const onRateLimitEvent = claudeOptions?.onRateLimitEvent;
 		const sdkQueryForTest = claudeOptions?._sdkQueryForTest;
 		const query = sdkQueryForTest ?? (
 			// Dynamic import — the SDK is an optional dependency.
@@ -2975,6 +2981,19 @@ async function pumpSdkMessages(
 								stream.push({ type: "done", reason: "stop", message: finalMessage });
 							}
 							return;
+						}
+
+						// -- Usage telemetry (side-channel, never touches turn assembly) --
+						case "rate_limit_event": {
+							// `SDKOtherMessage`'s index signature keeps `msg.type` widened to
+							// `string` here, so this arm does not narrow `msg` — read the payload
+							// through the same cast idiom the `case "system"` arm above uses.
+							const event = msg as unknown as { rate_limit_info?: unknown };
+							const mapped = mapSdkRateLimitInfo(event.rate_limit_info);
+							if (mapped) {
+								onRateLimitEvent?.(mapped.window, mapped.windowKey);
+							}
+							break;
 						}
 
 						default:

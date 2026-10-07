@@ -1,10 +1,10 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@gsd/pi-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@gsd/pi-ai";
+import { clampThinkingLevel, type Message, type Model, type SimpleStreamOptions, streamSimple } from "@gsd/pi-ai";
 import { getAgentDir } from "@gsd/pi-coding-agent/config.js";
 import { resolvePath } from "@gsd/pi-coding-agent/utils/paths.js";
 import { AgentSession } from "./agent-session.js";
-import { parseAnthropicRateLimitHeaders, type RateLimitStatus } from "./rate-limit-headers.js";
+import { parseAnthropicRateLimitHeaders, type RateLimitStatus, type RateLimitWindow } from "./rate-limit-headers.js";
 import { formatNoModelsAvailableMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import { AuthStorage } from "@gsd/pi-coding-agent/core/auth-storage.js";
 import { DEFAULT_THINKING_LEVEL } from "@gsd/pi-coding-agent/core/defaults.js";
@@ -371,14 +371,39 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					? { ...attributionHeaders, ...auth.headers, ...options?.headers }
 					: undefined;
 			const requestModel = auth.headers ? { ...model, headers: { ...model.headers, ...auth.headers } } : model;
-			return streamSimple(requestModel, context, {
+			// D-04 (38-CONTEXT.md): thread the rate_limit_event sink through a named options
+			// const rather than an inline object literal passed directly to streamSimple --
+			// TypeScript's excess-property check fires on a fresh object literal argument even
+			// when it contains a spread (38-RESEARCH.md Pitfall A). Provider-gated: a non-
+			// claude-code model never receives this callback, so the direct-API header path in
+			// onResponse below is completely untouched (Pitfall 13).
+			const streamOptions: SimpleStreamOptions & {
+				onRateLimitEvent?: (window: RateLimitWindow, windowKey: "session" | "weekly") => void;
+			} = {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 				headers,
-			});
+				onRateLimitEvent:
+					model.provider === "claude-code"
+						? (window, windowKey) => {
+								// Mirrors onResponse's WR-01 per-window merge below exactly: the
+								// previous reading is only eligible to fill the sibling window's
+								// gap when it came from the *same* provider (CR-03) -- a provider
+								// switch must never let a stale window leak through the merge.
+								const previous =
+									rateLimitStatusRef.provider === model.provider ? rateLimitStatusRef.current : undefined;
+								rateLimitStatusRef.current = {
+									session: windowKey === "session" ? window : (previous?.session ?? null),
+									weekly: windowKey === "weekly" ? window : (previous?.weekly ?? null),
+								};
+								rateLimitStatusRef.provider = model.provider;
+							}
+						: undefined,
+			};
+			return streamSimple(requestModel, context, streamOptions);
 		},
 		onPayload: async (payload, model) => {
 			const runner = extensionRunnerRef.current;
