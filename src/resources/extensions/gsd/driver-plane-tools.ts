@@ -92,5 +92,9 @@ export function resolveFallbackToolSetAdjustment(
   if (filtered.length !== providerCompatible.length) {
     return { toolNames: filtered };
   }
+  // Spread (not a direct return) is required here, not just defensive: the
+  // `readonly string[]` parameter type cannot be assigned into the mutable
+  // `string[]` return shape without copying (TS4104) — this also happens to
+  // guard callers against accidentally mutating the shared input array.
   return surfaceReduced ? { toolNames: [...providerCompatible] } : undefined;
 }
