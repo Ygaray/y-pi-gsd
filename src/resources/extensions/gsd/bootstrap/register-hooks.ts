@@ -348,7 +348,7 @@ export function buildMinimalAutoGsdToolSet(
     [...activeToolNames, ...registeredToolNames],
     [...MINIMAL_GSD_TOOL_NAMES, ...unitTools],
   );
-  const result = withPreservedShimTools([...new Set([...preserved, ...scoped])]);
+  const result = excludeDriverPlaneTools(withPreservedShimTools([...new Set([...preserved, ...scoped])]));
   warnIfRequiredWorkflowToolsUnresolved(unitType, result, warnOnUnresolvedRequiredTools);
   return result;
 }
@@ -405,7 +405,7 @@ export function buildRunUatGsdToolSet(
     );
   }
 
-  return resolved;
+  return excludeDriverPlaneTools(resolved);
 }
 
 export function buildMinimalGsdWorkflowToolSet(
@@ -422,7 +422,7 @@ export function buildMinimalGsdWorkflowToolSet(
     [...activeToolNames, ...registeredToolNames],
     WORKFLOW_GSD_TOOL_NAMES,
   );
-  return withPreservedShimTools([...new Set([...preserved, ...scoped])]);
+  return excludeDriverPlaneTools(withPreservedShimTools([...new Set([...preserved, ...scoped])]));
 }
 
 export function buildRequestScopedGsdToolSet(
