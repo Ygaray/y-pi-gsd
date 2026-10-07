@@ -310,46 +310,10 @@ export class SessionManager {
       // child that is still alive from a PRIOR MCP server instance (the
       // in-memory Map is wiped on restart, so startSession()'s "already
       // active" guard above can't see it). Reap it before starting a new
-      // driver so at most one driver ever runs per worktree.
-      let reapOutcome: OrphanReapOutcome = 'no-entry';
-      this.startingLocks.add(resolvedDir);
-      try {
-        reapOutcome = await this.reapPersistedOrphanSession(resolvedDir);
-      } catch (err) {
-        // WR-04 (39-REVIEW.md): if reapPersistedOrphanSession itself throws
-        // (a corrupt registry file, or an invokeOrphanReconcile override
-        // rejecting contrary to its documented "must never reject"
-        // contract), normalize to the same "Failed to start session for
-        // ${resolvedDir}: ..." shape every other startSession() failure
-        // mode uses, rather than letting it escape unwrapped. The `finally`
-        // below still runs before this rethrow propagates, so the
-        // reservation is released either way.
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`Failed to start session for ${resolvedDir}: ${message}`);
-      } finally {
-        this.startingLocks.delete(resolvedDir);
-      }
-      // EXEC-01 (Phase 39, 39-REVIEW.md CR-01's alternative (b)): the
-      // reservation is released above BEFORE this decline check, with no
-      // await between the release and the throw — a decline is not a reap
-      // failure, so the lock must not be held across it (a concurrent
-      // startSession() for this resolvedDir must observe the real decline
-      // reason below, not a misleading "reap in progress").
-      if (reapOutcome === 'settled-alive' || reapOutcome === 'kill-failed') {
-        // CR-01 (39-REVIEW.md): a 'kill-failed' outcome means the signal
-        // attempt itself failed (the orphan may still be alive) and its
-        // registry row was deliberately preserved (see
-        // reapPersistedOrphanSession below) — decline exactly like
-        // 'settled-alive' rather than silently spawning a second driver
-        // beside a possibly-still-alive orphan.
-        const detail = reapOutcome === 'settled-alive'
-          ? `its dangling Task Attempt was settled and the live process was deliberately left running rather than signalled; re-issuing this call will reclaim the now-settled pid`
-          : `the kill signal failed (see server logs for the underlying error) and the process may still be alive; its registry row was preserved so re-issuing this call will retry the kill`;
-        throw new SessionDeclinedError(
-          reapOutcome,
-          `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; ${detail})`
-        );
-      }
+      // driver so at most one driver ever runs per worktree, declining this
+      // start if the reap says so (IN-01, 39-REVIEW.md: extracted to keep
+      // startSession()'s top-level control flow scannable).
+      await this.reapOrDeclineOrphan(resolvedDir);
     }
 
     const cliPath = options.cliPath ?? SessionManager.resolveCLIPath();
@@ -443,6 +407,65 @@ export class SessionManager {
 
       // Keep session in map so callers can inspect the error
       throw new Error(`Failed to start session for ${resolvedDir}: ${session.error}`);
+    }
+  }
+
+  /**
+   * Reap any persisted orphan for `resolvedDir` before `startSession()`
+   * proceeds, declining the fresh start outright when the orphan's pid was
+   * deliberately spared (`'settled-alive'`) or the reap's kill signal itself
+   * failed (`'kill-failed'`) — in both cases a possibly-still-alive orphan
+   * must not have a second driver spawned beside it. Extracted out of
+   * `startSession()` (IN-01, 39-REVIEW.md) to keep that function's
+   * top-level control flow scannable; owns the `startingLocks`
+   * reservation/release for its own awaited `reapPersistedOrphanSession()`
+   * call, including the WR-04 error-shape normalization on an unexpected
+   * throw.
+   *
+   * No-op (returns without throwing) for every other `OrphanReapOutcome`
+   * (`'no-entry'`, `'stale-entry-dropped'`, `'reaped'`) — `startSession()`
+   * proceeds to spawn a new driver in all of those cases.
+   */
+  private async reapOrDeclineOrphan(resolvedDir: string): Promise<void> {
+    let reapOutcome: OrphanReapOutcome = 'no-entry';
+    this.startingLocks.add(resolvedDir);
+    try {
+      reapOutcome = await this.reapPersistedOrphanSession(resolvedDir);
+    } catch (err) {
+      // WR-04 (39-REVIEW.md): if reapPersistedOrphanSession itself throws
+      // (a corrupt registry file, or an invokeOrphanReconcile override
+      // rejecting contrary to its documented "must never reject" contract),
+      // normalize to the same "Failed to start session for ${resolvedDir}:
+      // ..." shape every other startSession() failure mode uses, rather
+      // than letting it escape unwrapped. The `finally` below still runs
+      // before this rethrow propagates, so the reservation is released
+      // either way.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to start session for ${resolvedDir}: ${message}`);
+    } finally {
+      this.startingLocks.delete(resolvedDir);
+    }
+
+    // EXEC-01 (Phase 39, 39-REVIEW.md CR-01's alternative (b)): the
+    // reservation is released above BEFORE this decline check, with no
+    // await between the release and the throw — a decline is not a reap
+    // failure, so the lock must not be held across it (a concurrent
+    // startSession() for this resolvedDir must observe the real decline
+    // reason below, not a misleading "reap in progress").
+    if (reapOutcome === 'settled-alive' || reapOutcome === 'kill-failed') {
+      // CR-01 (39-REVIEW.md): a 'kill-failed' outcome means the signal
+      // attempt itself failed (the orphan may still be alive) and its
+      // registry row was deliberately preserved (see
+      // reapPersistedOrphanSession below) — decline exactly like
+      // 'settled-alive' rather than silently spawning a second driver
+      // beside a possibly-still-alive orphan.
+      const detail = reapOutcome === 'settled-alive'
+        ? `its dangling Task Attempt was settled and the live process was deliberately left running rather than signalled; re-issuing this call will reclaim the now-settled pid`
+        : `the kill signal failed (see server logs for the underlying error) and the process may still be alive; its registry row was preserved so re-issuing this call will retry the kill`;
+      throw new SessionDeclinedError(
+        reapOutcome,
+        `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; ${detail})`
+      );
     }
   }
 
