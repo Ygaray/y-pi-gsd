@@ -26,6 +26,7 @@ import { applySubTurnContentShrink, runSegmentWalker, scanNewContentBlocks } fro
 import { createStreamingRenderState } from "../streaming-render-state.js";
 import { AssistantMessageComponent } from "../components/assistant-message.js";
 import { ToolExecutionComponent } from "../components/tool-execution.js";
+import { isProvisionalPreToolProse } from "./chat-handoff-filter.js";
 
 initTheme();
 
@@ -276,6 +277,58 @@ test("RENDER-02 SC-5: mixed-stream thinking+text+tool-call+tool-result survives 
 		assistantComponentCount,
 		textRunSegmentCount,
 		`AssistantMessageComponent count in chatContainer (${assistantComponentCount}) must match tracked text-run segment count (${textRunSegmentCount}) — a mismatch is the orphan leak`,
+	);
+
+	tui.stop();
+});
+
+// ── Task 3: D-02 Pitfall-10 non-regression ────────────────────────────
+//
+// This case must be green BOTH at this plan's HEAD and after plan 37-02's
+// drain change — a green-to-red transition here means the drain gate lost
+// its generational clause (D-02's identity/generation check must gate
+// removal ALONGSIDE the isProvisionalPreToolProse content-pattern match,
+// never the content-pattern match alone).
+test("D-02 Pitfall-10 non-regression: a provisional-sounding final answer is never pruned when no tool call fires", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Genuinely satisfies isProvisionalPreToolProse: starts with "Let me
+	// check" (a FIRST_PERSON_PROVISIONAL_PRE_TOOL_RE match), does not end in
+	// a question mark, and does not invite a user reply.
+	const finalAnswer = "Let me check the KEEPMARK settings one more time before finishing.";
+	assert.ok(
+		isProvisionalPreToolProse(finalAnswer),
+		"sanity: the fixture text must genuinely match isProvisionalPreToolProse's pattern so this case cannot silently drift out of the pattern it represents",
+	);
+
+	// Drive a turn with NO tool-call block at any point, so
+	// getProvisionalPreToolPrunePlan returns shouldPrune: false for the whole
+	// lifecycle and firstToolIdx stays -1. Drive a shrink+regrow cycle on a
+	// DECOY segment (longer, then strictly shorter, then longer again) so
+	// rs.orphanedSegments is genuinely populated and the (at-HEAD-inert,
+	// gated-off) drain pass has a real code path to run against — then
+	// introduce finalAnswer as a brand-new trailing text run grown onto the
+	// regrown decoy component, so finalAnswer itself is never the segment
+	// that gets orphaned (it has exactly one rendered occurrence by
+	// construction, isolating this case from RENDER-01's own orphan-duplicate
+	// defect, which SC-4 already pins independently).
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "DECOY lead-in content" },
+		{ type: "thinking", thinking: "DECOYTHINK a thinking block to separate runs" },
+	]);
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: "DECOY lead-in content" }]);
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "DECOY lead-in content" },
+		{ type: "text", text: finalAnswer },
+	]);
+
+	const keepCount = countRowsContaining(terminal.getScrollBuffer(), "KEEPMARK");
+	assert.strictEqual(
+		keepCount,
+		1,
+		`KEEPMARK must appear exactly once — neither dropped (Pitfall-10) nor duplicated (RENDER-01), observed ${keepCount}`,
 	);
 
 	tui.stop();
