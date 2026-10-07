@@ -28,7 +28,7 @@ import type { PromptTemplate } from "@gsd/pi-coding-agent/core/prompt-templates.
 import type { ResourceLoader } from "@gsd/pi-coding-agent/core/resource-loader.js";
 import type { BranchSummaryEntry, SessionManager } from "@gsd/pi-coding-agent/core/session-manager.js";
 import type { SettingsManager } from "@gsd/pi-coding-agent/core/settings-manager.js";
-import type { BuildSystemPromptOptions } from "../system-prompt.js";
+import type { BuildSystemPromptOptions } from "@gsd/pi-coding-agent/core/system-prompt.js";
 import type { BashOperations } from "@gsd/pi-coding-agent/core/tools/bash.js";
 import type {
 	AgentSessionEvent,

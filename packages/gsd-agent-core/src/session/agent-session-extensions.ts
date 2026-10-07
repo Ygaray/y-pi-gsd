@@ -12,7 +12,7 @@ import { emitSessionShutdownEvent } from "@gsd/pi-coding-agent/core/extensions/r
 import type { ResourceExtensionPaths, ResourceLoader } from "@gsd/pi-coding-agent/core/resource-loader.js";
 import type { SlashCommandInfo } from "@gsd/pi-coding-agent/core/slash-commands.js";
 import { createSyntheticSourceInfo } from "@gsd/pi-coding-agent/core/source-info.js";
-import { buildSystemPrompt } from "../system-prompt.js";
+import { buildSystemPrompt } from "@gsd/pi-coding-agent/core/system-prompt.js";
 import { createAllToolDefinitions } from "@gsd/pi-coding-agent/core/tools/index.js";
 import { createToolDefinitionFromAgentTool } from "@gsd/pi-coding-agent/core/tools/tool-definition-wrapper.js";
 import { basename, dirname } from "node:path";

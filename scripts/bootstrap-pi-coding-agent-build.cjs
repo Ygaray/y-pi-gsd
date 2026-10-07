@@ -98,6 +98,7 @@ function prepareBackup({
 
 	for (const file of shims) {
 		const shimPath = join(piCore, file);
+		if (!existsSync(shimPath)) continue;
 		writeBackupAtomically(backupDir, file, readFileSync(shimPath, "utf8"));
 	}
 }
@@ -127,10 +128,13 @@ if (require.main === module) {
 		});
 	} finally {
 		for (const file of SHIMS) {
-			writeFileSync(
-				join(PI_CORE, file),
-				readFileSync(join(BACKUP, file), "utf8"),
-			);
+			const backupPath = join(BACKUP, file);
+			const shimPath = join(PI_CORE, file);
+			if (!existsSync(backupPath)) {
+				rmSync(shimPath, { force: true });
+				continue;
+			}
+			writeFileSync(shimPath, readFileSync(backupPath, "utf8"));
 		}
 		rmSync(BACKUP, { recursive: true, force: true });
 	}
