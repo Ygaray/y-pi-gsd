@@ -858,6 +858,65 @@ test("CR-01: non-MCP tool call — a growth delta that shifts a reclaimed text-r
 	tui.stop();
 });
 
+// ── Review Fix: WR-01 (37-REVIEW.md) ──────────────────────────────────
+//
+// WR-01: a reused tool id whose contentIndex shifts across a GROWTH
+// (non-shrink) delta left TWO "tool" bookkeeping entries in
+// rs.renderedSegments — one under the stale pre-shift contentIndex, one
+// under the new one — both referencing the SAME ToolExecutionComponent
+// instance. No visible duplication results (chatContainer still holds
+// only one physical component), so this is purely live-tracking-state
+// drift, not a DOM-visible defect — the assertion below targets
+// rs.renderedSegments directly rather than chatContainer/scrollback.
+test("WR-01: a reused tool id whose contentIndex shifts leaves exactly one bookkeeping entry per component, never a stale duplicate", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Delta 1: text@0, toolCall@1.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "WR01LEAD one" },
+		{ type: "toolCall", id: "tool-wr01-1", name: "bash", arguments: { command: "echo hi" } },
+	]);
+	const component = host.pendingTools.get("tool-wr01-1");
+	assert.ok(component, "sanity: the tool call must have registered a pending component");
+
+	// Delta 2 (shrink, 1 < 2): tool-call alone, now at contentIndex 0 — the
+	// primary shrink branch clears rs.renderedSegments entirely, so the
+	// append loop re-registers the SAME component under its new index.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "toolCall", id: "tool-wr01-1", name: "bash", arguments: { command: "echo hi" } },
+	]);
+
+	// Delta 3 (growth, 2 > 1, NOT a shrink): a new leading text block shifts
+	// the SAME tool-call id back to contentIndex 1 — rs.renderedSegments
+	// still carries the delta-2 entry at contentIndex 0 (growth never
+	// clears tool-kind entries), so the contentIndex-keyed `existing`
+	// lookup in the append loop misses and would (pre-fix) push a SECOND
+	// entry for the identical component.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "WR01LEAD two" },
+		{ type: "toolCall", id: "tool-wr01-1", name: "bash", arguments: { command: "echo hi" } },
+	]);
+
+	const toolBookkeepingEntries = rs.renderedSegments.filter((s) => s.kind === "tool" && s.component === component);
+	assert.strictEqual(
+		toolBookkeepingEntries.length,
+		1,
+		`WR-01: expected exactly 1 rs.renderedSegments bookkeeping entry for the reused tool component, observed ${toolBookkeepingEntries.length}`,
+	);
+	assert.strictEqual(
+		toolBookkeepingEntries[0]?.contentIndex,
+		1,
+		"WR-01: the single surviving entry must reflect the CURRENT contentIndex, not the stale pre-shift one",
+	);
+
+	const toolInstanceCount = chatContainer.children.filter((c) => c instanceof ToolExecutionComponent).length;
+	assert.strictEqual(toolInstanceCount, 1, "sanity: exactly one physical ToolExecutionComponent must exist");
+
+	tui.stop();
+});
+
 // ── Phase 37 Plan 03, Task 1: D-03 verdict `no-separate-defect` (branch C) ──
 //
 // 37-01-SUMMARY.md's `## D-03 Diagnosis` section records VERDICT:

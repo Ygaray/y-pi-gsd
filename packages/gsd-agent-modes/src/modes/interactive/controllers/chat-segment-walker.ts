@@ -322,6 +322,23 @@ export function runSegmentWalker(
 			if (!existing) {
 				const comp = host.pendingTools.get(seg.toolId);
 				if (comp) {
+					// WR-01 fix (37-REVIEW.md): a reused tool id can leave a stale
+					// bookkeeping entry under its PRE-shrink contentIndex in both
+					// rs.renderedSegments (the contentIndex-keyed `existing` lookup
+					// above misses it after a shrink+regrow shifts the index) and
+					// rs.orphanedSegments (tool-kind orphans are never drained —
+					// see drainOrphanedSegments' own doc comment: "kind: tool
+					// cleanup is plan 37-03's scope"). Strip both by COMPONENT
+					// IDENTITY (not contentIndex) before pushing the fresh entry,
+					// so at most one bookkeeping entry per live tool component
+					// ever exists — this never calls removeChild, so an in-flight
+					// or completed tool's actual chatContainer child is untouched.
+					rs.renderedSegments = rs.renderedSegments.filter(
+						(s) => !(s.kind === "tool" && s.component === comp),
+					);
+					rs.orphanedSegments = rs.orphanedSegments.filter(
+						(o) => !(o.kind === "tool" && o.component === comp),
+					);
 					rs.renderedSegments.push({ kind: "tool", contentIndex: seg.contentIndex, component: comp });
 				}
 			}
