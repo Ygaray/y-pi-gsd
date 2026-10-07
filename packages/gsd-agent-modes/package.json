@@ -32,5 +32,8 @@
     "@gsd/pi-tui": "workspace:*",
     "@opengsd/contracts": "workspace:*",
     "chalk": "^5.5.0"
+  },
+  "devDependencies": {
+    "@xterm/headless": "5.5.0"
   }
 }

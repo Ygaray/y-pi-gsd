@@ -273,6 +273,10 @@ importers:
       chalk:
         specifier: ^5.5.0
         version: 5.6.2
+    devDependencies:
+      '@xterm/headless':
+        specifier: 5.5.0
+        version: 5.5.0
 
   packages/mcp-server:
     dependencies:
