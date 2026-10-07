@@ -28,15 +28,18 @@ export interface ClaudeCodeRateLimitMapping {
 /**
  * Resolves the footer row a `rateLimitType` belongs to.
  *
- * Task 1 maps only `five_hour` to `session`. Every other value — including the `seven_day`
- * family, `overage`, an unrecognised string, and `undefined` — returns `null` here; Task 2 adds
- * the `weekly` branch for the `seven_day*` family. Returning `null` is the honest outcome, not a
- * degradation: the consumer renders the existing `unavailable` literal, which is strictly better
- * than a number attributed to the wrong window.
+ * `five_hour` maps to `session`. Any `rateLimitType` whose value is exactly `seven_day` or
+ * starts with that prefix — covering the `seven_day_opus` and `seven_day_sonnet` variants named
+ * in the installed `.d.ts` — maps to `weekly`. Per 38-CONTEXT's deferred-ideas entry, all
+ * `seven_day*` variants collapse into the single `weekly` bucket; no per-variant window is added.
+ * `overage`, an unrecognised string, and `undefined` map to nothing (`null`) — the honest outcome
+ * is leaving the consumer at the existing `unavailable` literal rather than attributing a number
+ * to the wrong window.
  */
 function resolveWindowKey(rateLimitType: unknown): ClaudeCodeRateLimitWindowKey | null {
 	if (typeof rateLimitType !== "string") return null;
 	if (rateLimitType === "five_hour") return "session";
+	if (rateLimitType === "seven_day" || rateLimitType.startsWith("seven_day")) return "weekly";
 	return null;
 }
 
