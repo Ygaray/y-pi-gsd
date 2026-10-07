@@ -3008,7 +3008,11 @@ async function pumpSdkMessages(
 								);
 							}
 							if (mapped) {
-								onRateLimitEvent?.(mapped.window, mapped.windowKey);
+								try {
+									onRateLimitEvent?.(mapped.window, mapped.windowKey);
+								} catch (error) {
+									console.warn("[claude-code] onRateLimitEvent callback failed:", error);
+								}
 							}
 							break;
 						}
