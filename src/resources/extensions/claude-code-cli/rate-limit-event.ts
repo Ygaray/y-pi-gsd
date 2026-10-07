@@ -107,6 +107,27 @@ export function mapSdkRateLimitInfo(info: unknown): ClaudeCodeRateLimitMapping |
 }
 
 /**
+ * Strips terminal control characters from a value before it is interpolated into a
+ * `GSD_DEBUG_RATELIMIT_EVENT` line destined for `console.error` (WR-03, 38-REVIEW.md).
+ *
+ * `status`/`rateLimitType`/etc. are typed off `SDKRateLimitInfo`, but that typing is just a cast —
+ * at runtime these fields can be any JSON value the SDK process sends, including a string carrying
+ * ANSI/terminal escape sequences. Mirrors `sanitizeFooterText`'s (`gsd-statusline-format.ts`)
+ * CR/LF/TAB-and-ESC stripping discipline for "untrusted-ish value -> terminal" — kept as a local
+ * copy rather than a cross-package import since this extension has no dependency on the
+ * `gsd-agent-modes` UI package.
+ */
+function sanitizeDebugField(value: unknown): string {
+	if (value === undefined) return "undefined";
+	const text = typeof value === "string" ? value : String(value);
+	return text
+		.replace(/[\r\n\t]/g, " ")
+		.replace(/\x1b/g, "")
+		.replace(/ +/g, " ")
+		.trim();
+}
+
+/**
  * Formats one `GSD_DEBUG_RATELIMIT_EVENT` observation line (D-03/D-05, 38-CONTEXT.md).
  *
  * Reads only six named `rate_limit_info` fields off the payload individually -- `status`,
@@ -137,9 +158,10 @@ export function formatRateLimitEventDebugLine(
 			? `windowKey=${mapped.windowKey} usedPercent=${mapped.window.usedPercent}`
 			: "mapping=none";
 		return (
-			`[GSD_DEBUG_RATELIMIT_EVENT] seq=${seq} elapsedMs=${elapsedMs} status=${status} ` +
-			`rateLimitType=${rateLimitType} utilization=${utilization} resetsAt=${resetsAt} ` +
-			`isUsingOverage=${isUsingOverage} surpassedThreshold=${surpassedThreshold} ${mappingText}`
+			`[GSD_DEBUG_RATELIMIT_EVENT] seq=${seq} elapsedMs=${elapsedMs} status=${sanitizeDebugField(status)} ` +
+			`rateLimitType=${sanitizeDebugField(rateLimitType)} utilization=${sanitizeDebugField(utilization)} ` +
+			`resetsAt=${sanitizeDebugField(resetsAt)} isUsingOverage=${sanitizeDebugField(isUsingOverage)} ` +
+			`surpassedThreshold=${sanitizeDebugField(surpassedThreshold)} ${mappingText}`
 		);
 	} catch {
 		return "[GSD_DEBUG_RATELIMIT_EVENT] <unformattable payload>";
