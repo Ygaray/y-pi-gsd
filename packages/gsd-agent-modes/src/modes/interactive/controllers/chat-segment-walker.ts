@@ -351,7 +351,19 @@ export function runSegmentWalker(
 					rs.orphanedSegments = rs.orphanedSegments.filter(
 						(o) => !(o.kind === "tool" && o.component === comp),
 					);
-					rs.renderedSegments.push({ kind: "tool", contentIndex: seg.contentIndex, component: comp });
+					// IN-01 fix (37-REVIEW.md): populate createdAtGeneration on the
+					// "tool" variant too, now that the type carries the field.
+					// orphanedAtGeneration stays unset here — no code path in this
+					// file ever orphans a "tool" segment (kind: "tool" cleanup is
+					// explicitly out of scope, see drainOrphanedSegments' own doc
+					// comment above), so stamping it now would be a write with no
+					// corresponding read.
+					rs.renderedSegments.push({
+						kind: "tool",
+						contentIndex: seg.contentIndex,
+						component: comp,
+						createdAtGeneration: rs.shrinkGeneration,
+					});
 				}
 			}
 		} else {
@@ -597,7 +609,14 @@ export function rebuildSegmentsOnMessageEnd(
 			if (component) {
 				host.chatContainer.removeChild(component);
 				host.chatContainer.addChild(component);
-				rs.renderedSegments.push({ kind: "tool", contentIndex: seg.contentIndex, component });
+				// IN-01 fix (37-REVIEW.md): populate createdAtGeneration here too,
+				// for the same reason as the streaming append-loop site above.
+				rs.renderedSegments.push({
+					kind: "tool",
+					contentIndex: seg.contentIndex,
+					component,
+					createdAtGeneration: rs.shrinkGeneration,
+				});
 			}
 			continue;
 		}
