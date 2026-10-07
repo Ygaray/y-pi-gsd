@@ -13,6 +13,15 @@
  * the new `getSessionRegistryPath()` / `getSessionLivenessOptions()` seams,
  * so the actual production orphan-detection/reap wiring is under test —
  * with fake pid signaling so no real process is ever touched.
+ *
+ * Restored contract (EXEC-01, Phase 39, 39-03-PLAN.md): a confirmed-alive
+ * orphan whose Task Attempt reconciles as `'settled'` is spared — it is
+ * never signalled — and the competing `startSession()` call is declined
+ * instead (39-REVIEW.md CR-01's alternative (b)), while every other
+ * reconcile outcome (`'no-attempt'`, `'db-unavailable'`) still reaps the
+ * orphan exactly as before. This restores the phase's own locked
+ * "settled => no kill" contract after 39-VERIFICATION.md gaps 1-3 found
+ * commit `2a6fd9f7` had silently reverted it to "settle, then always kill".
  */
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
@@ -381,6 +390,68 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     );
   });
 
+  it('a declined start is recoverable: a SECOND startSession() for the same dir reclaims the now-settled pid and starts exactly one driver (PD-9, 39-VERIFICATION.md gap 2)', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-retry-no-leak');
+    const orphanPid = 40040;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-retry',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+
+    // First pass: the reconcile reports 'settled' — the pid is spared and
+    // the start is declined (restored contract, Task 1).
+    sm.reconcileResults.push('settled');
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      /Session already active/,
+      'the first attempt must be declined while the orphan is still settled-alive',
+    );
+    assert.ok(
+      !sm.killedPids.some((k) => k.pid === orphanPid && (k.signal === 'SIGTERM' || k.signal === 'SIGKILL')),
+      'the orphan must remain unsignalled after the first, declined attempt',
+    );
+    assert.equal(
+      getSessionEntry(projectDir, sm.registryPath)?.pid,
+      orphanPid,
+      'the registry row must still reference the orphan pid after the decline',
+    );
+    assert.equal(sm.allClients.length, 0, 'no driver may have started yet');
+
+    // Second pass: the real reconcileOrphanAttempt would now observe
+    // 'no-attempt' for this same pid, because the ONLY running Attempt it
+    // could have matched was already settled on the first pass —
+    // ORPHAN_RECONCILE_WORKER_ATTEMPT_SQL's `attempt_state = 'running'`
+    // predicate matches nothing a second time. This is exactly the
+    // leak-freedom property PD-9 depends on: a decline is never terminal,
+    // because the next attempt for the same resolvedDir re-reaps the same
+    // preserved row and finds nothing left to settle.
+    sm.reconcileResults.push('no-attempt');
+    const sessionId = await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    // The kill lands only now — after a reconcile has reported the worker
+    // owns no running Attempt, never while it still owned one. This is the
+    // cascade trigger 39-VERIFICATION.md gap 2 reports as still live today:
+    // a live, in-progress worker is never converted into a dead worker that
+    // still owns an active unit.
+    assert.ok(
+      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
+      `expected the now-settled orphan pid ${orphanPid} to receive SIGTERM on the retry, got: ${JSON.stringify(sm.killedPids)}`,
+    );
+    assert.equal(sm.allClients.length, 1, 'exactly one driver must have started across both attempts');
+    const entry = getSessionEntry(projectDir, sm.registryPath);
+    assert.equal(entry?.sessionId, sessionId);
+    assert.equal(entry?.pid, sm.lastClient!.pid, 'the registry row now carries the new client\'s pid, not the orphan\'s');
+  });
+
   it('reapOrphanForTest returns the correct OrphanReapOutcome for each reap scenario (restored vocabulary: no-entry, stale-entry-dropped, settled-alive, reaped)', async () => {
     const sm = createManager();
 
@@ -560,10 +631,12 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
       sm.registryPath,
     );
     sm.alivePids.add(orphanPid);
-    // Queued FIFO: the winning pass observes 'settled'; the racing pass
-    // observes 'no-attempt' — modelling the real settle writer's
-    // domain-operation fence (39-01 PD-2), which reports nothing left to
-    // settle to whichever caller loses the race.
+    // Queued FIFO: the winning pass observes 'settled' (restored design:
+    // this pass SPARES the pid and returns 'settled-alive'); the racing
+    // pass observes 'no-attempt' (nothing left to settle — modelling the
+    // real settle writer's domain-operation fence, 39-01 PD-2) and REAPS
+    // it. The two outcomes are deliberately asymmetric: settled-exactly-once
+    // AND reaped-exactly-once, never both settled nor both reaped.
     sm.reconcileResults.push('settled', 'no-attempt');
 
     const raceResults = await Promise.allSettled([
@@ -580,6 +653,14 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
       2,
       'both racing passes must reach a real reconcile attempt',
     );
+
+    // Restored direction (39-VERIFICATION.md gap 3): the two fulfilled
+    // outcomes are exactly one 'settled-alive' (the pid spared) and one
+    // 'reaped' (the pid killed), in either order — never two 'reaped's
+    // (which would mean the settled pass also killed the pid) and never
+    // two 'settled-alive's (which would mean nothing ever reclaimed it).
+    const outcomes = raceResults.map((r) => (r as PromiseFulfilledResult<OrphanReapOutcome>).value).sort();
+    assert.deepEqual(outcomes, ['reaped', 'settled-alive']);
   });
 
   it('kills the orphan exactly once across a concurrent reap race so nothing leaks', async () => {
@@ -602,26 +683,27 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     sm.alivePids.add(orphanPid);
     sm.reconcileResults.push('settled', 'no-attempt');
 
-    await Promise.all([
+    const raceOutcomes = await Promise.all([
       sm.reapOrphanForTest(projectDir),
       sm.reapOrphanForTest(projectDir),
     ]);
 
-    // CR-01 (39-REVIEW.md): both passes now reach killOrphanSessionPid
-    // regardless of which one won the settle race — settling only clears
-    // the DB-side Attempt, it never spares the pid. Whichever pass acts on
-    // the still-alive pid first delivers the real SIGTERM; the other finds
-    // it already dead. The net outcome is settled-exactly-once AND
-    // killed-exactly-once, with no leaked live process either way.
-    assert.ok(
-      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
-      `expected one of the racing passes to SIGTERM the orphan pid, got: ${JSON.stringify(sm.killedPids)}`,
+    // Restored invariant (39-VERIFICATION.md gaps 1-3): the settled pass
+    // spares the pid and keeps the row; the non-settled pass reaps it. The
+    // net outcome is settled-exactly-once AND killed-exactly-once, with
+    // neither a leaked live process (something must reap it) nor a double
+    // signal (the settled pass must never also kill it).
+    assert.equal(
+      sm.killedPids.filter((k) => k.pid === orphanPid && k.signal === 'SIGTERM').length,
+      1,
+      `expected exactly one SIGTERM record for orphan pid ${orphanPid}, got: ${JSON.stringify(sm.killedPids)}`,
     );
     assert.equal(
       getSessionEntry(projectDir, sm.registryPath),
       undefined,
       'registry entry must be removed exactly once after the race resolves — no leaked live process',
     );
+    assert.deepEqual(raceOutcomes.slice().sort(), ['reaped', 'settled-alive']);
   });
 });
 
