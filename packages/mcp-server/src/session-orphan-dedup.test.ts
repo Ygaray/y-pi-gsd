@@ -297,6 +297,66 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     assert.equal(entry?.pid, sm.lastClient!.pid, 'new session entry should have replaced the dead one');
   });
 
+  it('CR-01 (39-REVIEW.md): preserves the registry row and declines the new start when the kill signal itself fails (e.g. EPERM) rather than reporting the orphan as dead', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-kill-failed');
+    const orphanPid = 40050;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-kill-failed',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+    // Reconcile falls through to the kill attempt (same as the plain
+    // 'no-attempt' kill-path tests) — the kill signal itself is what fails
+    // here, not the reconcile.
+    sm.reconcileResults.push('no-attempt');
+
+    // Override just the SIGTERM leg of the fake `kill` to throw a
+    // non-ESRCH error (EPERM), modelling a sandboxing/seccomp denial or a
+    // child owned by a different uid — the process was never confirmed
+    // dead, only failed to signal.
+    const originalGetLiveness = sm['getSessionLivenessOptions'].bind(sm);
+    (sm as unknown as { getSessionLivenessOptions: () => SessionLivenessOptions }).getSessionLivenessOptions = () => {
+      const base = originalGetLiveness();
+      return {
+        ...base,
+        kill: (pid: number, signal?: NodeJS.Signals | 0) => {
+          if (signal === 'SIGTERM') {
+            const err = new Error('operation not permitted') as NodeJS.ErrnoException;
+            err.code = 'EPERM';
+            throw err;
+          }
+          return base.kill!(pid, signal);
+        },
+      };
+    };
+
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      /Session already active/,
+      'a kill-signal failure must decline the new start rather than silently spawning a second driver',
+    );
+
+    assert.equal(
+      sm.allClients.length,
+      0,
+      'no second driver may start while the kill-failed orphan row still exists',
+    );
+
+    // The registry row must SURVIVE a kill-signal failure (CR-01) — dropping
+    // it would strand the still-possibly-alive orphan as unreapable.
+    const entry = getSessionEntry(projectDir, sm.registryPath);
+    assert.ok(entry, 'registry row must survive a kill-signal failure');
+    assert.equal(entry?.pid, orphanPid);
+  });
+
   it('does not touch a pid recycled by an unrelated process (start-time guard)', async () => {
     const sm = createManager();
     const projectDir = join(tmp, 'proj-d');
@@ -450,6 +510,42 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     const entry = getSessionEntry(projectDir, sm.registryPath);
     assert.equal(entry?.sessionId, sessionId);
     assert.equal(entry?.pid, sm.lastClient!.pid, 'the registry row now carries the new client\'s pid, not the orphan\'s');
+  });
+
+  it('reapOrphanForTest returns \'kill-failed\' and preserves the row when the kill signal fails for a reason other than "already dead" (CR-01, WR-01, 39-REVIEW.md)', async () => {
+    const sm = createManager();
+    const killFailedDir = join(tmp, 'proj-vocab-kill-failed');
+    const killFailedPid = 40033;
+    registerSessionEntry(
+      { sessionId: 'vocab-kill-failed', projectDir: killFailedDir, pid: killFailedPid, startTime: new Date().toISOString(), status: 'running' },
+      sm.registryPath,
+    );
+    sm.alivePids.add(killFailedPid);
+    sm.reconcileResults.push('no-attempt');
+
+    const originalGetLiveness = sm['getSessionLivenessOptions'].bind(sm);
+    (sm as unknown as { getSessionLivenessOptions: () => SessionLivenessOptions }).getSessionLivenessOptions = () => {
+      const base = originalGetLiveness();
+      return {
+        ...base,
+        kill: (pid: number, signal?: NodeJS.Signals | 0) => {
+          if (signal === 'SIGTERM') {
+            const err = new Error('operation not permitted') as NodeJS.ErrnoException;
+            err.code = 'EPERM';
+            throw err;
+          }
+          return base.kill!(pid, signal);
+        },
+      };
+    };
+
+    const outcome = await sm.reapOrphanForTest(killFailedDir);
+    assert.equal(outcome, 'kill-failed');
+    assert.equal(
+      getSessionEntry(killFailedDir, sm.registryPath)?.pid,
+      killFailedPid,
+      'the row must survive a kill-signal failure, unlike a genuinely reaped row',
+    );
   });
 
   it('reapOrphanForTest returns the correct OrphanReapOutcome for each reap scenario (restored vocabulary: no-entry, stale-entry-dropped, settled-alive, reaped)', async () => {
