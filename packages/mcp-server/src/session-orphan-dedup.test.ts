@@ -911,6 +911,89 @@ describe('orphan-reconcile.ts — computeWorkerStartTimeBound (WR-01, 39-REVIEW.
 });
 
 // ---------------------------------------------------------------------------
+// WR-02 (39-REVIEW.md): for worktree-based sessions, resolvedDir (the raw
+// cwd passed to the orphan's RpcClient) is NOT the same path the orphan
+// process itself registered as `workers.project_root_realpath` -- the
+// orphan used worktree-aware resolution (resolveGsdPathContract) to find
+// the canonical project root. The query's `:project_root` bind parameter
+// must use that canonical root, not resolvedDir directly, or the join
+// silently matches zero rows for worktree-based sessions.
+// ---------------------------------------------------------------------------
+
+describe('orphan-reconcile.ts — resolveWorkflowDatabaseLocation canonical-root resolution (WR-02, 39-REVIEW.md)', () => {
+  const baseEntry: SessionRegistryEntry = {
+    sessionId: 'session-under-test-worktree',
+    projectDir: '/tmp/does-not-matter-worktree',
+    pid: 50299,
+    startTime: new Date().toISOString(),
+    status: 'running',
+  };
+  const stubHostname = () => 'test-host';
+  const stubNormalizeProjectRoot = (dir: string) => `normalized:${dir}`;
+
+  it("binds :project_root to the bridge's resolved canonical project root, not the raw worktree resolvedDir", async () => {
+    const worktreeResolvedDir = '/repo/.gsd/worktrees/M001';
+    const canonicalProjectRoot = '/repo';
+    const prepareParams: Array<Record<string, unknown>> = [];
+
+    const bridge: OrphanReconcileBridge = {
+      async ensureDbOpen() {
+        return true;
+      },
+      getDb() {
+        return {
+          prepare(_sql: string) {
+            return {
+              all(params?: Record<string, unknown>) {
+                prepareParams.push(params ?? {});
+                return [];
+              },
+            };
+          },
+        };
+      },
+      settleRunningAttemptsForWorker() {
+        return [];
+      },
+      resolveWorkflowDatabaseLocation(basePath: string) {
+        // Models resolveGsdPathContract: any path under the worktree
+        // layout resolves back to the single canonical project root.
+        assert.equal(basePath, worktreeResolvedDir);
+        return { projectRoot: canonicalProjectRoot };
+      },
+    };
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+
+    const result = await reconcileOrphanAttempt(baseEntry, worktreeResolvedDir, deps);
+    assert.equal(result, 'no-attempt');
+
+    // The bound :project_root must reflect the CANONICAL root the bridge
+    // resolved, never the raw worktree cwd -- otherwise the join would
+    // never match the orphan's real `workers` row for worktree sessions.
+    assert.equal(prepareParams.length, 1);
+    assert.equal(prepareParams[0][':project_root'], `normalized:${canonicalProjectRoot}`);
+  });
+
+  it('falls back to normalizing resolvedDir directly when the bridge has no resolveWorkflowDatabaseLocation (back-compat)', async () => {
+    const resolvedDir = '/repo-no-worktree';
+    const { bridge, calls } = createFakeOrphanReconcileBridge({ queryRows: [] });
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+
+    const result = await reconcileOrphanAttempt(baseEntry, resolvedDir, deps);
+    assert.equal(result, 'no-attempt');
+    assert.equal(calls.prepareParams[0][':project_root'], `normalized:${resolvedDir}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Settled-exactly-once under concurrency (Pitfall 2 / D-04, Phase 39 Plan
 // 02) — the second race property the settle-before-kill decision (Plan 01)
 // depends on, proven directly against `reconcileOrphanAttempt` with a shared

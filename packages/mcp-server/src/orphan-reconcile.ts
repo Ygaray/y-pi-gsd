@@ -44,7 +44,7 @@ import { _buildImportCandidates } from './workflow-tools.js';
 export type OrphanReconcileResult = 'settled' | 'no-attempt' | 'db-unavailable';
 
 /**
- * Narrow local mirror of only the three facade members this module uses —
+ * Narrow local mirror of only the facade members this module uses —
  * modelled on `workflow-tools.ts`'s hand-maintained `GsdMcpBridge` interface,
  * deliberately NOT its full ~25-method surface.
  */
@@ -52,6 +52,21 @@ export interface OrphanReconcileBridge {
   ensureDbOpen(projectDir: string): Promise<boolean>;
   getDb(): { prepare(sql: string): { all(params?: Record<string, unknown>): unknown[] } };
   settleRunningAttemptsForWorker(workerId: string): string[];
+  /**
+   * WR-02 (39-REVIEW.md): resolve `resolvedDir` (the raw cwd the MCP server
+   * passed to the orphan's RpcClient at spawn time) to its CANONICAL
+   * project root — the same worktree-aware resolution the orphan process
+   * itself used (via `registerAutoWorkerForSession` -> `resolveGsdPathContract`)
+   * to populate `workers.project_root_realpath`. Without this, a worktree
+   * cwd would never match the canonical root stored at registration, the
+   * join would silently match zero rows, and the settle protection this
+   * module exists to provide would never engage for worktree-based
+   * sessions. Optional so pre-existing hand-built test fakes that don't
+   * implement it keep working unchanged — its absence falls back to
+   * normalizing `resolvedDir` directly (correct whenever resolvedDir is
+   * already the project's canonical root, i.e. the non-worktree case).
+   */
+  resolveWorkflowDatabaseLocation?(basePath: string): { projectRoot: string };
 }
 
 /** Injectable seam for tests — defaults are the real implementations. */
@@ -201,13 +216,25 @@ export async function reconcileOrphanAttempt(
 
     const startTimeBound = computeWorkerStartTimeBound(entry.startTime);
 
+    // WR-02 (39-REVIEW.md): resolve resolvedDir to its canonical project
+    // root the same worktree-aware way the orphan process itself did when
+    // it registered `workers.project_root_realpath` -- a raw worktree cwd
+    // must never be bound directly, or the join would silently match zero
+    // rows for worktree-based sessions. Falls back to resolvedDir itself
+    // when the bridge doesn't provide the resolver (test fakes, or an
+    // older bridge module) -- correct whenever resolvedDir already IS the
+    // canonical root.
+    const projectRootForQuery = bridge.resolveWorkflowDatabaseLocation
+      ? bridge.resolveWorkflowDatabaseLocation(resolvedDir).projectRoot
+      : resolvedDir;
+
     const rows = bridge
       .getDb()
       .prepare(ORPHAN_RECONCILE_WORKER_ATTEMPT_SQL)
       .all({
         ':pid': entry.pid,
         ':host': getHostname(),
-        ':project_root': normalizeProjectRoot(resolvedDir),
+        ':project_root': normalizeProjectRoot(projectRootForQuery),
         ':start_time_min': startTimeBound.min,
         ':start_time_max': startTimeBound.max,
       }) as Array<{ worker_id: string }>;
