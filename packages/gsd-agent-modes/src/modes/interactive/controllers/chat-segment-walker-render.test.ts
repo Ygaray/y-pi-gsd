@@ -119,6 +119,14 @@ async function driveDelta(
 	applySubTurnContentShrink(rs, blocks);
 	scanNewContentBlocks(host as any, rs, blocks);
 	runSegmentWalker(host as any, rs, "date-time-iso");
+	// IN-02 fix (37-REVIEW.md): mirror chat-controller.ts's post-walker index
+	// advance (chat-controller.ts:308-310) so this harness is faithful to
+	// "the real production order" its own doc comment claims — without
+	// this, scanNewContentBlocks always rescanned every block from index 0
+	// on every delta instead of only the unprocessed tail.
+	if (blocks.length > 0) {
+		rs.lastProcessedContentIndex = Math.max(0, blocks.length - 1);
+	}
 	tui.requestRender();
 	await terminal.waitForRender();
 }
