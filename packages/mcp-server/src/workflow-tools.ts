@@ -956,6 +956,12 @@ export function _buildBridgeImportCandidates(relativePath: string): string[] {
   return buildBridgeImportCandidates(relativePath);
 }
 
+// IN-01 (39-REVIEW.md): orphan-reconcile.ts's `importLocalModule` is a
+// deliberate byte-for-byte mirror of this function (it is not exported from
+// this module, so a sibling module in the same package still had to
+// re-implement it) — if this implementation's dist-test sort heuristic or
+// candidate-resolution behavior changes, update that mirror too, or the two
+// will silently drift.
 async function importLocalModule<T>(relativePath: string): Promise<T> {
   const rawCandidates = _buildImportCandidates(relativePath);
   const candidates = (import.meta.url.includes("/dist-test/") || import.meta.url.includes("\\dist-test\\")

@@ -489,6 +489,12 @@ export function _clearGsdRootCache(): void {
  *
  * Use this helper everywhere a path is used as an identity/cache key so that
  * all callers agree on the canonical form.
+ *
+ * IN-01 (39-REVIEW.md): `packages/mcp-server/src/orphan-reconcile.ts`'s
+ * `normalizeOrphanProjectRoot` is a deliberate byte-for-byte mirror of this
+ * function (that package's rootDir boundary forbids importing this file
+ * directly) — if this implementation's behavior changes, update that mirror
+ * too, or the two will silently drift.
  */
 export function normalizeRealPath(p: string): string {
   try { return realpathSync.native(p); } catch { return resolve(p); }
