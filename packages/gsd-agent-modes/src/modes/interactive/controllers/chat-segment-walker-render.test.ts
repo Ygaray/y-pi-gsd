@@ -191,3 +191,92 @@ test("RENDER-01 SC-4: collapse+regrow reuses the assistant component (RED at HEA
 
 	tui.stop();
 });
+
+// ── Task 2: RENDER-02 SC-5 mixed-stream ───────────────────────────────
+//
+// Structural-then-textual assertion ordering is deliberate and is the
+// mechanical arbiter D-03 requires: if the structural ToolExecutionComponent
+// instance-count assertion fails, RENDER-02 is a duplicate/orphaned instance
+// surviving in chatContainer with no removeChild cleanup (fixed in
+// chat-segment-walker.ts). If that assertion PASSES but a textual assertion
+// (BODYMARK/ARGSMARK row count) fails, RENDER-02 is body accumulation inside
+// tool-execution.ts instead.
+test("RENDER-02 SC-5: mixed-stream thinking+text+tool-call+tool-result survives shrink+regrow (RED at HEAD)", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Load-bearing: all four content.id / pendingTools lookups below use the
+	// literal "tool-sc5-1" (not a shared variable) so the identical-id reuse
+	// across the shrink and regrow deltas is grep-verifiable in the file text.
+
+	// 1. Deliver thinking + text + toolCall (three blocks).
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "THINKMARK considering the request" },
+		{ type: "text", text: "PROSEMARK working on it" },
+		{ type: "toolCall", id: "tool-sc5-1", name: "bash", arguments: { command: "echo ARGSMARK" } },
+	]);
+
+	// 2. Complete the tool.
+	const pendingComponent = host.pendingTools.get("tool-sc5-1");
+	assert.ok(pendingComponent, "sanity: the tool call must have registered a pending component");
+	pendingComponent!.updateResult({ content: [{ type: "text", text: "BODYMARK line one" }], isError: false });
+	tui.requestRender();
+	await terminal.waitForRender();
+
+	// 3. Shrink: strictly shorter blocks array that still contains the SAME
+	// tool-call block (identical id "tool-sc5-1"), plus one new pre-tool
+	// prose block — reusing the identical id exercises
+	// registerPendingToolComponent's host.pendingTools.get(toolCallId)
+	// existing-match branch.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "NEWPROSE after shrink" },
+		{ type: "toolCall", id: "tool-sc5-1", name: "bash", arguments: { command: "echo ARGSMARK" } },
+	]);
+
+	// 4. Regrow: longer blocks array restoring thinking, prose, the same
+	// tool-call block (id "tool-sc5-1" again), and a trailing ANSWERMARK
+	// text block.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "THINKMARK considering the request" },
+		{ type: "text", text: "PROSEMARK working on it" },
+		{ type: "toolCall", id: "tool-sc5-1", name: "bash", arguments: { command: "echo ARGSMARK" } },
+		{ type: "text", text: "ANSWERMARK final answer appended" },
+	]);
+
+	// 5. Re-apply the tool result on the regrown component, then render.
+	const regrownComponent = host.pendingTools.get("tool-sc5-1");
+	assert.ok(regrownComponent, "sanity: the tool component must still be registered after regrow");
+	regrownComponent!.updateResult({ content: [{ type: "text", text: "BODYMARK line one" }], isError: false });
+	tui.requestRender();
+	await terminal.waitForRender();
+
+	const scrollback = terminal.getScrollBuffer();
+
+	// STRUCTURAL first (the D-03 discriminator).
+	const toolInstanceCount = chatContainer.children.filter((c) => c instanceof ToolExecutionComponent).length;
+	assert.strictEqual(
+		toolInstanceCount,
+		1,
+		`expected exactly one ToolExecutionComponent in chatContainer, observed ${toolInstanceCount}`,
+	);
+
+	// TEXTUAL second.
+	const bodyCount = countRowsContaining(scrollback, "BODYMARK");
+	const argsCount = countRowsContaining(scrollback, "ARGSMARK");
+	assert.strictEqual(bodyCount, 1, `expected BODYMARK to appear exactly once, observed ${bodyCount}`);
+	assert.strictEqual(argsCount, 1, `expected ARGSMARK to appear exactly once, observed ${argsCount}`);
+
+	// Then the RENDER-01 companions in the same turn.
+	const answerCount = countRowsContaining(scrollback, "ANSWERMARK");
+	assert.strictEqual(answerCount, 1, `expected ANSWERMARK to appear exactly once, observed ${answerCount}`);
+	const textRunSegmentCount = rs.renderedSegments.filter((s) => s.kind === "text-run").length;
+	const assistantComponentCount = chatContainer.children.filter((c) => c instanceof AssistantMessageComponent).length;
+	assert.strictEqual(
+		assistantComponentCount,
+		textRunSegmentCount,
+		`AssistantMessageComponent count in chatContainer (${assistantComponentCount}) must match tracked text-run segment count (${textRunSegmentCount}) — a mismatch is the orphan leak`,
+	);
+
+	tui.stop();
+});
