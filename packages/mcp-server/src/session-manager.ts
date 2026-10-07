@@ -182,12 +182,20 @@ export function projectRecentEvents(events: SdkAgentEvent[], limit: number): Sdk
  * - `'settled-alive'` — a confirmed-alive orphan's Task Attempt was
  *   settled, so its pid was deliberately spared and its registry row was
  *   deliberately kept (PD-8, 39-03-PLAN.md).
+ * - `'kill-failed'` — a confirmed-alive orphan was reconciled to a
+ *   non-settled outcome, but the kill signal itself failed for a reason
+ *   other than "already dead" (e.g. `EPERM`, a sandboxing/seccomp denial).
+ *   The process may still be alive, so — mirroring the `'settled-alive'`
+ *   rationale (PD-8) — its registry row is deliberately KEPT rather than
+ *   dropped, so it remains reapable on a later attempt (CR-01,
+ *   39-REVIEW.md).
  */
 export type OrphanReapOutcome =
   | 'no-entry'
   | 'stale-entry-dropped'
   | 'reaped'
-  | 'settled-alive';
+  | 'settled-alive'
+  | 'kill-failed';
 
 export class SessionManager {
   /** Sessions keyed by projectDir for duplicate-start prevention */
@@ -268,9 +276,18 @@ export class SessionManager {
       // failure, so the lock must not be held across it (a concurrent
       // startSession() for this resolvedDir must observe the real decline
       // reason below, not a misleading "reap in progress").
-      if (reapOutcome === 'settled-alive') {
+      if (reapOutcome === 'settled-alive' || reapOutcome === 'kill-failed') {
+        // CR-01 (39-REVIEW.md): a 'kill-failed' outcome means the signal
+        // attempt itself failed (the orphan may still be alive) and its
+        // registry row was deliberately preserved (see
+        // reapPersistedOrphanSession below) — decline exactly like
+        // 'settled-alive' rather than silently spawning a second driver
+        // beside a possibly-still-alive orphan.
+        const detail = reapOutcome === 'settled-alive'
+          ? `its dangling Task Attempt was settled and the live process was deliberately left running rather than signalled; re-issuing this call will reclaim the now-settled pid`
+          : `the kill signal failed (see server logs for the underlying error) and the process may still be alive; its registry row was preserved so re-issuing this call will retry the kill`;
         throw new Error(
-          `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; its dangling Task Attempt was settled and the live process was deliberately left running rather than signalled; re-issuing this call will reclaim the now-settled pid)`
+          `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; ${detail})`
         );
       }
     }
@@ -472,15 +489,31 @@ export class SessionManager {
     }
 
     const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);
+
+    if (typeof result === 'object') {
+      // CR-01 (39-REVIEW.md): the kill signal itself failed for a reason
+      // other than "already dead" (e.g. EPERM because the child is owned by
+      // a different uid, or a sandboxing/seccomp denial) — the process may
+      // still be alive, it was NOT confirmed dead. The exact same PD-8
+      // reasoning that keeps the registry row on a 'settled' outcome (above)
+      // applies here: dropping it would erase the only record of a
+      // still-alive orphan, letting a later startSession() see 'no-entry'
+      // and spawn a second driver alongside an untracked, unreapable leak.
+      // Keep the row and report a distinct outcome so startSession() can
+      // decline the new start exactly like 'settled-alive'.
+      process.stderr.write(
+        `[gsd-mcp-server] INC-2026-09-29-02: failed to reap orphaned headless session for ${resolvedDir} — pid=${entry.pid} kill signal failed: ${result.error}; registry row preserved so it remains reapable on a later attempt\n`,
+      );
+      return 'kill-failed';
+    }
+
     const label = result === 'killed'
       ? `killed orphan pid=${entry.pid}`
       : result === 'force-killed'
         ? `force-killed orphan pid=${entry.pid}`
         : result === 'already-dead'
           ? `orphan pid=${entry.pid} already dead`
-          : result === 'invalid'
-            ? `ignored invalid/recycled orphan pid=${String(entry.pid)}`
-            : `failed to kill orphan pid=${entry.pid}: ${result.error}`;
+          : `ignored invalid/recycled orphan pid=${String(entry.pid)}`;
     process.stderr.write(
       `[gsd-mcp-server] INC-2026-09-29-02: reaped orphaned headless session for ${resolvedDir} left by a prior MCP server instance — ${label}\n`,
     );
