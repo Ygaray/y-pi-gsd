@@ -809,6 +809,54 @@ describe('orphan-reconcile.ts — reconcileOrphanAttempt (module-level, D-04)', 
     const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
     assert.equal(result, 'settled');
   });
+
+  it("CR-02 (39-REVIEW.md): a later row's settle throw must not discard an earlier row's already-durable settle", async () => {
+    // Two matched worker_id rows (the query is SELECT DISTINCT, so more
+    // than one row is not purely theoretical). The first row's settle call
+    // succeeds durably; the second row's throws. Before CR-02, the throw
+    // propagated to the outer catch and returned 'db-unavailable' —
+    // discarding the first row's already-committed progress and causing
+    // the caller to fall through to killing the pid, leaving the SECOND
+    // row's Attempt (whose settle call never got a chance) dangling.
+    const calls: string[] = [];
+    const bridge: OrphanReconcileBridge = {
+      async ensureDbOpen() {
+        return true;
+      },
+      getDb() {
+        return {
+          prepare(_sql: string) {
+            return {
+              all() {
+                return [{ worker_id: 'worker-ok' }, { worker_id: 'worker-throws' }];
+              },
+            };
+          },
+        };
+      },
+      settleRunningAttemptsForWorker(workerId: string) {
+        calls.push(workerId);
+        if (workerId === 'worker-throws') {
+          throw new Error('simulated settle failure for worker-throws');
+        }
+        return ['attempt-ok-1'];
+      },
+    };
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
+
+    // The first row's durable settle must still count — the function must
+    // not collapse to 'db-unavailable' just because a later row threw.
+    assert.equal(result, 'settled');
+    // Both rows must have been attempted (the loop keeps going past the
+    // throw rather than aborting on the first row after it).
+    assert.deepEqual(calls, ['worker-ok', 'worker-throws']);
+  });
 });
 
 // ---------------------------------------------------------------------------

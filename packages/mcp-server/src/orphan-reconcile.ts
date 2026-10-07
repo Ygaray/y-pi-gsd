@@ -176,15 +176,23 @@ export async function reconcileOrphanAttempt(
 
     let settledCount = 0;
     for (const row of rows) {
-      const settledIds = bridge.settleRunningAttemptsForWorker(row.worker_id);
-      settledCount += settledIds.length;
+      // CR-02 (39-REVIEW.md): best-effort per matched worker row, mirroring
+      // settleRunningAttemptsForWorker's own internal per-attempt pattern.
+      // `rows` can contain more than one worker_id; if one row's settle call
+      // throws, it must not erase an EARLIER row's already-durable settle by
+      // falling into the outer catch and reporting 'db-unavailable' (which
+      // the caller treats identically to 'no-attempt' and falls through to
+      // killing the pid). Without this per-row guard, a later row's failure
+      // would discard the whole loop's progress and leave any OTHER matched
+      // worker's still-running Attempt dangling once the pid is killed.
+      try {
+        settledCount += bridge.settleRunningAttemptsForWorker(row.worker_id).length;
+      } catch {
+        // best-effort — continue to the next matched worker row.
+      }
     }
 
-    if (settledCount === 0) {
-      return 'no-attempt';
-    }
-
-    return 'settled';
+    return settledCount > 0 ? 'settled' : 'no-attempt';
   } catch {
     return 'db-unavailable';
   }
