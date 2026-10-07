@@ -66,3 +66,31 @@ export function excludeDriverPlaneTools(toolNames: readonly string[]): string[] 
   if (isFullGsdToolSurfaceRequested()) return [...toolNames];
   return toolNames.filter((name) => !isDriverPlaneToolName(name));
 }
+
+/**
+ * Computes `adjust_tool_set`'s fallback-branch return value — the one
+ * bare-return site with no `build*` call to patch into.
+ *
+ * The length comparison below is the only genuinely new control flow this
+ * phase introduces, and is load-bearing: `surfaceReduced`
+ * (register-hooks.ts `adjust_tool_set`, computed from alias and browser
+ * removal only) cannot be reused to decide this return, because doing so
+ * would leave the driver plane advertised whenever no alias/browser tool
+ * happened to be present in `providerCompatible`. Comparing the filtered
+ * length against the input length instead tells us, independently of
+ * `surfaceReduced`, whether the driver-plane subtraction itself removed
+ * anything — and forces a defined `{ toolNames }` return whenever it did.
+ *
+ * Returns a structural `{ toolNames } | undefined` shape (deliberately not
+ * importing `AdjustToolSetResult` — keeping this module dependency-light).
+ */
+export function resolveFallbackToolSetAdjustment(
+  providerCompatible: readonly string[],
+  surfaceReduced: boolean,
+): { toolNames: string[] } | undefined {
+  const filtered = excludeDriverPlaneTools(providerCompatible);
+  if (filtered.length !== providerCompatible.length) {
+    return { toolNames: filtered };
+  }
+  return surfaceReduced ? { toolNames: [...providerCompatible] } : undefined;
+}

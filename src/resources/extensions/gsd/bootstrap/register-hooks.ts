@@ -86,7 +86,7 @@ import { AUTO_UNIT_SCOPED_TOOLS, RUN_UAT_BROWSER_TOOL_NAMES, canonicalWorkflowTo
 import { hasBrowserContractPrefix } from "../../shared/browser-contract.js";
 import { filterToolsForProvider } from "../model-router.js";
 import { mcpToolMatchesBaseName } from "../mcp-tool-name.js";
-import { excludeDriverPlaneTools, isFullGsdToolSurfaceRequested } from "../driver-plane-tools.js";
+import { excludeDriverPlaneTools, isFullGsdToolSurfaceRequested, resolveFallbackToolSetAdjustment } from "../driver-plane-tools.js";
 import { RUN_UAT_READ_ONLY_TOOL_NAMES, RUN_UAT_WORKFLOW_TOOL_NAMES } from "../tool-presentation-plan.js";
 import { supportsSourceObservationsForUnit } from "../source-observations.js";
 import { clearPendingAutoStart } from "../pending-auto-start.js";
@@ -2326,6 +2326,6 @@ export function registerHooks(
     if (!requestHasGsdCustomType(event.requestCustomMessages)) {
       return { toolNames: buildMinimalGsdToolSet(providerCompatible) };
     }
-    return surfaceReduced ? { toolNames: providerCompatible } : undefined;
+    return resolveFallbackToolSetAdjustment(providerCompatible, surfaceReduced);
   });
 }
