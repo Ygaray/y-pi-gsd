@@ -36,11 +36,11 @@ test("jiti aliases resolve @gsd/agent-core exact and subpath specifiers", async 
 	const exact = (await jiti.import("@gsd/agent-core")) as Record<string, unknown>;
 	assert.equal(typeof exact.prepareLifecycleHooks, "function");
 
-	const subpath = (await jiti.import("@gsd/agent-core/lifecycle-hooks.js")) as Record<string, unknown>;
-	assert.equal(typeof subpath.prepareLifecycleHooks, "function");
+	const subpath = (await jiti.import("@gsd/agent-core/agent-session.js")) as Record<string, unknown>;
+	assert.equal(typeof subpath.parseSkillBlock, "function");
 
 	const message = "@gsd/agent-core alias must point at the dist directory, not a file";
 	assert.equal(statSync(agentCore).isDirectory(), true, message);
 	assert.ok(existsSync(`${agentCore}/index.js`), "dist directory must contain index.js");
-	assert.ok(existsSync(`${agentCore}/lifecycle-hooks.js`), "dist directory must contain lifecycle-hooks.js");
+	assert.ok(existsSync(`${agentCore}/agent-session.js`), "dist directory must contain agent-session.js");
 });
