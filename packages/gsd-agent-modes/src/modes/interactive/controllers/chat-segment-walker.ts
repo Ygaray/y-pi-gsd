@@ -34,13 +34,22 @@ export function applySubTurnContentShrink(
 		? isSubTurnTextReplacement(contentBlocks, rs.renderedSegments)
 		: null;
 	if (contentBlocks.length < rs.lastContentLength) {
-		// Accumulate across successive shrinks — overwriting would drop
-		// segments displaced by an earlier shrink, leaving them stranded
-		// in chatContainer once the prune pass finally runs.
-		rs.shrinkGeneration++;
-		const newlyOrphaned = rs.renderedSegments.map((seg) => ({ ...seg, orphanedAtGeneration: rs.shrinkGeneration }));
-		rs.orphanedSegments = [...rs.orphanedSegments, ...newlyOrphaned];
-		rs.renderedSegments = [];
+		// WR-02 fix (37-REVIEW.md): only bump shrinkGeneration and
+		// accumulate orphans when there is something to actually displace —
+		// matching this field's own doc comment in streaming-render-state.ts
+		// ("bumped once per applySubTurnContentShrink() call that actually
+		// displaces segments"). A shrink detected before anything has ever
+		// been rendered (rs.renderedSegments empty) has nothing to orphan
+		// and must not advance the generation counter.
+		if (rs.renderedSegments.length > 0) {
+			// Accumulate across successive shrinks — overwriting would drop
+			// segments displaced by an earlier shrink, leaving them stranded
+			// in chatContainer once the prune pass finally runs.
+			rs.shrinkGeneration++;
+			const newlyOrphaned = rs.renderedSegments.map((seg) => ({ ...seg, orphanedAtGeneration: rs.shrinkGeneration }));
+			rs.orphanedSegments = [...rs.orphanedSegments, ...newlyOrphaned];
+			rs.renderedSegments = [];
+		}
 		rs.lastPinnedText = "";
 		rs.lastProcessedContentIndex = 0;
 	} else if (replacedAt !== null) {
@@ -48,14 +57,17 @@ export function applySubTurnContentShrink(
 		// text-run and any text-runs after it. Earlier unchanged text
 		// and tool segments stay in rs.renderedSegments so they are not
 		// re-rendered and duplicated in chatContainer.
-		rs.shrinkGeneration++;
-		const newlyOrphaned = rs.renderedSegments
-			.filter((seg) => seg.kind === "text-run" && seg.startIndex >= replacedAt)
-			.map((seg) => ({ ...seg, orphanedAtGeneration: rs.shrinkGeneration }));
-		rs.orphanedSegments = [...rs.orphanedSegments, ...newlyOrphaned];
-		rs.renderedSegments = rs.renderedSegments.filter(
-			(seg) => !(seg.kind === "text-run" && seg.startIndex >= replacedAt),
-		);
+		// WR-02 fix: only bump the generation when this branch actually
+		// displaces a segment (see comment above).
+		const displaced = rs.renderedSegments.filter((seg) => seg.kind === "text-run" && seg.startIndex >= replacedAt);
+		if (displaced.length > 0) {
+			rs.shrinkGeneration++;
+			const newlyOrphaned = displaced.map((seg) => ({ ...seg, orphanedAtGeneration: rs.shrinkGeneration }));
+			rs.orphanedSegments = [...rs.orphanedSegments, ...newlyOrphaned];
+			rs.renderedSegments = rs.renderedSegments.filter(
+				(seg) => !(seg.kind === "text-run" && seg.startIndex >= replacedAt),
+			);
+		}
 		rs.lastPinnedText = "";
 		rs.lastProcessedContentIndex = replacedAt;
 	} else if (rs.lastProcessedContentIndex >= contentBlocks.length) {

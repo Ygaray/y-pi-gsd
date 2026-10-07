@@ -61,6 +61,22 @@ test("shrinkGeneration: primary shrink branch increments by exactly 1", () => {
 	assert.equal(rs.shrinkGeneration, 1);
 });
 
+test("WR-02 fix (37-REVIEW.md): a shrink detected with no prior rendered segments leaves shrinkGeneration unchanged", () => {
+	const rs = createStreamingRenderState();
+	rs.lastContentLength = 3;
+	rs.renderedSegments = [];
+
+	// contentBlocks.length (1) < rs.lastContentLength (3) satisfies the
+	// primary shrink branch's own length condition, but rs.renderedSegments
+	// is empty — there is nothing to displace. Pre-fix, this still bumped
+	// shrinkGeneration unconditionally, contradicting the field's own doc
+	// comment ("bumped once per call that actually displaces segments").
+	applySubTurnContentShrink(rs, [{ type: "text", text: "x" }]);
+
+	assert.equal(rs.shrinkGeneration, 0, "nothing was displaced, so the generation counter must not advance");
+	assert.equal(rs.orphanedSegments.length, 0, "no orphan may be fabricated when nothing was live to displace");
+});
+
 test("shrinkGeneration: neither branch taken leaves shrinkGeneration unchanged", () => {
 	const rs = createStreamingRenderState();
 	rs.lastContentLength = 1;
