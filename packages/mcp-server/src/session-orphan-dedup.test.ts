@@ -177,8 +177,13 @@ class TestableSessionManager extends SessionManager {
    * every call onto `reconcileCalls` and returns the next queued result,
    * defaulting an empty queue to `'no-attempt'` so every pre-existing kill-
    * path test case in this file keeps passing unchanged.
+   *
+   * WR-03 (39-REVIEW.md): named `invokeOrphanReconcile` (not
+   * `reconcileOrphanAttempt`) to match the renamed production seam — see
+   * session-manager.ts for why the collision with the imported module-level
+   * `reconcileOrphanAttempt` was a latent recursion bug.
    */
-  protected override async reconcileOrphanAttempt(
+  protected override async invokeOrphanReconcile(
     entry: SessionRegistryEntry,
     resolvedDir: string,
   ): Promise<OrphanReconcileResult> {

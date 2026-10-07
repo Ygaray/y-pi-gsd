@@ -365,8 +365,15 @@ export class SessionManager {
    * reconcile result (`'settled' | 'no-attempt' | 'db-unavailable'`) without
    * touching a real SQLite file. Production implementation delegates to
    * `orphan-reconcile.ts`'s `reconcileOrphanAttempt`.
+   *
+   * WR-03 (39-REVIEW.md): deliberately named differently from the imported
+   * module-level `reconcileOrphanAttempt` this delegates to — an identical
+   * name was correct today only because the body referenced the bare
+   * (unqualified) import, not `this`; a future edit that reflexively
+   * qualified the call as `this.reconcileOrphanAttempt(...)` would have been
+   * a compiler-silent unbounded-recursion bug.
    */
-  protected reconcileOrphanAttempt(
+  protected invokeOrphanReconcile(
     entry: SessionRegistryEntry,
     resolvedDir: string,
   ): Promise<OrphanReconcileResult> {
@@ -405,7 +412,7 @@ export class SessionManager {
     // exists to guarantee. Settle-then-kill is the intended order: settle
     // the Attempt first (so the kill signal doesn't race a dangling
     // `running` row), then always reclaim the pid exactly as before.
-    const reconcileResult = await this.reconcileOrphanAttempt(entry, resolvedDir);
+    const reconcileResult = await this.invokeOrphanReconcile(entry, resolvedDir);
     if (reconcileResult === 'settled') {
       process.stderr.write(
         `[gsd-mcp-server] INC-2026-09-29-02: reconciled orphaned headless session for ${resolvedDir} left by a prior MCP server instance — settled its Attempt, now reclaiming pid=${entry.pid}\n`,
