@@ -167,8 +167,17 @@ const warnedConcurrentClaudeCodeCwds = new Set<string>();
 // fires-once guard, unlike GSD_DEBUG_RATELIMIT_HEADERS -- a single observation answers D-03's
 // encoding question but cannot answer D-05's cadence question, which needs every occurrence
 // across one live multi-turn session (38-RESEARCH.md Pitfall D).
-let rateLimitEventDebugSeq = 0;
-let rateLimitEventDebugFirstEventMs: number | null = null;
+//
+// Keyed by the SDK envelope's `session_id` (WR-02, 38-REVIEW.md) rather than a bare module-level
+// counter/epoch pair: two `AgentSession`s live in the same Node process at once (a headless
+// multi-session host, or nested subagent execution sharing a process) would otherwise interleave
+// their `rate_limit_event` observations into one shared sequence and one shared "first event"
+// epoch, producing `elapsedMs` values that describe neither session's actual cadence. A session's
+// `session_id` is stable across all of its turns, so this still answers D-05's cross-turn cadence
+// question within one session while keeping concurrent sessions independent -- mirroring how
+// `rateLimitStatusRef` is instantiated fresh per `createAgentSession` call in `sdk.ts` rather than
+// being a module global.
+const rateLimitEventDebugStateBySession = new Map<string, { seq: number; firstEventMs: number }>();
 
 function hasArgValue(argv: string[], flag: string, value: string): boolean {
 	return argv.some((arg, index) =>
@@ -2995,16 +3004,22 @@ async function pumpSdkMessages(
 							// `SDKOtherMessage`'s index signature keeps `msg.type` widened to
 							// `string` here, so this arm does not narrow `msg` — read the payload
 							// through the same cast idiom the `case "system"` arm above uses.
-							const event = msg as unknown as { rate_limit_info?: unknown };
+							const event = msg as unknown as { rate_limit_info?: unknown; session_id?: unknown };
 							const mapped = mapSdkRateLimitInfo(event.rate_limit_info);
 							if (process.env.GSD_DEBUG_RATELIMIT_EVENT === "1") {
-								rateLimitEventDebugSeq += 1;
-								if (rateLimitEventDebugFirstEventMs === null) {
-									rateLimitEventDebugFirstEventMs = Date.now();
+								// `typeof` narrowed (not a truthiness check) so an empty-string
+								// `session_id` still gets its own bucket rather than silently
+								// collapsing into the "unknown" fallback.
+								const sessionKey = typeof event.session_id === "string" ? event.session_id : "unknown";
+								let debugState = rateLimitEventDebugStateBySession.get(sessionKey);
+								if (!debugState) {
+									debugState = { seq: 0, firstEventMs: Date.now() };
+									rateLimitEventDebugStateBySession.set(sessionKey, debugState);
 								}
-								const elapsedMs = Date.now() - rateLimitEventDebugFirstEventMs;
+								debugState.seq += 1;
+								const elapsedMs = Date.now() - debugState.firstEventMs;
 								console.error(
-									formatRateLimitEventDebugLine(rateLimitEventDebugSeq, elapsedMs, event.rate_limit_info, mapped),
+									formatRateLimitEventDebugLine(debugState.seq, elapsedMs, event.rate_limit_info, mapped),
 								);
 							}
 							if (mapped) {
