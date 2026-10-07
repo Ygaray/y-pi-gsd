@@ -753,6 +753,111 @@ test("D-02 Test 6: a turn WITH an MCP tool call still prunes provisional pre-too
 	tui.stop();
 });
 
+// ── Review Fix: CR-01 (37-REVIEW.md) ──────────────────────────────────
+//
+// CR-01: a reclaimed text-run segment whose startIndex drifts across a
+// subsequent GROWTH (non-shrink) delta was never re-orphaned when the
+// turn's tool call is NOT an MCP tool — the old prune-and-reconcile block
+// only ever ran when shouldPruneProvisionalPreToolProse was true, which
+// requires isMcpToolBlock (chat-handoff-filter.ts) to match, so a plain
+// `bash` tool call closed that gate and the stale component leaked as an
+// untracked, blank chatContainer child. Note: a same-count assertion like
+// "AssistantMessageComponent count === tracked text-run segment count"
+// (used by RENDER-01/RENDER-02 above) does NOT catch this leak — the
+// reviewer's own repro showed both counts at 4 — because the leaked
+// component stays tracked in rs.renderedSegments under its stale
+// pre-drift startIndex (a "ghost" entry, not a truly untracked one).
+// This case instead asserts component identity continuity at the
+// drifted slot and the absence of the stale ghost entry.
+test("CR-01: non-MCP tool call — a growth delta that shifts a reclaimed text-run's startIndex reclaims the stale component rather than leaking it as a ghost entry", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	// Delta 1: thinking@0, text@1, toolCall@2 — a non-MCP tool ("bash"),
+	// so isMcpToolBlock is false and shouldPruneProvisionalPreToolProse
+	// stays false for the whole lifecycle below.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "CR01THINK considering the request" },
+		{ type: "text", text: "PROSEMARK working on it" },
+		{ type: "toolCall", id: "tool-cr01-1", name: "bash", arguments: { command: "echo hi" } },
+	]);
+
+	// Delta 2 (shrink, 2 < 3): drops the thinking block, introduces a new
+	// pre-tool prose text, keeps the same tool-call id — the primary shrink
+	// branch orphans everything, and the append loop's reclaim picks up the
+	// old PROSEMARK component for this new text at startIndex 0.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: "NEWPROSE after shrink" },
+		{ type: "toolCall", id: "tool-cr01-1", name: "bash", arguments: { command: "echo hi" } },
+	]);
+	const reclaimedAtDelta2 = rs.renderedSegments.find(
+		(s) => s.kind === "text-run" && s.contentType === "text",
+	)?.component;
+	assert.ok(reclaimedAtDelta2, "sanity: delta 2 must reclaim a text component at startIndex 0");
+
+	// Delta 3 (growth, 4 > 2, NOT a shrink): the thinking block reappears at
+	// index 0, shifting the live text segment's true desired slot from
+	// startIndex 0 to startIndex 1 — the exact drift CR-01 describes. A
+	// trailing ANSWERMARK text block (its own run, split by the tool call)
+	// is also introduced.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "thinking", thinking: "CR01THINK considering the request" },
+		{ type: "text", text: "PROSEMARK working on it" },
+		{ type: "toolCall", id: "tool-cr01-1", name: "bash", arguments: { command: "echo hi" } },
+		{ type: "text", text: "ANSWERMARK final answer" },
+	]);
+
+	// No stale ghost entry may remain pinned at the pre-drift startIndex 0
+	// under contentType "text" — desired no longer wants anything there
+	// (thinking now occupies startIndex 0).
+	assert.ok(
+		!rs.renderedSegments.some((s) => s.kind === "text-run" && s.contentType === "text" && s.startIndex === 0),
+		"CR-01: no stale ghost text-run entry may remain pinned at the pre-drift startIndex 0",
+	);
+
+	// The delta-2 reclaimed component must be reclaimed AGAIN for the
+	// drifted startIndex 1 slot — never left behind while a second,
+	// brand-new component is minted for the same logical content.
+	const textComponentAfterDelta3 = rs.renderedSegments.find(
+		(s) => s.kind === "text-run" && s.contentType === "text" && s.startIndex === 1,
+	)?.component;
+	assert.strictEqual(
+		textComponentAfterDelta3,
+		reclaimedAtDelta2,
+		"CR-01: the delta-2 reclaimed component must be reclaimed again for the drifted startIndex 1 slot, never leaked as a second stale component",
+	);
+
+	// Exactly two live "text" contentType text-run segments must exist
+	// (PROSEMARK's run at startIndex 1, ANSWERMARK's run at startIndex 3) —
+	// a third ("ghost") entry is the leak this finding targets.
+	const liveTextSegs = rs.renderedSegments.filter((s) => s.kind === "text-run" && s.contentType === "text");
+	assert.strictEqual(
+		liveTextSegs.length,
+		2,
+		`CR-01: expected exactly 2 live "text" contentType text-run segments, observed ${liveTextSegs.length}`,
+	);
+	assert.ok(
+		liveTextSegs.every((s) => (s.cachedText ?? "").length > 0),
+		"CR-01: no live text-run segment may carry blank cachedText — a blank ghost is the leak's own signature (getTextFromContentBlocks silently skips a mismatched block type)",
+	);
+
+	assert.strictEqual(rs.orphanedSegments.length, 0, "every displaced segment must be fully reconciled by this pass, not left dangling in rs.orphanedSegments");
+
+	const assistantComponentCount = chatContainer.children.filter((c) => c instanceof AssistantMessageComponent).length;
+	assert.strictEqual(
+		assistantComponentCount,
+		3,
+		`expected exactly 3 live AssistantMessageComponent children (thinking, PROSEMARK, ANSWERMARK), observed ${assistantComponentCount}`,
+	);
+
+	const scrollback = terminal.getScrollBuffer();
+	assert.strictEqual(countRowsContaining(scrollback, "PROSEMARK"), 1, "PROSEMARK must appear exactly once");
+	assert.strictEqual(countRowsContaining(scrollback, "ANSWERMARK"), 1, "ANSWERMARK must appear exactly once");
+
+	tui.stop();
+});
+
 // ── Phase 37 Plan 03, Task 1: D-03 verdict `no-separate-defect` (branch C) ──
 //
 // 37-01-SUMMARY.md's `## D-03 Diagnosis` section records VERDICT:

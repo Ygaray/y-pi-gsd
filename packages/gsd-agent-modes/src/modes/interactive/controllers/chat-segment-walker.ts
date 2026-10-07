@@ -257,39 +257,58 @@ export function runSegmentWalker(
 	}
 	desired = filterRedundantDiscussTextRuns(desired, blocks);
 
+	// CR-01 fix (37-REVIEW.md): generalized reconciliation that runs
+	// UNCONDITIONALLY on every pass — never gated behind
+	// shouldPruneProvisionalPreToolProse, which itself requires an MCP tool
+	// block (isMcpToolBlock in chat-handoff-filter.ts) and therefore never
+	// fires for a plain (non-MCP) tool call. Without this, a live text-run
+	// segment whose startIndex drifts out from under it on a subsequent
+	// GROWTH (non-shrink) delta — e.g. a reappearing leading `thinking`
+	// block pushing a previously-reclaimed text segment's true slot from
+	// startIndex 0 to startIndex 1 — was never re-validated against the
+	// freshly-computed `desired` set, so it survived as a dangling,
+	// untracked, blank AssistantMessageComponent in chatContainer (SC-2
+	// violation). Any live text-run whose (contentType, startIndex) key no
+	// longer appears in `desired` is demoted back into `rs.orphanedSegments`
+	// (stamped with the current `rs.shrinkGeneration`) rather than removed
+	// outright, so the append loop below (and, failing that,
+	// drainOrphanedSegments) can still reclaim or clean it up — never a
+	// destructive removeChild here, consistent with this phase's
+	// reclaim-over-remove design (P-01/P-02). Must run BEFORE the append
+	// loop so a displaced entry is reclaim-eligible for any desired segment
+	// processed later in this same pass.
+	const desiredTextKeys = new Set(
+		desired
+			.filter((seg): seg is Extract<typeof desired[number], { kind: "text-run" }> => seg.kind === "text-run")
+			.map((seg) => `${seg.contentType}:${seg.startIndex}`),
+	);
+	{
+		const stillLive: RenderedSegment[] = [];
+		for (const seg of rs.renderedSegments) {
+			if (seg.kind === "text-run" && !desiredTextKeys.has(`${seg.contentType}:${seg.startIndex}`)) {
+				rs.orphanedSegments.push({ ...seg, orphanedAtGeneration: rs.shrinkGeneration });
+				continue;
+			}
+			stillLive.push(seg);
+		}
+		rs.renderedSegments = stillLive;
+	}
+
 	// Claude Code MCP can emit provisional pre-tool prose that gets
-	// superseded by post-tool output. Prune stale text-run segments so
-	// the final assistant output remains below tool output.
+	// superseded by post-tool output. Layered ON TOP of the generalized
+	// reconciliation above (not the only gate): additionally drop stale
+	// tool bookkeeping entries whose contentIndex no longer appears in
+	// `desired` when an MCP tool call confirms supersession. This never
+	// touches text-run segments — those were already reclassified above.
 	if (shouldPruneProvisionalPreToolProse) {
-		const desiredTextKeys = new Set(
-			desired
-				.filter((seg): seg is Extract<typeof desired[number], { kind: "text-run" }> => seg.kind === "text-run")
-				.map((seg) => `${seg.contentType}:${seg.startIndex}`),
-		);
 		const desiredToolIndices = new Set(
 			desired
 				.filter((seg): seg is Extract<typeof desired[number], { kind: "tool" }> => seg.kind === "tool")
 				.map((seg) => seg.contentIndex),
 		);
-		const nextRendered: RenderedSegment[] = [];
-		for (const seg of rs.renderedSegments) {
-			if (
-				seg.kind === "text-run"
-				&& seg.contentType === "text"
-				&& !desiredTextKeys.has(`${seg.contentType}:${seg.startIndex}`)
-			) {
-				host.chatContainer.removeChild(seg.component);
-				if (host.streamingComponent === seg.component) {
-					host.streamingComponent = undefined;
-				}
-				continue;
-			}
-			if (seg.kind === "tool" && !desiredToolIndices.has(seg.contentIndex)) {
-				continue;
-			}
-			nextRendered.push(seg);
-		}
-		rs.renderedSegments = nextRendered;
+		rs.renderedSegments = rs.renderedSegments.filter(
+			(seg) => !(seg.kind === "tool" && !desiredToolIndices.has(seg.contentIndex)),
+		);
 	}
 
 	// Append any newly needed segments (never reorder existing ones).
