@@ -33,7 +33,6 @@
     "copy-assets": "node scripts/copy-assets.cjs"
   },
   "dependencies": {
-    "@gsd/agent-core": "workspace:*",
     "@gsd/native": "workspace:*",
     "@gsd/pi-agent-core": "workspace:*",
     "@gsd/pi-ai": "workspace:*",
