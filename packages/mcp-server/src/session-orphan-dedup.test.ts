@@ -678,6 +678,47 @@ describe('SessionManager.startSession() — concurrent same-projectDir race (CR-
 });
 
 // ---------------------------------------------------------------------------
+// IN-02 (39-REVIEW.md): the production (non-overridden)
+// SessionManager.invokeOrphanReconcile delegation. Every other test in this
+// file drives `TestableSessionManager`'s fake `invokeOrphanReconcile`
+// override — nothing exercises the REAL class's one-line delegation wired
+// through the real dynamic `importLocalModule` bridge-loading path, so a
+// wiring regression (wrong relative import path, wrong export name in
+// mcp-bridge.ts, or a WR-03-style collision regression that turned the
+// delegation into unbounded recursion) would only surface in production.
+// ---------------------------------------------------------------------------
+
+describe('SessionManager.invokeOrphanReconcile — production delegation wiring (IN-02, 39-REVIEW.md)', () => {
+  it('the real (non-overridden) class seam reaches the real reconcileOrphanAttempt import and returns, rather than recursing or throwing', async () => {
+    const sm = new SessionManager();
+    const entry: SessionRegistryEntry = {
+      sessionId: 'smoke-test-session',
+      projectDir: tmp,
+      pid: 999999,
+      startTime: new Date().toISOString(),
+      status: 'running',
+    };
+
+    // `tmp` is a real, empty temp directory with no `.gsd` database, so the
+    // REAL reconcileOrphanAttempt is expected to report 'db-unavailable'.
+    // The point of this test is not the specific outcome but that calling
+    // through the real (un-overridden) class seam actually RETURNS that
+    // outcome promptly -- proving the delegation reached the real
+    // orphan-reconcile.ts implementation rather than recursing forever
+    // (the exact bug WR-03 closed) or throwing past the "must never
+    // reject" contract documented on reconcileOrphanAttempt.
+    const invokeOrphanReconcile = (
+      sm as unknown as {
+        invokeOrphanReconcile: (e: SessionRegistryEntry, d: string) => Promise<OrphanReconcileResult>;
+      }
+    ).invokeOrphanReconcile.bind(sm);
+
+    const result = await invokeOrphanReconcile(entry, tmp);
+    assert.equal(result, 'db-unavailable');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // orphan-reconcile.ts — reconcileOrphanAttempt, exercised directly against a
 // hand-built fake bridge (D-04: no real SQLite file anywhere in this suite).
 // Covers Task 2's non-settled-outcome test map: a rejecting bridge load, a
