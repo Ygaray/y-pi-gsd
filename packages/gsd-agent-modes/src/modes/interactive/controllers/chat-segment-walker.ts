@@ -164,6 +164,74 @@ function reclaimOrphanedTextRun(
 	return undefined;
 }
 
+/**
+ * Drains `rs.orphanedSegments`, unconditionally on every walker pass — no
+ * longer gated on `shouldPruneProvisionalPreToolProse` (D-02, SC-2). A pure
+ * thinking/text turn with no tool call anywhere was the RENDER-01 leak this
+ * closes: `shouldPruneProvisionalPreToolProse` is permanently `false` for
+ * such a turn (`firstToolIdx === -1`), so the old gated-only drain never ran
+ * and an unreclaimed orphan stayed a live, untracked child of
+ * `chatContainer` forever.
+ *
+ * Removal requires EITHER of two disjoint conditions — never content pattern
+ * alone (Pitfall 10's exact warning):
+ *
+ * - Condition A (superseded-slot): a LIVE `rs.renderedSegments` entry of the
+ *   same `contentType` was created/reclaimed at a strictly later generation
+ *   than this orphan was displaced. This is a pure non-content identity
+ *   signal — no text is inspected — and is what actually closes SC-2: a
+ *   newer component provably occupies the same logical content slot, so the
+ *   orphan is a stale duplicate.
+ * - Condition B (provisional-prose): the orphan's cached text matches
+ *   `isProvisionalPreToolProse` AND at least one later shrink has occurred
+ *   since this orphan was displaced (`orphanedAtGeneration < rs.shrinkGeneration`).
+ *   The generational clause is the whole of Pitfall 10's protection — without
+ *   it, a legitimate final answer that merely resembles provisional phrasing
+ *   and was JUST orphaned by the shrink currently in flight would be eaten on
+ *   the very same pass it was displaced, before it ever had a chance to
+ *   regrow. Content pattern alone is never sufficient (P-01): deleting either
+ *   clause reintroduces a real failure mode this gate exists to prevent — do
+ *   not simplify this to a single condition believing the other redundant.
+ *
+ * A missing `orphanedAtGeneration` or `createdAtGeneration` never satisfies
+ * either condition — absence of evidence must never authorise a removal
+ * (P-01). Anything matching neither condition is pushed back, never dropped.
+ * Only `kind: "text-run"` orphans are considered — `kind: "tool"` cleanup is
+ * plan 37-03's scope, gated on the D-03 verdict recorded in 37-01-SUMMARY.
+ */
+function drainOrphanedSegments(host: ChatStreamHost, rs: StreamingRenderState): void {
+	if (rs.orphanedSegments.length === 0) return;
+	const remainingOrphans: RenderedSegment[] = [];
+	for (const orphan of rs.orphanedSegments) {
+		if (orphan.kind !== "text-run") {
+			remainingOrphans.push(orphan);
+			continue;
+		}
+		const supersededBySlot = rs.renderedSegments.some(
+			(live) =>
+				live.kind === "text-run"
+				&& live.contentType === orphan.contentType
+				&& live.createdAtGeneration !== undefined
+				&& orphan.orphanedAtGeneration !== undefined
+				&& live.createdAtGeneration > orphan.orphanedAtGeneration,
+		);
+		const supersededByProvisionalProse =
+			orphan.contentType === "text"
+			&& isProvisionalPreToolProse(orphan.cachedText ?? "")
+			&& orphan.orphanedAtGeneration !== undefined
+			&& orphan.orphanedAtGeneration < rs.shrinkGeneration;
+		if (supersededBySlot || supersededByProvisionalProse) {
+			host.chatContainer.removeChild(orphan.component);
+			if (host.streamingComponent === orphan.component) {
+				host.streamingComponent = undefined;
+			}
+			continue;
+		}
+		remainingOrphans.push(orphan);
+	}
+	rs.orphanedSegments = remainingOrphans;
+}
+
 export function runSegmentWalker(
 	host: ChatStreamHost,
 	rs: StreamingRenderState,
@@ -193,24 +261,6 @@ export function runSegmentWalker(
 	// superseded by post-tool output. Prune stale text-run segments so
 	// the final assistant output remains below tool output.
 	if (shouldPruneProvisionalPreToolProse) {
-		if (rs.orphanedSegments.length > 0) {
-			const remainingOrphans: RenderedSegment[] = [];
-			for (const orphan of rs.orphanedSegments) {
-				if (
-					orphan.kind === "text-run"
-					&& orphan.contentType === "text"
-					&& isProvisionalPreToolProse(orphan.cachedText ?? "")
-				) {
-					host.chatContainer.removeChild(orphan.component);
-					if (host.streamingComponent === orphan.component) {
-						host.streamingComponent = undefined;
-					}
-					continue;
-				}
-				remainingOrphans.push(orphan);
-			}
-			rs.orphanedSegments = remainingOrphans;
-		}
 		const desiredTextKeys = new Set(
 			desired
 				.filter((seg): seg is Extract<typeof desired[number], { kind: "text-run" }> => seg.kind === "text-run")
@@ -321,6 +371,13 @@ export function runSegmentWalker(
 			}
 		}
 	}
+
+	// D-02/SC-2: drain whatever remains in rs.orphanedSegments unconditionally
+	// — every walker pass, not gated on shouldPruneProvisionalPreToolProse —
+	// now that the reclaim pass above has already pulled every matchable
+	// orphan back out. See drainOrphanedSegments' own doc comment for the
+	// two-condition removal gate.
+	drainOrphanedSegments(host, rs);
 
 	// Update all trailing text-run segments with the latest message so
 	// streaming text grows in place.

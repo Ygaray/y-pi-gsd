@@ -442,6 +442,108 @@ test("RENDER-02 SC-5: mixed-stream thinking+text+tool-call+tool-result survives 
 	tui.stop();
 });
 
+// ── Phase 37 Plan 02, Task 3: unconditional generation-gated drain (D-02, SC-2) ──
+//
+// These tests construct rs.orphanedSegments/rs.renderedSegments directly
+// (rather than deriving them purely through multi-delta shrink/regrow
+// arithmetic) so each case pins ONE specific drain behavior precisely —
+// runSegmentWalker and the drain helper it calls are the real production
+// code under test; only the setup is synthetic.
+
+test("D-02 Test 1 (SC-2): a pure thinking/text turn leaves zero orphaned components live — a generationally-superseded orphan is drained", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+	host.streamingMessage.content = [
+		{ type: "thinking", thinking: "MIDTHINK content" },
+		{ type: "text", text: "GAMMA NEW content" },
+	];
+
+	// A stale text orphan from an earlier shrink (generation 1) that was never
+	// reclaimed because the pass that reclaimed the sibling thinking orphan had
+	// no text desired segment that round.
+	const orphanComponent = new AssistantMessageComponent(
+		undefined,
+		host.hideThinkingBlock,
+		host.getMarkdownThemeWithSettings(),
+		"date-time-iso",
+		{ startIndex: 0, endIndex: 0 },
+	);
+	host.chatContainer.addChild(orphanComponent);
+	rs.orphanedSegments = [
+		{
+			kind: "text-run",
+			startIndex: 0,
+			endIndex: 0,
+			contentType: "text",
+			component: orphanComponent,
+			cachedText: "ALPHA stale content",
+			cachedTextLength: 19,
+			orphanedAtGeneration: 1,
+		},
+	];
+
+	// The current live turn: a thinking segment and a text segment, both
+	// reclaimed/minted at a LATER generation (2) than the stale orphan above.
+	const thinkingComponent = new AssistantMessageComponent(
+		undefined,
+		host.hideThinkingBlock,
+		host.getMarkdownThemeWithSettings(),
+		"date-time-iso",
+		{ startIndex: 0, endIndex: 0 },
+	);
+	host.chatContainer.addChild(thinkingComponent);
+	const textComponent = new AssistantMessageComponent(
+		undefined,
+		host.hideThinkingBlock,
+		host.getMarkdownThemeWithSettings(),
+		"date-time-iso",
+		{ startIndex: 1, endIndex: 1 },
+	);
+	host.chatContainer.addChild(textComponent);
+	rs.renderedSegments = [
+		{
+			kind: "text-run",
+			startIndex: 0,
+			endIndex: 0,
+			contentType: "thinking",
+			component: thinkingComponent,
+			cachedText: "MIDTHINK content",
+			cachedTextLength: 17,
+			createdAtGeneration: 2,
+		},
+		{
+			kind: "text-run",
+			startIndex: 1,
+			endIndex: 1,
+			contentType: "text",
+			component: textComponent,
+			cachedText: "GAMMA NEW content",
+			cachedTextLength: 18,
+			createdAtGeneration: 2,
+		},
+	];
+	rs.lastContentLength = 2;
+	rs.shrinkGeneration = 2;
+
+	runSegmentWalker(host as any, rs, "date-time-iso");
+
+	assert.strictEqual(
+		rs.orphanedSegments.length,
+		0,
+		"Condition A (superseded-slot) must drain the stale text orphan — a live text-run of the same contentType exists at a strictly later generation",
+	);
+	const assistantComponentCount = chatContainer.children.filter((c) => c instanceof AssistantMessageComponent).length;
+	const textRunSegmentCount = rs.renderedSegments.filter((s) => s.kind === "text-run").length;
+	assert.strictEqual(
+		assistantComponentCount,
+		textRunSegmentCount,
+		"zero orphaned components must remain live in chatContainer — count must equal tracked text-run segments (SC-2)",
+	);
+
+	tui.stop();
+});
+
 // ── Task 3: D-02 Pitfall-10 non-regression ────────────────────────────
 //
 // This case must be green BOTH at this plan's HEAD and after plan 37-02's
@@ -489,6 +591,148 @@ test("D-02 Pitfall-10 non-regression: a provisional-sounding final answer is nev
 		keepCount,
 		1,
 		`KEEPMARK must appear exactly once — neither dropped (Pitfall-10) nor duplicated (RENDER-01), observed ${keepCount}`,
+	);
+
+	tui.stop();
+});
+
+test("D-02 Test 3 (P-01): an orphan neither superseded nor provisional-matching is retained, never dropped", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+	host.streamingMessage.content = [];
+
+	const orphanComponent = new AssistantMessageComponent(
+		undefined,
+		host.hideThinkingBlock,
+		host.getMarkdownThemeWithSettings(),
+		"date-time-iso",
+		{ startIndex: 0, endIndex: 0 },
+	);
+	host.chatContainer.addChild(orphanComponent);
+	const plainText = "plain content, nothing special here, no supersession, no provisional pattern";
+	assert.ok(!isProvisionalPreToolProse(plainText), "sanity: fixture text must NOT match isProvisionalPreToolProse");
+	const orphanSeg = {
+		kind: "text-run" as const,
+		startIndex: 0,
+		endIndex: 0,
+		contentType: "text" as const,
+		component: orphanComponent,
+		cachedText: plainText,
+		cachedTextLength: plainText.length,
+		orphanedAtGeneration: 1,
+	};
+	rs.orphanedSegments = [orphanSeg];
+	rs.shrinkGeneration = 1;
+
+	runSegmentWalker(host as any, rs, "date-time-iso");
+
+	assert.strictEqual(rs.orphanedSegments.length, 1, "an orphan matching neither condition must be retained, never dropped (P-01)");
+	assert.strictEqual(rs.orphanedSegments[0], orphanSeg, "the retained entry must be the same object, untouched");
+	assert.ok(chatContainer.children.includes(orphanComponent), "the orphan's component must remain a live child of chatContainer");
+
+	tui.stop();
+});
+
+test("D-02 Test 4: an empty rs.orphanedSegments makes the drain a no-op, not a throw", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+	host.streamingMessage.content = [{ type: "text", text: "SOLO content" }];
+
+	assert.strictEqual(rs.orphanedSegments.length, 0, "sanity: no orphans exist before this pass");
+
+	assert.doesNotThrow(() => {
+		runSegmentWalker(host as any, rs, "date-time-iso");
+	});
+
+	assert.strictEqual(rs.orphanedSegments.length, 0);
+
+	tui.stop();
+});
+
+test("D-02 Test 5: removing a drained orphan clears host.streamingComponent when it pointed at that component", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+	host.streamingMessage.content = [];
+
+	const orphanComponent = new AssistantMessageComponent(
+		undefined,
+		host.hideThinkingBlock,
+		host.getMarkdownThemeWithSettings(),
+		"date-time-iso",
+		{ startIndex: 0, endIndex: 0 },
+	);
+	host.chatContainer.addChild(orphanComponent);
+	const provisionalText = "Let me check the stale settings one more time before finishing.";
+	assert.ok(isProvisionalPreToolProse(provisionalText), "sanity: fixture text must genuinely match isProvisionalPreToolProse");
+	rs.orphanedSegments = [
+		{
+			kind: "text-run",
+			startIndex: 0,
+			endIndex: 0,
+			contentType: "text",
+			component: orphanComponent,
+			cachedText: provisionalText,
+			cachedTextLength: provisionalText.length,
+			orphanedAtGeneration: 1,
+		},
+	];
+	(host as any).streamingComponent = orphanComponent;
+	// A later shrink has occurred since this orphan was displaced — Condition
+	// B's generational clause (the whole of Pitfall-10's protection).
+	rs.shrinkGeneration = 2;
+
+	runSegmentWalker(host as any, rs, "date-time-iso");
+
+	assert.strictEqual(
+		rs.orphanedSegments.length,
+		0,
+		"sanity: Condition B (provisional-prose + a later shrink has occurred) must have drained the orphan",
+	);
+	assert.strictEqual(
+		(host as any).streamingComponent,
+		undefined,
+		"host.streamingComponent must be cleared when the component it names is removed",
+	);
+	assert.ok(!chatContainer.children.includes(orphanComponent), "the removed orphan's component must no longer be a child of chatContainer");
+
+	tui.stop();
+});
+
+test("D-02 Test 6: a turn WITH an MCP tool call still prunes provisional pre-tool prose (no regression)", async () => {
+	const { terminal, tui, chatContainer } = mountVirtualTranscript();
+	const rs = createStreamingRenderState();
+	const host = makeRenderHost(chatContainer, tui, rs);
+
+	const provisionalText = "Let me check the STALEMARK settings before running the tool.";
+	assert.ok(isProvisionalPreToolProse(provisionalText), "sanity: fixture text must genuinely match isProvisionalPreToolProse");
+
+	// Delta 1: the provisional text alone, before any tool call exists —
+	// firstToolIdx is -1, shouldPrune is false, so it renders normally.
+	await driveDelta(host, rs, tui, terminal, [{ type: "text", text: provisionalText }]);
+
+	// Delta 2: the SAME provisional text, now followed by a real MCP tool call
+	// and post-tool text — shouldPruneProvisionalPreToolProse becomes true, and
+	// the original (unchanged-by-this-plan) rendered-segment prune block must
+	// still remove the now-superseded provisional segment.
+	await driveDelta(host, rs, tui, terminal, [
+		{ type: "text", text: provisionalText },
+		{ type: "toolCall", id: "tool-drain-6", name: "mcp__bash", arguments: { command: "echo hi" } },
+		{ type: "text", text: "FINALMARK the real answer" },
+	]);
+
+	const scrollback = terminal.getScrollBuffer();
+	assert.strictEqual(
+		countRowsContaining(scrollback, "STALEMARK"),
+		0,
+		"the provisional pre-tool prose must still be pruned when a real MCP tool call confirms supersession",
+	);
+	assert.strictEqual(
+		countRowsContaining(scrollback, "FINALMARK"),
+		1,
+		"the real final answer must still render exactly once",
 	);
 
 	tui.stop();
