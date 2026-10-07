@@ -86,6 +86,7 @@ import { AUTO_UNIT_SCOPED_TOOLS, RUN_UAT_BROWSER_TOOL_NAMES, canonicalWorkflowTo
 import { hasBrowserContractPrefix } from "../../shared/browser-contract.js";
 import { filterToolsForProvider } from "../model-router.js";
 import { mcpToolMatchesBaseName } from "../mcp-tool-name.js";
+import { excludeDriverPlaneTools, isFullGsdToolSurfaceRequested, resolveFallbackToolSetAdjustment } from "../driver-plane-tools.js";
 import { RUN_UAT_READ_ONLY_TOOL_NAMES, RUN_UAT_WORKFLOW_TOOL_NAMES } from "../tool-presentation-plan.js";
 import { supportsSourceObservationsForUnit } from "../source-observations.js";
 import { clearPendingAutoStart } from "../pending-auto-start.js";
@@ -324,7 +325,7 @@ function resolveScopedToolNames(
 export function buildMinimalGsdToolSet(activeToolNames: readonly string[]): string[] {
   const preserved = activeToolNames.filter((name) => !isGsdManagedTool(name));
   const minimal = resolveScopedToolNames(activeToolNames, MINIMAL_GSD_TOOL_NAMES);
-  return withPreservedShimTools([...new Set([...preserved, ...minimal])]);
+  return excludeDriverPlaneTools(withPreservedShimTools([...new Set([...preserved, ...minimal])]));
 }
 
 export function buildMinimalAutoGsdToolSet(
@@ -347,7 +348,7 @@ export function buildMinimalAutoGsdToolSet(
     [...activeToolNames, ...registeredToolNames],
     [...MINIMAL_GSD_TOOL_NAMES, ...unitTools],
   );
-  const result = withPreservedShimTools([...new Set([...preserved, ...scoped])]);
+  const result = excludeDriverPlaneTools(withPreservedShimTools([...new Set([...preserved, ...scoped])]));
   warnIfRequiredWorkflowToolsUnresolved(unitType, result, warnOnUnresolvedRequiredTools);
   return result;
 }
@@ -404,7 +405,7 @@ export function buildRunUatGsdToolSet(
     );
   }
 
-  return resolved;
+  return excludeDriverPlaneTools(resolved);
 }
 
 export function buildMinimalGsdWorkflowToolSet(
@@ -421,7 +422,7 @@ export function buildMinimalGsdWorkflowToolSet(
     [...activeToolNames, ...registeredToolNames],
     WORKFLOW_GSD_TOOL_NAMES,
   );
-  return withPreservedShimTools([...new Set([...preserved, ...scoped])]);
+  return excludeDriverPlaneTools(withPreservedShimTools([...new Set([...preserved, ...scoped])]));
 }
 
 export function buildRequestScopedGsdToolSet(
@@ -453,9 +454,7 @@ export function buildRequestScopedGsdToolSet(
   return undefined;
 }
 
-export function isFullGsdToolSurfaceRequested(): boolean {
-  return process.env.PI_GSD_FULL_TOOLS === "1";
-}
+export { isFullGsdToolSurfaceRequested } from "../driver-plane-tools.js";
 
 function isGeneralGsdToolScopingRequested(): boolean {
   return process.env.PI_GSD_MINIMAL_TOOLS === "1";
@@ -2327,6 +2326,6 @@ export function registerHooks(
     if (!requestHasGsdCustomType(event.requestCustomMessages)) {
       return { toolNames: buildMinimalGsdToolSet(providerCompatible) };
     }
-    return surfaceReduced ? { toolNames: providerCompatible } : undefined;
+    return resolveFallbackToolSetAdjustment(providerCompatible, surfaceReduced);
   });
 }

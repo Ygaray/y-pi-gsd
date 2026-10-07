@@ -2,15 +2,29 @@
 // File Purpose: Tests for opt-in GSD tool surface reduction.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { registerToolCompatibility } from "@gsd/pi-coding-agent";
 
 import { DISCUSS_TOOLS_ALLOWLIST } from "../constants.ts";
-import { buildMinimalAutoGsdToolSet, buildMinimalGsdToolSet, buildMinimalGsdWorkflowToolSet, buildRequestScopedGsdToolSet, MINIMAL_AUTO_BASE_TOOL_NAMES, MINIMAL_GSD_TOOL_NAMES, requestHasGsdCustomType, restoreGsdWorkflowTools, scopeGsdWorkflowToolsForDispatch } from "../bootstrap/register-hooks.ts";
+import { buildMinimalAutoGsdToolSet, buildMinimalGsdToolSet, buildMinimalGsdWorkflowToolSet, buildRequestScopedGsdToolSet, buildRunUatGsdToolSet, MINIMAL_AUTO_BASE_TOOL_NAMES, MINIMAL_GSD_TOOL_NAMES, requestHasGsdCustomType, restoreGsdWorkflowTools, scopeGsdWorkflowToolsForDispatch } from "../bootstrap/register-hooks.ts";
+import * as registerHooks from "../bootstrap/register-hooks.ts";
+import { DRIVER_PLANE_TOOL_NAMES, excludeDriverPlaneTools, isDriverPlaneToolName, resolveFallbackToolSetAdjustment } from "../driver-plane-tools.ts";
 import { filterToolsForProvider } from "../model-router.ts";
 import { applyUnitSkillVisibility } from "../skill-scope.ts";
 import { drainLogs } from "../workflow-logger.ts";
+
+// Source-text check for register-hooks.ts, used by wiring-gate tests below —
+// there is no test seam for internal call-site wiring, so reading the file's
+// text is the durable substitute (mirrors the Task 3 source wiring gate).
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REGISTER_HOOKS_PATH = join(__dirname, "..", "bootstrap", "register-hooks.ts");
+function readRegisterHooksSource(): string {
+  return readFileSync(REGISTER_HOOKS_PATH, "utf-8");
+}
 
 test("buildMinimalGsdToolSet preserves non-GSD tools and replaces broad GSD surface", () => {
   const result = buildMinimalGsdToolSet([
@@ -755,4 +769,387 @@ test("applyUnitSkillVisibility sets manifest or clears for wildcard", () => {
     },
   }, "execute-task");
   assert.equal(calls[1], undefined);
+});
+
+// ── SURF-01: the interactive agent's advertised tool surface must never
+// include the 6 external-driver-plane MCP tools (gsd_execute, gsd_status,
+// gsd_result, gsd_cancel, gsd_query, gsd_resolve_blocker). See 36-CONTEXT.md
+// D-01..D-04 and driver-plane-tools.ts. ──
+
+test("DRIVER_PLANE_TOOL_NAMES is the hand-picked 6-entry roster from mcp-server/src/server.ts (SURF-01 D-01)", () => {
+  assert.equal(DRIVER_PLANE_TOOL_NAMES.length, 6);
+  assert.deepEqual([...DRIVER_PLANE_TOOL_NAMES], [
+    "gsd_execute",
+    "gsd_status",
+    "gsd_result",
+    "gsd_cancel",
+    "gsd_query",
+    "gsd_resolve_blocker",
+  ]);
+});
+
+test("excludeDriverPlaneTools drops the 6 driver-plane tools and keeps gsd_exec (SURF-01 D-01/D-02)", () => {
+  const fixture = [
+    ...DRIVER_PLANE_TOOL_NAMES.map((name) => `mcp__gsd-workflow__${name}`),
+    "bash",
+    "read",
+    "gsd_exec",
+    "gsd_exec_search",
+    "mcp__gsd-workflow__gsd_exec",
+  ];
+  const result = excludeDriverPlaneTools(fixture);
+
+  for (const name of DRIVER_PLANE_TOOL_NAMES) {
+    assert.ok(!result.includes(`mcp__gsd-workflow__${name}`), `expected mcp__gsd-workflow__${name} to be excluded`);
+  }
+  assert.ok(result.includes("bash"));
+  assert.ok(result.includes("read"));
+  assert.ok(result.includes("gsd_exec"));
+  assert.ok(result.includes("gsd_exec_search"));
+  assert.ok(result.includes("mcp__gsd-workflow__gsd_exec"));
+});
+
+test("buildMinimalGsdToolSet excludes driver-plane tools on an idle/menu turn (SC-1)", () => {
+  const fixture = [
+    "bash",
+    "read",
+    ...DRIVER_PLANE_TOOL_NAMES.map((name) => `mcp__gsd-workflow__${name}`),
+    "gsd_exec",
+    "gsd_exec_search",
+    "mcp__gsd-workflow__gsd_exec",
+  ];
+  const result = buildMinimalGsdToolSet(fixture);
+
+  for (const name of DRIVER_PLANE_TOOL_NAMES) {
+    assert.ok(!result.includes(`mcp__gsd-workflow__${name}`), `expected mcp__gsd-workflow__${name} to be excluded`);
+  }
+  assert.ok(result.includes("bash"));
+  assert.ok(result.includes("read"));
+  assert.ok(result.includes("gsd_exec"));
+  assert.ok(result.includes("gsd_exec_search"));
+  assert.ok(result.includes("mcp__gsd-workflow__gsd_exec"));
+});
+
+test("excludeDriverPlaneTools match matrix: exact canonical base name only, no substring/case/whitespace match", () => {
+  const excluded = ["gsd_execute", "mcp__gsd-workflow__gsd_execute", "mcp__some-other-server__gsd_execute"];
+  const kept = [
+    "gsd_exec",
+    "gsd_exec_search",
+    "gsd_executor",
+    "gsd_execute_plan",
+    "my_gsd_execute",
+    "GSD_EXECUTE",
+    "gsd_execute ",
+    "mcp____gsd_execute",
+    "mcp__a__mcp__b__gsd_execute",
+  ];
+
+  for (const name of excluded) {
+    assert.equal(isDriverPlaneToolName(name), true, `expected ${name} to be excluded`);
+  }
+  for (const name of kept) {
+    assert.equal(isDriverPlaneToolName(name), false, `expected ${name} to survive`);
+  }
+
+  assert.deepEqual(excludeDriverPlaneTools([...excluded, ...kept]), kept);
+});
+
+test("excludeDriverPlaneTools edge contract: empty, single-element, order-preserving, idempotent, non-mutating", () => {
+  assert.deepEqual(excludeDriverPlaneTools([]), []);
+  assert.deepEqual(excludeDriverPlaneTools(["mcp__gsd-workflow__gsd_cancel"]), []);
+  assert.deepEqual(excludeDriverPlaneTools(["bash"]), ["bash"]);
+
+  const mixed = [
+    "bash",
+    "mcp__gsd-workflow__gsd_execute",
+    "read",
+    "mcp__gsd-workflow__gsd_status",
+    "gsd_exec",
+  ];
+  const mixedCopy = [...mixed];
+  const result = excludeDriverPlaneTools(mixed);
+
+  assert.deepEqual(result, ["bash", "read", "gsd_exec"]);
+  assert.equal(new Set(result).size, result.length);
+  assert.deepEqual(mixed, mixedCopy);
+
+  const twice = excludeDriverPlaneTools(result);
+  assert.deepEqual(twice, result);
+});
+
+test("excludeDriverPlaneTools returns its input unchanged under PI_GSD_FULL_TOOLS=1 (D-04)", () => {
+  const fixture = [
+    "bash",
+    ...DRIVER_PLANE_TOOL_NAMES.map((name) => `mcp__gsd-workflow__${name}`),
+    "gsd_exec",
+  ];
+
+  process.env.PI_GSD_FULL_TOOLS = "1";
+  try {
+    assert.deepEqual(excludeDriverPlaneTools(fixture), fixture);
+  } finally {
+    delete process.env.PI_GSD_FULL_TOOLS;
+  }
+});
+
+test("excludeDriverPlaneTools preserves every non-driver-plane adapter tool (over-filter regression)", () => {
+  const nonDriverAdapterTools = [
+    "gsd_doctor",
+    "ask_user_questions",
+    "gsd_roadmap",
+    "gsd_progress",
+    "gsd_history",
+    "gsd_knowledge",
+    "gsd_captures",
+    "gsd_graph",
+  ];
+
+  for (const prefix of ["", "mcp__gsd-workflow__"]) {
+    const fixture = [
+      ...nonDriverAdapterTools.map((name) => `${prefix}${name}`),
+      ...DRIVER_PLANE_TOOL_NAMES.map((name) => `${prefix}${name}`),
+    ];
+    const result = excludeDriverPlaneTools(fixture);
+
+    for (const name of nonDriverAdapterTools) {
+      assert.ok(result.includes(`${prefix}${name}`), `expected ${prefix}${name} to survive`);
+    }
+    for (const name of DRIVER_PLANE_TOOL_NAMES) {
+      assert.ok(!result.includes(`${prefix}${name}`), `expected ${prefix}${name} to be excluded`);
+    }
+  }
+});
+
+// ── SURF-01 Task 2: every dispatched-unit tool-set path subtracts the
+// driver plane too (D-03), while each unit's own required tools survive. ──
+
+const SEEDED_DRIVER_PLANE_NAMES = DRIVER_PLANE_TOOL_NAMES.map((name) => `mcp__gsd-workflow__${name}`);
+
+test("buildMinimalAutoGsdToolSet excludes driver-plane tools for execute-task while keeping unit tools (SC-3)", () => {
+  const active = [
+    "ask_user_questions",
+    "bash",
+    "read",
+    "gsd_task_complete",
+    "gsd_task_recovery_resume",
+    "memory_query",
+    ...SEEDED_DRIVER_PLANE_NAMES,
+  ];
+  const registered = [...active];
+  const result = buildMinimalAutoGsdToolSet(active, "execute-task", registered);
+
+  for (const name of SEEDED_DRIVER_PLANE_NAMES) {
+    assert.ok(!result.includes(name), `expected ${name} to be excluded`);
+  }
+  assert.ok(result.includes("gsd_task_complete"));
+  assert.ok(result.includes("gsd_task_recovery_resume"));
+  assert.ok(result.includes("ask_user_questions"));
+  assert.ok(result.includes("bash"));
+  assert.ok(result.includes("read"));
+  assert.ok(result.includes("memory_query"));
+});
+
+test("buildMinimalAutoGsdToolSet excludes driver-plane tools for the run-uat early-return path (SC-3)", () => {
+  const active = [
+    "read",
+    "gsd_uat_exec",
+    "gsd_uat_result_save",
+    "gsd_resume",
+    "gsd_milestone_status",
+    "gsd_journal_query",
+    ...SEEDED_DRIVER_PLANE_NAMES,
+  ];
+  const registered = [...active];
+  const result = buildMinimalAutoGsdToolSet(active, "run-uat", registered);
+
+  for (const name of SEEDED_DRIVER_PLANE_NAMES) {
+    assert.ok(!result.includes(name), `expected ${name} to be excluded`);
+  }
+  assert.ok(result.includes("gsd_uat_exec"));
+  assert.ok(result.includes("gsd_uat_result_save"));
+});
+
+test("buildRunUatGsdToolSet excludes driver-plane tools while keeping run-uat workflow tools (SC-3)", () => {
+  const active = [
+    "read",
+    "gsd_uat_exec",
+    "gsd_uat_result_save",
+    "gsd_resume",
+    "gsd_milestone_status",
+    "gsd_journal_query",
+    ...SEEDED_DRIVER_PLANE_NAMES,
+  ];
+  const registered = [...active];
+  const result = buildRunUatGsdToolSet(active, registered);
+
+  for (const name of SEEDED_DRIVER_PLANE_NAMES) {
+    assert.ok(!result.includes(name), `expected ${name} to be excluded`);
+  }
+  assert.ok(result.includes("gsd_uat_exec"));
+  assert.ok(result.includes("gsd_uat_result_save"));
+  assert.ok(result.includes("gsd_resume"));
+  assert.ok(result.includes("gsd_milestone_status"));
+  assert.ok(result.includes("gsd_journal_query"));
+});
+
+test("buildMinimalGsdWorkflowToolSet excludes driver-plane tools while keeping base tools (SC-3)", () => {
+  const active = [
+    "bash",
+    "read",
+    "gsd_plan_milestone",
+    "gsd_task_complete",
+    ...SEEDED_DRIVER_PLANE_NAMES,
+  ];
+  const registered = [...active];
+  const result = buildMinimalGsdWorkflowToolSet(active, registered);
+
+  for (const name of SEEDED_DRIVER_PLANE_NAMES) {
+    assert.ok(!result.includes(name), `expected ${name} to be excluded`);
+  }
+  assert.ok(result.includes("bash"));
+  assert.ok(result.includes("read"));
+  assert.ok(result.includes("gsd_plan_milestone"));
+});
+
+test("buildRequestScopedGsdToolSet excludes driver-plane tools for a gsd-run customType (SC-3)", () => {
+  const active = [
+    "bash",
+    "read",
+    "gsd_plan_milestone",
+    ...SEEDED_DRIVER_PLANE_NAMES,
+  ];
+  const registered = [...active];
+  const result = buildRequestScopedGsdToolSet(active, [{ customType: "gsd-run" }], registered);
+
+  assert.ok(result);
+  for (const name of SEEDED_DRIVER_PLANE_NAMES) {
+    assert.ok(!result!.includes(name), `expected ${name} to be excluded`);
+  }
+});
+
+test("buildMinimalAutoGsdToolSet, buildRunUatGsdToolSet, and buildMinimalGsdWorkflowToolSet route their returns through excludeDriverPlaneTools (source wiring gate, D-03)", () => {
+  // Behavioral fixtures alone cannot distinguish "wired" from "unwired" here:
+  // RESEARCH.md confirmed by grep that unit-tool-contracts.ts and
+  // unit-registry.ts contain zero references to any of the 6 driver-plane
+  // tool names, so these three allowlist-based builders never happen to
+  // pull one in regardless of wiring. The source-text check is the durable
+  // substitute that actually proves D-03's call-site requirement.
+  const source = readRegisterHooksSource();
+
+  const autoStart = source.indexOf("export function buildMinimalAutoGsdToolSet(");
+  const runUatStart = source.indexOf("export function buildRunUatGsdToolSet(");
+  const workflowStart = source.indexOf("export function buildMinimalGsdWorkflowToolSet(");
+  const requestScopedStart = source.indexOf("export function buildRequestScopedGsdToolSet(");
+
+  assert.ok(autoStart !== -1, "buildMinimalAutoGsdToolSet not found in register-hooks.ts");
+  assert.ok(runUatStart !== -1, "buildRunUatGsdToolSet not found in register-hooks.ts");
+  assert.ok(workflowStart !== -1, "buildMinimalGsdWorkflowToolSet not found in register-hooks.ts");
+  assert.ok(requestScopedStart !== -1, "buildRequestScopedGsdToolSet not found in register-hooks.ts");
+
+  const autoBody = source.slice(autoStart, runUatStart);
+  const runUatBody = source.slice(runUatStart, workflowStart);
+  const workflowBody = source.slice(workflowStart, requestScopedStart);
+
+  assert.ok(
+    autoBody.includes("excludeDriverPlaneTools("),
+    "buildMinimalAutoGsdToolSet must route its return through excludeDriverPlaneTools",
+  );
+  assert.ok(
+    runUatBody.includes("excludeDriverPlaneTools("),
+    "buildRunUatGsdToolSet must route its return through excludeDriverPlaneTools",
+  );
+  assert.ok(
+    workflowBody.includes("excludeDriverPlaneTools("),
+    "buildMinimalGsdWorkflowToolSet must route its return through excludeDriverPlaneTools",
+  );
+});
+
+test("buildMinimalAutoGsdToolSet does not warn about driver-plane tools when only driver-plane names are seeded", () => {
+  drainLogs();
+  buildMinimalAutoGsdToolSet(
+    [...SEEDED_DRIVER_PLANE_NAMES, "bash", "read"],
+    "execute-task",
+    [...SEEDED_DRIVER_PLANE_NAMES, "bash", "read"],
+  );
+  const logs = drainLogs();
+
+  assert.ok(
+    !logs.some((entry) => DRIVER_PLANE_TOOL_NAMES.some((name) => entry.message.includes(name))),
+    `expected no warning naming a driver-plane tool, got ${JSON.stringify(logs)}`,
+  );
+});
+
+// ── SURF-01 Task 3: the adjust_tool_set fallback branch and the drift gate. ──
+
+test("resolveFallbackToolSetAdjustment forces a defined toolNames return when the driver plane is removed (D-03)", () => {
+  assert.deepEqual(
+    resolveFallbackToolSetAdjustment(["bash", "read", "mcp__gsd-workflow__gsd_execute"], false),
+    { toolNames: ["bash", "read"] },
+  );
+});
+
+test("resolveFallbackToolSetAdjustment returns undefined when nothing driver-plane is present and surfaceReduced is false", () => {
+  assert.equal(resolveFallbackToolSetAdjustment(["bash", "read"], false), undefined);
+});
+
+test("resolveFallbackToolSetAdjustment preserves existing surfaceReduced semantics when no driver-plane tool is present", () => {
+  assert.deepEqual(resolveFallbackToolSetAdjustment(["bash", "read"], true), { toolNames: ["bash", "read"] });
+});
+
+test("resolveFallbackToolSetAdjustment subtracts the driver plane when surfaceReduced is already true", () => {
+  assert.deepEqual(
+    resolveFallbackToolSetAdjustment(["bash", "mcp__gsd-workflow__gsd_query"], true),
+    { toolNames: ["bash"] },
+  );
+});
+
+test("resolveFallbackToolSetAdjustment's internal D-04 guard makes the subtraction a no-op under PI_GSD_FULL_TOOLS=1", () => {
+  process.env.PI_GSD_FULL_TOOLS = "1";
+  try {
+    assert.equal(
+      resolveFallbackToolSetAdjustment(["bash", "mcp__gsd-workflow__gsd_execute"], false),
+      undefined,
+    );
+    assert.deepEqual(
+      resolveFallbackToolSetAdjustment(["bash", "mcp__gsd-workflow__gsd_execute"], true),
+      { toolNames: ["bash", "mcp__gsd-workflow__gsd_execute"] },
+    );
+  } finally {
+    delete process.env.PI_GSD_FULL_TOOLS;
+  }
+});
+
+test("adjust_tool_set's fallback return routes through resolveFallbackToolSetAdjustment (source wiring guard)", () => {
+  // A behavioral test cannot reach the hook body directly — there is no test
+  // seam for the handler and building one would need a full ExtensionAPI
+  // mock — so this source-text assertion is the durable substitute.
+  const source = readRegisterHooksSource();
+  assert.ok(
+    source.includes("return resolveFallbackToolSetAdjustment(providerCompatible, surfaceReduced)"),
+    "adjust_tool_set's fallback return must route through resolveFallbackToolSetAdjustment",
+  );
+});
+
+test("every exported build…ToolSet in register-hooks.ts is covered by the driver-plane exclusion gate (drift guard)", () => {
+  const COVERED_BUILDERS = new Set([
+    "buildMinimalGsdToolSet",
+    "buildMinimalAutoGsdToolSet",
+    "buildRunUatGsdToolSet",
+    "buildMinimalGsdWorkflowToolSet",
+    "buildRequestScopedGsdToolSet",
+  ]);
+  const actualBuilders = new Set(
+    Object.keys(registerHooks).filter((name) => /^build.*ToolSet$/.test(name)),
+  );
+
+  for (const name of COVERED_BUILDERS) {
+    assert.ok(actualBuilders.has(name), `expected register-hooks.ts to still export ${name}`);
+  }
+  for (const name of actualBuilders) {
+    assert.ok(
+      COVERED_BUILDERS.has(name),
+      `register-hooks.ts exports a new build*ToolSet function (${name}) not yet wired through ` +
+        "excludeDriverPlaneTools — add it to this test's COVERED_BUILDERS set and wire the call site",
+    );
+  }
 });
