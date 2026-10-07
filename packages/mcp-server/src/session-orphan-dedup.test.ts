@@ -461,6 +461,96 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
       'orphan must be reaped before the new driver is allowed to start — otherwise two drivers run concurrently',
     );
   });
+
+  // -------------------------------------------------------------------------
+  // Settled-exactly-once under concurrency (Pitfall 2 / D-04, Phase 39 Plan
+  // 02) — the race property the settle-before-kill decision (Plan 01)
+  // depends on. Driven directly through `reapOrphanForTest` (the protected
+  // `reapPersistedOrphanSession`), NOT `startSession()` — two reaps cannot
+  // both be driven through `startSession()`, since its synchronous
+  // `startingLocks` guard rejects a second concurrent call for the same
+  // resolvedDir outright (see CR-02 above). Both calls below are created
+  // here, before either is awaited, so both read the registry entry before
+  // either removes it.
+  // -------------------------------------------------------------------------
+
+  it('settles an orphan Attempt exactly once when two reaps race', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-race-settle');
+    const orphanPid = 40020;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-race-settle',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+    // Queued FIFO: the winning pass observes 'settled'; the racing pass
+    // observes 'no-attempt' — modelling the real settle writer's
+    // domain-operation fence (39-01 PD-2), which reports nothing left to
+    // settle to whichever caller loses the race.
+    sm.reconcileResults.push('settled', 'no-attempt');
+
+    const raceResults = await Promise.allSettled([
+      sm.reapOrphanForTest(projectDir),
+      sm.reapOrphanForTest(projectDir),
+    ]);
+
+    assert.ok(
+      raceResults.every((r) => r.status === 'fulfilled'),
+      `expected both overlapping reaps to resolve without throwing, got: ${JSON.stringify(raceResults)}`,
+    );
+    assert.equal(
+      sm.reconcileCalls.filter((c) => c.pid === orphanPid).length,
+      2,
+      'both racing passes must reach a real reconcile attempt',
+    );
+  });
+
+  it('kills the orphan on the losing pass of a concurrent reap so nothing leaks', async () => {
+    // The race must not resolve to BOTH passes declining to kill — that
+    // would be a leak, not a safety win (project prohibition, Pitfall 3).
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-race-kill');
+    const orphanPid = 40021;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-race-kill',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+    sm.reconcileResults.push('settled', 'no-attempt');
+
+    await Promise.all([
+      sm.reapOrphanForTest(projectDir),
+      sm.reapOrphanForTest(projectDir),
+    ]);
+
+    // The winner settles and declines to kill; the loser finds nothing left
+    // to settle and still reaps — the net outcome is settled-exactly-once
+    // with no leaked live process. Killing after a durable settle loses no
+    // work, which is the distinction EXEC-01 draws.
+    assert.ok(
+      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
+      `expected the losing pass to SIGTERM the orphan pid, got: ${JSON.stringify(sm.killedPids)}`,
+    );
+    assert.equal(
+      getSessionEntry(projectDir, sm.registryPath),
+      undefined,
+      'registry entry must be removed exactly once after the race resolves — no leaked live process',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -713,5 +803,128 @@ describe('orphan-reconcile.ts — reconcileOrphanAttempt (module-level, D-04)', 
     };
     const result = await reconcileOrphanAttempt(baseEntry, '/proj', deps);
     assert.equal(result, 'settled');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settled-exactly-once under concurrency (Pitfall 2 / D-04, Phase 39 Plan
+// 02) — the second race property the settle-before-kill decision (Plan 01)
+// depends on, proven directly against `reconcileOrphanAttempt` with a shared
+// fenced fake bridge modelling the real `settleRunningAttemptsForWorker`
+// writer's domain-operation fence (39-01 PD-2): a non-empty settled-id array
+// the first time it is called for a given worker, an empty array every
+// subsequent call — never by the absence of a thrown error (Pattern 3).
+// ---------------------------------------------------------------------------
+
+function makeFencedSettleBridge(workerId = 'worker-fenced'): {
+  bridge: OrphanReconcileBridge;
+  settleReturns: string[][];
+} {
+  let callCount = 0;
+  const settleReturns: string[][] = [];
+  const bridge: OrphanReconcileBridge = {
+    async ensureDbOpen() {
+      return true;
+    },
+    getDb() {
+      return {
+        prepare(_sql: string) {
+          return {
+            all() {
+              return [{ worker_id: workerId }];
+            },
+          };
+        },
+      };
+    },
+    settleRunningAttemptsForWorker(id: string) {
+      callCount++;
+      const result = callCount === 1 ? [`attempt-${id}-1`] : [];
+      settleReturns.push(result);
+      return result;
+    },
+  };
+  return { bridge, settleReturns };
+}
+
+describe('orphan-reconcile.ts — settled-exactly-once under concurrency (Pitfall 2 / D-04, Phase 39 Plan 02)', () => {
+  const baseEntry: SessionRegistryEntry = {
+    sessionId: 'session-under-test-race',
+    projectDir: '/tmp/does-not-matter-race',
+    pid: 50199,
+    startTime: new Date().toISOString(),
+    status: 'running',
+  };
+  const stubHostname = () => 'test-host';
+  const stubNormalizeProjectRoot = (dir: string) => `normalized:${dir}`;
+
+  it('settles exactly once when two reconcileOrphanAttempt calls race against one fenced bridge', async () => {
+    const { bridge, settleReturns } = makeFencedSettleBridge();
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+
+    const [resultA, resultB] = await Promise.all([
+      reconcileOrphanAttempt(baseEntry, '/proj-race', deps),
+      reconcileOrphanAttempt(baseEntry, '/proj-race', deps),
+    ]);
+
+    // Exactly one 'settled' and one 'no-attempt' — the race never settles
+    // twice and never leaves both callers thinking nothing happened.
+    assert.deepEqual([resultA, resultB].sort(), ['no-attempt', 'settled']);
+
+    // The shared fake recorded exactly one invocation that returned a
+    // non-empty attempt-id array: the Attempt is settled once, never twice.
+    assert.equal(
+      settleReturns.filter((ids) => ids.length > 0).length,
+      1,
+      `expected exactly one non-empty settle invocation, got: ${JSON.stringify(settleReturns)}`,
+    );
+    assert.equal(settleReturns.length, 2, 'both racing calls must reach the settle writer');
+  });
+
+  it('returns no-attempt on a repeat reconcile of an already-settled Attempt', async () => {
+    const { bridge, settleReturns } = makeFencedSettleBridge();
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => bridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+
+    const first = await reconcileOrphanAttempt(baseEntry, '/proj-repeat', deps);
+    assert.equal(first, 'settled');
+
+    // A repeat reconcile against the SAME already-exercised bridge must not
+    // settle again — the repeat run is idempotent, not a second settle.
+    const repeat = await reconcileOrphanAttempt(baseEntry, '/proj-repeat', deps);
+    assert.equal(repeat, 'no-attempt');
+    assert.equal(
+      settleReturns.filter((ids) => ids.length > 0).length,
+      1,
+      'a repeat reconcile must trigger no further non-empty settle',
+    );
+  });
+
+  it("returns no-attempt when a fresh fenced bridge's very first settle call returns an empty array — the branch reads the count, not call ordering (Pattern 3)", async () => {
+    // Restates the Plan 01 module-level coverage ("returns 'no-attempt' ...
+    // when the matched worker's settle returns an empty array") alongside
+    // this plan's concurrency/idempotency proofs so Pattern 3's full claim
+    // reads as one unit: the outcome is decided by the returned attempt-id
+    // count, never by whether this was the first call or whether anything
+    // threw.
+    const { bridge: emptyFirstCallBridge } = createFakeOrphanReconcileBridge({
+      queryRows: [{ worker_id: 'worker-empty-first' }],
+      settledIdsByWorker: { 'worker-empty-first': [] },
+    });
+    const deps: OrphanReconcileDeps = {
+      loadBridge: async () => emptyFirstCallBridge,
+      hostname: stubHostname,
+      normalizeProjectRoot: stubNormalizeProjectRoot,
+    };
+
+    const result = await reconcileOrphanAttempt(baseEntry, '/proj-empty-first', deps);
+    assert.equal(result, 'no-attempt');
   });
 });
