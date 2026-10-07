@@ -661,6 +661,53 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, sm.lastClient!.pid);
   });
 
+  it('WR-04 (39-REVIEW.md): normalizes a thrown reapPersistedOrphanSession error to the same "Failed to start session" shape as every other failure mode', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-reap-throws');
+    const orphanPid = 40060;
+
+    registerSessionEntry(
+      {
+        sessionId: 'stale-session-reap-throws',
+        projectDir,
+        pid: orphanPid,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+    sm.alivePids.add(orphanPid);
+
+    // Force invokeOrphanReconcile to reject — models a corrupt registry
+    // read, or a subclass's override rejecting contrary to its documented
+    // "must never reject" contract.
+    sm['invokeOrphanReconcile'] = async () => {
+      throw new Error('simulated reap failure');
+    };
+
+    const resolvedDir = resolve(projectDir);
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error, 'must still be an Error');
+        assert.equal(
+          err.message,
+          `Failed to start session for ${resolvedDir}: simulated reap failure`,
+          'must be normalized to the same "Failed to start session for ..." shape every other failure mode uses',
+        );
+        return true;
+      },
+    );
+
+    // The startingLocks reservation must have been released despite the
+    // throw (the `finally` runs before the rethrow propagates) — a
+    // subsequent call for the same projectDir must not be stuck declining
+    // with "reap in progress" forever.
+    sm['invokeOrphanReconcile'] = async () => 'no-attempt';
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    assert.equal(sm.allClients.length, 1, 'the retry after the normalized throw must be able to start a driver');
+  });
+
   it('REGRESSION GUARD: without orphan detection, a duplicate driver could start for the same projectDir after a simulated restart', async () => {
     // This test documents the exact failure mode fix 3 (Option B) closes: a
     // FRESH SessionManager (simulating a new MCP server process after

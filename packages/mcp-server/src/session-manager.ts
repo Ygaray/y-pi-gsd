@@ -315,6 +315,17 @@ export class SessionManager {
       this.startingLocks.add(resolvedDir);
       try {
         reapOutcome = await this.reapPersistedOrphanSession(resolvedDir);
+      } catch (err) {
+        // WR-04 (39-REVIEW.md): if reapPersistedOrphanSession itself throws
+        // (a corrupt registry file, or an invokeOrphanReconcile override
+        // rejecting contrary to its documented "must never reject"
+        // contract), normalize to the same "Failed to start session for
+        // ${resolvedDir}: ..." shape every other startSession() failure
+        // mode uses, rather than letting it escape unwrapped. The `finally`
+        // below still runs before this rethrow propagates, so the
+        // reservation is released either way.
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to start session for ${resolvedDir}: ${message}`);
       } finally {
         this.startingLocks.delete(resolvedDir);
       }
