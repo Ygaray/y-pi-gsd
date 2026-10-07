@@ -4870,4 +4870,58 @@ describe("stream-adapter — rate_limit_event (T-38-01)", () => {
 		assert.deepEqual(callbackInvocations, []);
 		assert.ok(events.some((event) => event.type === "done"), "expected the turn to reach its terminal done event");
 	});
+
+	test("rate_limit_event: a well-formed payload fires onRateLimitEvent with the mapped window and windowKey (IN-01)", async () => {
+		const callbackInvocations: unknown[] = [];
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "hi" } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				onRateLimitEvent(window: unknown, windowKey: unknown) {
+					callbackInvocations.push({ window, windowKey });
+				},
+				async *_sdkQueryForTest() {
+					yield {
+						type: "rate_limit_event",
+						uuid: "rle-wellformed-1",
+						session_id: "session-1",
+						rate_limit_info: {
+							status: "allowed",
+							rateLimitType: "five_hour",
+							utilization: 0.42,
+							resetsAt: 1700000000,
+						},
+					};
+					yield {
+						type: "result",
+						subtype: "success",
+						uuid: "result-1",
+						session_id: "session-1",
+						duration_ms: 1,
+						duration_api_ms: 1,
+						is_error: false,
+						num_turns: 1,
+						result: "done",
+						stop_reason: "end_turn",
+						total_cost_usd: 0,
+						usage: {
+							input_tokens: 0,
+							output_tokens: 0,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					};
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.deepEqual(callbackInvocations, [{ window: { usedPercent: 42, resetsAtEpochSec: 1700000000 }, windowKey: "session" }]);
+		assert.ok(events.some((event) => event.type === "done"), "expected the turn to reach its terminal done event");
+	});
 });
