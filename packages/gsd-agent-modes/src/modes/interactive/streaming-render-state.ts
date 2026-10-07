@@ -27,8 +27,20 @@ export type RenderedSegment =
 			cachedText?: string;
 			/** Cached text length — fast O(1) comparison to avoid string allocation. */
 			cachedTextLength?: number;
+			/** `rs.shrinkGeneration` at the moment this segment was minted or reclaimed into `rs.renderedSegments`. */
+			createdAtGeneration?: number;
+			/** `rs.shrinkGeneration` at the moment this segment was displaced into `rs.orphanedSegments`. */
+			orphanedAtGeneration?: number;
 	  }
-	| { kind: "tool"; contentIndex: number; component: ToolExecutionComponent }
+	| {
+			kind: "tool";
+			contentIndex: number;
+			component: ToolExecutionComponent;
+			/** `rs.shrinkGeneration` at the moment this segment was minted or reclaimed into `rs.renderedSegments`. */
+			createdAtGeneration?: number;
+			/** `rs.shrinkGeneration` at the moment this segment was displaced into `rs.orphanedSegments`. */
+			orphanedAtGeneration?: number;
+	  }
 	| { kind: "tool-summary"; component: ToolPhaseSummaryComponent; phases: ToolExecutionPhase[] };
 
 export type DesiredSegment =
@@ -47,6 +59,19 @@ export class StreamingRenderState {
 	renderedSegments: RenderedSegment[] = [];
 	/** Displaced segments when provider sub-turn shrinks content[] mid-lifecycle. */
 	orphanedSegments: RenderedSegment[] = [];
+	/**
+	 * Monotonically-incrementing per-shrink generation counter, bumped once per
+	 * `applySubTurnContentShrink()` call that actually displaces segments into
+	 * `orphanedSegments` (either the primary shrink arm or the
+	 * `isSubTurnTextReplacement` arm). Scoped to sub-turn shrink events, NOT
+	 * whole-turn boundaries — deliberately distinct from `assistantTurnSeq`
+	 * below, which cannot serve this purpose because it only advances at
+	 * `resetForNewAssistantMessage()` (once per whole new assistant message,
+	 * never per in-turn shrink). Stamped onto displaced `RenderedSegment`
+	 * entries' `orphanedAtGeneration` field so a later drain pass can prove
+	 * generational supersession rather than relying on content pattern alone.
+	 */
+	shrinkGeneration = 0;
 	readonly toolRegistrationSources = new WeakMap<ToolExecutionComponent, Set<ToolRegistrationSource>>();
 
 	lastPinnedText = "";
@@ -79,6 +104,7 @@ export class StreamingRenderState {
 		this.lastContentLength = 0;
 		this.renderedSegments = [];
 		this.orphanedSegments = [];
+		this.shrinkGeneration = 0;
 	}
 
 	resetPinnedZone(): void {

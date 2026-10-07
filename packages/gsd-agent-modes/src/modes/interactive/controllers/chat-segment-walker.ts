@@ -37,7 +37,9 @@ export function applySubTurnContentShrink(
 		// Accumulate across successive shrinks — overwriting would drop
 		// segments displaced by an earlier shrink, leaving them stranded
 		// in chatContainer once the prune pass finally runs.
-		rs.orphanedSegments = [...rs.orphanedSegments, ...rs.renderedSegments];
+		rs.shrinkGeneration++;
+		const newlyOrphaned = rs.renderedSegments.map((seg) => ({ ...seg, orphanedAtGeneration: rs.shrinkGeneration }));
+		rs.orphanedSegments = [...rs.orphanedSegments, ...newlyOrphaned];
 		rs.renderedSegments = [];
 		rs.lastPinnedText = "";
 		rs.lastProcessedContentIndex = 0;
@@ -46,10 +48,11 @@ export function applySubTurnContentShrink(
 		// text-run and any text-runs after it. Earlier unchanged text
 		// and tool segments stay in rs.renderedSegments so they are not
 		// re-rendered and duplicated in chatContainer.
-		rs.orphanedSegments = [
-			...rs.orphanedSegments,
-			...rs.renderedSegments.filter((seg) => seg.kind === "text-run" && seg.startIndex >= replacedAt),
-		];
+		rs.shrinkGeneration++;
+		const newlyOrphaned = rs.renderedSegments
+			.filter((seg) => seg.kind === "text-run" && seg.startIndex >= replacedAt)
+			.map((seg) => ({ ...seg, orphanedAtGeneration: rs.shrinkGeneration }));
+		rs.orphanedSegments = [...rs.orphanedSegments, ...newlyOrphaned];
 		rs.renderedSegments = rs.renderedSegments.filter(
 			(seg) => !(seg.kind === "text-run" && seg.startIndex >= replacedAt),
 		);

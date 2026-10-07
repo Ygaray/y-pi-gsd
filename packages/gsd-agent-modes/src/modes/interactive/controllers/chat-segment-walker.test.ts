@@ -25,6 +25,103 @@ import {
 	getTextLengthFromContentBlocks,
 	getTextFromContentBlocks,
 } from "./chat-handoff-filter.js";
+import { applySubTurnContentShrink } from "./chat-segment-walker.js";
+import { createStreamingRenderState, type RenderedSegment } from "../streaming-render-state.js";
+
+// ── shrinkGeneration (Phase 37 Plan 02, Task 1, D-02 Open Design Point 2) ──
+
+function makeTextRunSegment(
+	startIndex: number,
+	endIndex: number,
+	cachedText: string,
+): RenderedSegment {
+	return {
+		kind: "text-run",
+		startIndex,
+		endIndex,
+		contentType: "text",
+		component: {} as any,
+		cachedText,
+		cachedTextLength: cachedText.length,
+	};
+}
+
+test("shrinkGeneration: a fresh StreamingRenderState starts at 0", () => {
+	const rs = createStreamingRenderState();
+	assert.equal(rs.shrinkGeneration, 0);
+});
+
+test("shrinkGeneration: primary shrink branch increments by exactly 1", () => {
+	const rs = createStreamingRenderState();
+	rs.lastContentLength = 2;
+	rs.renderedSegments = [makeTextRunSegment(0, 1, "hello")];
+
+	applySubTurnContentShrink(rs, [{ type: "text", text: "x" }]);
+
+	assert.equal(rs.shrinkGeneration, 1);
+});
+
+test("shrinkGeneration: neither branch taken leaves shrinkGeneration unchanged", () => {
+	const rs = createStreamingRenderState();
+	rs.lastContentLength = 1;
+	rs.renderedSegments = [makeTextRunSegment(0, 0, "hello")];
+
+	// Growing content[] (2 > 1) takes neither the primary shrink arm nor the
+	// isSubTurnTextReplacement arm (that check only runs when
+	// contentBlocks.length <= rs.lastContentLength).
+	applySubTurnContentShrink(rs, [
+		{ type: "text", text: "hello" },
+		{ type: "text", text: "world" },
+	]);
+
+	assert.equal(rs.shrinkGeneration, 0);
+});
+
+test("shrinkGeneration: isSubTurnTextReplacement branch also increments by exactly 1 (Pitfall 8)", () => {
+	const rs = createStreamingRenderState();
+	rs.lastContentLength = 1;
+	rs.renderedSegments = [makeTextRunSegment(0, 0, "hello world")];
+
+	// Same length as rs.lastContentLength, but wholesale-replaced text (not a
+	// prefix extension in either direction) — fires the isSubTurnTextReplacement arm.
+	applySubTurnContentShrink(rs, [{ type: "text", text: "goodbye now" }]);
+
+	assert.equal(rs.shrinkGeneration, 1);
+});
+
+test("shrinkGeneration: displaced segments are stamped with orphanedAtGeneration; kept segments are not", () => {
+	const rs = createStreamingRenderState();
+	const keptSeg = makeTextRunSegment(0, 0, "keep");
+	const replacedSeg = makeTextRunSegment(1, 1, "hello world");
+	rs.lastContentLength = 2;
+	rs.renderedSegments = [keptSeg, replacedSeg];
+
+	// Same length (2) as rs.lastContentLength, so the primary shrink arm does
+	// not fire; block 1's text is wholesale-replaced (not a prefix extension),
+	// firing the isSubTurnTextReplacement arm at seg.startIndex === 1.
+	applySubTurnContentShrink(rs, [
+		{ type: "text", text: "keep" },
+		{ type: "text", text: "goodbye now" },
+	]);
+
+	assert.equal(rs.shrinkGeneration, 1);
+	assert.equal(rs.orphanedSegments.length, 1);
+	assert.equal((rs.orphanedSegments[0] as any).orphanedAtGeneration, 1);
+	assert.equal(rs.renderedSegments.length, 1);
+	assert.equal((rs.renderedSegments[0] as any).orphanedAtGeneration, undefined);
+});
+
+test("shrinkGeneration: resetStreamingSegments() resets shrinkGeneration to 0", () => {
+	const rs = createStreamingRenderState();
+	rs.lastContentLength = 2;
+	rs.renderedSegments = [makeTextRunSegment(0, 1, "hello")];
+	applySubTurnContentShrink(rs, [{ type: "text", text: "x" }]);
+	assert.equal(rs.shrinkGeneration, 1);
+
+	rs.resetStreamingSegments();
+
+	assert.equal(rs.shrinkGeneration, 0);
+});
 
 // ── tests ────────────────────────────────────────────────────────────
 
