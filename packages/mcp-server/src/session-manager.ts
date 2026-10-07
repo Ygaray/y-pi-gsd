@@ -166,6 +166,29 @@ export function projectRecentEvents(events: SdkAgentEvent[], limit: number): Sdk
 // SessionManager
 // ---------------------------------------------------------------------------
 
+/**
+ * Outcome vocabulary for `reapPersistedOrphanSession` (EXEC-01, Phase 39;
+ * restored by 39-03-PLAN.md after 39-VERIFICATION.md gaps 1-3 reported that
+ * commit 2a6fd9f7 silently reverted the phase's own locked "settled => no
+ * kill" contract). `startSession()` is the only consumer of
+ * `OrphanReapOutcome` outside this method — it gates whether the new driver
+ * start proceeds or is declined.
+ *
+ * - `'no-entry'` — no persisted row existed for this `resolvedDir`.
+ * - `'stale-entry-dropped'` — the row's pid was dead or recycled; the row
+ *   was dropped and nothing was signalled.
+ * - `'reaped'` — a confirmed-alive orphan was reconciled to a non-settled
+ *   outcome (`'no-attempt'` or `'db-unavailable'`) and its pid was killed.
+ * - `'settled-alive'` — a confirmed-alive orphan's Task Attempt was
+ *   settled, so its pid was deliberately spared and its registry row was
+ *   deliberately kept (PD-8, 39-03-PLAN.md).
+ */
+export type OrphanReapOutcome =
+  | 'no-entry'
+  | 'stale-entry-dropped'
+  | 'reaped'
+  | 'settled-alive';
+
 export class SessionManager {
   /** Sessions keyed by projectDir for duplicate-start prevention */
   private sessions = new Map<string, ManagedSession>();
@@ -232,11 +255,23 @@ export class SessionManager {
       // in-memory Map is wiped on restart, so startSession()'s "already
       // active" guard above can't see it). Reap it before starting a new
       // driver so at most one driver ever runs per worktree.
+      let reapOutcome: OrphanReapOutcome = 'no-entry';
       this.startingLocks.add(resolvedDir);
       try {
-        await this.reapPersistedOrphanSession(resolvedDir);
+        reapOutcome = await this.reapPersistedOrphanSession(resolvedDir);
       } finally {
         this.startingLocks.delete(resolvedDir);
+      }
+      // EXEC-01 (Phase 39, 39-REVIEW.md CR-01's alternative (b)): the
+      // reservation is released above BEFORE this decline check, with no
+      // await between the release and the throw — a decline is not a reap
+      // failure, so the lock must not be held across it (a concurrent
+      // startSession() for this resolvedDir must observe the real decline
+      // reason below, not a misleading "reap in progress").
+      if (reapOutcome === 'settled-alive') {
+        throw new Error(
+          `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; its dangling Task Attempt was settled and the live process was deliberately left running rather than signalled; re-issuing this call will reclaim the now-settled pid)`
+        );
       }
     }
 
@@ -388,35 +423,52 @@ export class SessionManager {
    * recorded pid has been recycled by an unrelated process (start-time
    * guard) — in all of those cases the stale row is simply dropped.
    *
-   * A confirmed-alive orphan's DB-side Task Attempt is reconciled (settled)
-   * before anything signals its pid (EXEC-01, Phase 39, D-03 insertion
-   * point) — the pid is only killed when that reconcile conclusively reports
-   * there is nothing to settle or that the database could not be reached.
+   * A confirmed-alive orphan's DB-side Task Attempt is reconciled before
+   * anything signals its pid (EXEC-01, Phase 39, D-03 insertion point). A
+   * `'settled'` reconcile outcome returns `'settled-alive'` — the pid is
+   * deliberately spared and the registry row is deliberately kept, per the
+   * restored "settled => no kill" contract (39-CONTEXT.md D-04, ROADMAP
+   * criteria 1/3; restored by 39-03-PLAN.md per 39-REVIEW.md CR-01's
+   * alternative (b) after 39-VERIFICATION.md gaps 1-3). The pid is only
+   * killed when the reconcile conclusively reports there is nothing to
+   * settle (`'no-attempt'`) or that the database could not be reached
+   * (`'db-unavailable'`).
    */
-  protected async reapPersistedOrphanSession(resolvedDir: string): Promise<void> {
+  protected async reapPersistedOrphanSession(resolvedDir: string): Promise<OrphanReapOutcome> {
     const registryPath = this.getSessionRegistryPath();
     const entry = getSessionEntry(resolvedDir, registryPath);
-    if (!entry) return;
+    if (!entry) return 'no-entry';
 
     const livenessOptions = this.getSessionLivenessOptions();
     if (!isOrphanEntryAlive(entry, livenessOptions)) {
       removeSessionEntry(resolvedDir, registryPath);
-      return;
+      return 'stale-entry-dropped';
     }
 
-    // CR-01 (39-REVIEW.md): a 'settled' outcome only clears the orphan's
-    // dangling DB-side Attempt row — it must NOT spare the still-alive pid
-    // from being killed. Leaving the pid alive while startSession() goes on
-    // to spawn a brand-new driver for the same resolvedDir would reopen the
-    // exact "at most one driver per worktree" invariant this whole reap
-    // exists to guarantee. Settle-then-kill is the intended order: settle
-    // the Attempt first (so the kill signal doesn't race a dangling
-    // `running` row), then always reclaim the pid exactly as before.
+    // Restored design (EXEC-01, Phase 39; 39-REVIEW.md CR-01's alternative
+    // (b)): 39-VERIFICATION.md gaps 1-3 reported that commit 2a6fd9f7 — the
+    // original CR-01 fix — made this branch kill the pid unconditionally,
+    // silently reverting the phase's own locked "settled => no kill"
+    // contract (39-CONTEXT.md D-04, ROADMAP criteria 1/3). A 'settled'
+    // outcome now spares the still-alive pid instead — it must NOT reach
+    // killOrphanSessionPid. CR-01's real double-driver bug (a confirmed-
+    // alive pid left running while startSession() spawns a brand-new driver
+    // for the same resolvedDir) is closed instead by startSession()
+    // declining the new start on this outcome (see below), not by killing
+    // the pid. The registry row is deliberately KEPT (PD-8): dropping it
+    // here would erase the only record of the still-alive orphan, so a
+    // later start would see no entry, spawn a second driver, and strand the
+    // spared process as an unreapable, invisible leak. A later start
+    // attempt for the same resolvedDir re-reaps this same row; by then the
+    // Attempt was already settled, so the reconcile reports 'no-attempt'
+    // and falls through to the unchanged kill below (PD-9) — the decline is
+    // recoverable, not a permanent lockout.
     const reconcileResult = await this.invokeOrphanReconcile(entry, resolvedDir);
     if (reconcileResult === 'settled') {
       process.stderr.write(
-        `[gsd-mcp-server] INC-2026-09-29-02: reconciled orphaned headless session for ${resolvedDir} left by a prior MCP server instance — settled its Attempt, now reclaiming pid=${entry.pid}\n`,
+        `[gsd-mcp-server] INC-2026-09-29-02: reconciled orphaned headless session for ${resolvedDir} left by a prior MCP server instance — settled its Attempt; pid=${entry.pid} is being left alive on purpose and the new driver start is being declined\n`,
       );
+      return 'settled-alive';
     }
 
     const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);
@@ -433,6 +485,7 @@ export class SessionManager {
       `[gsd-mcp-server] INC-2026-09-29-02: reaped orphaned headless session for ${resolvedDir} left by a prior MCP server instance — ${label}\n`,
     );
     removeSessionEntry(resolvedDir, registryPath);
+    return 'reaped';
   }
 
   /**

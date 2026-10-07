@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { SessionManager } from './session-manager.js';
+import { SessionManager, type OrphanReapOutcome } from './session-manager.js';
 import { getSessionEntry, registerSessionEntry, type SessionLivenessOptions, type SessionRegistryEntry } from './session-persist.js';
 import {
   reconcileOrphanAttempt,
@@ -192,7 +192,7 @@ class TestableSessionManager extends SessionManager {
   }
 
   /** Drives the reap directly, without going through startSession(). */
-  async reapOrphanForTest(resolvedDir: string): Promise<void> {
+  async reapOrphanForTest(resolvedDir: string): Promise<OrphanReapOutcome> {
     return this.reapPersistedOrphanSession(resolvedDir);
   }
 }
@@ -323,7 +323,7 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     );
   });
 
-  it('settles a live orphan\'s Attempt BEFORE killing it, so no second driver ever runs alongside a still-alive pid (CR-01, 39-REVIEW.md)', async () => {
+  it('spares a settled orphan\'s pid AND declines the concurrent start, so no second driver ever runs alongside a still-alive pid (restored: 39-VERIFICATION.md gap 1, 39-REVIEW.md CR-01 alternative (b))', async () => {
     const sm = createManager();
     const projectDir = join(tmp, 'proj-settled');
     const orphanPid = 40010;
@@ -341,32 +341,93 @@ describe('SessionManager — orphan-child dedup across MCP-server restarts (INC-
     sm.alivePids.add(orphanPid);
     sm.reconcileResults.push('settled');
 
-    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
-
-    // CR-01 (39-REVIEW.md): a 'settled' outcome must NOT spare the
-    // still-alive pid from being killed — only the DB-side Attempt row is
-    // settled. If the pid were left alive while startSession() goes on to
-    // spawn the brand-new driver below, TWO live drivers would run against
-    // the same resolvedDir, directly violating the "at most one driver per
-    // worktree" invariant this whole reap exists to guarantee.
-    assert.ok(
-      sm.killedPids.some((k) => k.pid === orphanPid && k.signal === 'SIGTERM'),
-      `expected orphan pid ${orphanPid} to receive SIGTERM after its Attempt was settled, got: ${JSON.stringify(sm.killedPids)}`,
+    // Restored design: a 'settled' outcome spares the still-alive pid AND
+    // startSession() declines the new driver start outright — CR-01's real
+    // double-driver bug (two live drivers against one resolvedDir) is closed
+    // by the decline, not by killing the settled pid (39-REVIEW.md CR-01's
+    // own alternative (b), restored by 39-03-PLAN.md after
+    // 39-VERIFICATION.md gap 1 found commit 2a6fd9f7 had silently reverted
+    // the phase's own "settled => no kill" contract).
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      /Session already active/,
     );
 
-    // The stale registry entry is still cleared, and exactly one new driver
-    // client was ever created — never two live drivers for one resolvedDir.
+    // The orphan pid is never signalled — neither SIGTERM nor SIGKILL.
+    assert.ok(
+      !sm.killedPids.some((k) => k.pid === orphanPid && (k.signal === 'SIGTERM' || k.signal === 'SIGKILL')),
+      `expected orphan pid ${orphanPid} to receive neither SIGTERM nor SIGKILL, got: ${JSON.stringify(sm.killedPids)}`,
+    );
+
+    // Zero clients were ever created — the decline happened before
+    // createClient() was ever reached, which is the executable proof that no
+    // second driver runs beside the live pid (the proof 39-REVIEW.md asked
+    // for and the old, reverted test could not give).
+    assert.equal(sm.allClients.length, 0);
+
+    // The persisted registry entry still exists and still references the
+    // orphan pid (PD-8) — a declined start must never strand an unreapable
+    // live child by dropping the only record that identifies it.
     const entry = getSessionEntry(projectDir, sm.registryPath);
     assert.ok(entry);
-    assert.notEqual(entry?.pid, orphanPid);
-    assert.equal(entry?.pid, sm.lastClient!.pid);
-    assert.equal(sm.allClients.length, 1);
+    assert.equal(entry?.pid, orphanPid);
 
-    // The new seam was actually consulted — the decision is not bypassed.
-    assert.ok(
-      sm.reconcileCalls.some((c) => c.pid === orphanPid && c.resolvedDir === resolve(projectDir)),
-      `expected a reconcile call for pid ${orphanPid}, got: ${JSON.stringify(sm.reconcileCalls)}`,
+    // The new seam was actually consulted exactly once — the decline is
+    // reached by consulting the decision point, not by bypassing it.
+    assert.equal(
+      sm.reconcileCalls.filter((c) => c.pid === orphanPid && c.resolvedDir === resolve(projectDir)).length,
+      1,
+      `expected exactly one reconcile call for pid ${orphanPid}, got: ${JSON.stringify(sm.reconcileCalls)}`,
     );
+  });
+
+  it('reapOrphanForTest returns the correct OrphanReapOutcome for each reap scenario (restored vocabulary: no-entry, stale-entry-dropped, settled-alive, reaped)', async () => {
+    const sm = createManager();
+
+    // 'no-entry': no registered row at all.
+    const noEntryDir = join(tmp, 'proj-vocab-no-entry');
+    const noEntryOutcome = await sm.reapOrphanForTest(noEntryDir);
+    assert.equal(noEntryOutcome, 'no-entry');
+
+    // 'stale-entry-dropped': a registered row whose pid is NOT alive.
+    const staleDir = join(tmp, 'proj-vocab-stale');
+    const stalePid = 40030;
+    registerSessionEntry(
+      { sessionId: 'vocab-stale', projectDir: staleDir, pid: stalePid, startTime: new Date().toISOString(), status: 'running' },
+      sm.registryPath,
+    );
+    const staleOutcome = await sm.reapOrphanForTest(staleDir);
+    assert.equal(staleOutcome, 'stale-entry-dropped');
+    assert.equal(getSessionEntry(staleDir, sm.registryPath), undefined, 'the dead row must be dropped');
+
+    // 'settled-alive': a live row whose reconcile reports 'settled' — the
+    // row must SURVIVE (PD-8).
+    const settledDir = join(tmp, 'proj-vocab-settled');
+    const settledPid = 40031;
+    registerSessionEntry(
+      { sessionId: 'vocab-settled', projectDir: settledDir, pid: settledPid, startTime: new Date().toISOString(), status: 'running' },
+      sm.registryPath,
+    );
+    sm.alivePids.add(settledPid);
+    sm.reconcileResults.push('settled');
+    const settledOutcome = await sm.reapOrphanForTest(settledDir);
+    assert.equal(settledOutcome, 'settled-alive');
+    assert.equal(getSessionEntry(settledDir, sm.registryPath)?.pid, settledPid, 'the spared row must survive');
+
+    // 'reaped': a live row whose reconcile reports 'no-attempt' — the row
+    // must be dropped and the pid killed.
+    const reapedDir = join(tmp, 'proj-vocab-reaped');
+    const reapedPid = 40032;
+    registerSessionEntry(
+      { sessionId: 'vocab-reaped', projectDir: reapedDir, pid: reapedPid, startTime: new Date().toISOString(), status: 'running' },
+      sm.registryPath,
+    );
+    sm.alivePids.add(reapedPid);
+    sm.reconcileResults.push('no-attempt');
+    const reapedOutcome = await sm.reapOrphanForTest(reapedDir);
+    assert.equal(reapedOutcome, 'reaped');
+    assert.equal(getSessionEntry(reapedDir, sm.registryPath), undefined, 'the reaped row must be dropped');
+    assert.ok(sm.killedPids.some((k) => k.pid === reapedPid && k.signal === 'SIGTERM'));
   });
 
   it('kills a live orphan when there is no Attempt to settle — models the D-02 non-auto-mode orphan with no `workers` row (EXEC-01, Phase 39)', async () => {
