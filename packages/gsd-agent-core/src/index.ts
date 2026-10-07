@@ -36,16 +36,16 @@ export {
 } from "./compaction/index.js";
 export type { CompactionPreparation } from "./compaction/compaction.js";
 export { type BashResult, executeBashWithOperations } from "./bash-executor.js";
-export { buildSystemPrompt, type BuildSystemPromptOptions } from "./system-prompt.js";
+export { buildSystemPrompt, type BuildSystemPromptOptions } from "@gsd/pi-coding-agent/core/system-prompt.js";
 export {
 	type AppAction,
 	type AppKeybinding,
 	KeybindingsManager,
-} from "./keybindings.js";
-export { FallbackResolver, type FallbackResult } from "./fallback-resolver.js";
+} from "@gsd/pi-coding-agent/core/keybindings.js";
+export { FallbackResolver, type FallbackResult } from "@gsd/pi-coding-agent/core/fallback-resolver.js";
 export {
 	ArtifactManager,
-} from "./artifact-manager.js";
+} from "@gsd/pi-coding-agent/core/artifact-manager.js";
 export {
 	BlobStore,
 	externalizeImageData,
@@ -53,7 +53,7 @@ export {
 	parseBlobRef,
 	resolveImageData,
 	type BlobPutResult,
-} from "./blob-store.js";
+} from "@gsd/pi-coding-agent/core/blob-store.js";
 export {
 	prepareLifecycleHooks,
 	runLifecycleHooks,
@@ -62,7 +62,7 @@ export {
 	verifyRuntimeDependencies,
 	resolveLocalSourcePath,
 	type PackageLifecycleHooksOptions,
-} from "./lifecycle-hooks.js";
+} from "@gsd/pi-coding-agent/core/lifecycle-hooks.js";
 export { exportFromFile, exportSessionToHtml } from "./export-html/index.js";
 export {
 	type CreateAgentSessionOptions,
