@@ -1,6 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Regression net for the stacked GSD statusline — the 4-tier context meter thresholds,
-// the additive blink cue, and the two-row FooterComponent.render() layout. Ports the `createSession` /
+// the additive blink cue, and the row-per-meter FooterComponent.render() layout (one row each for
+// base, context, session, and weekly, plus a conditional milestone row). Ports the `createSession` /
 // `createFooterData` structural stubs and the per-row `visibleWidth(line) <= width` invariant out of the
 // now-deleted `packages/pi-coding-agent/test/footer-width.test.ts` (dead since `FooterComponent` moved to
 // this package), converting them from vitest to `node:test`.
@@ -174,7 +175,7 @@ describe("FooterComponent stacked render", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 		for (const line of lines) {
 			assert.ok(visibleWidth(line) <= width);
 		}
@@ -191,19 +192,19 @@ describe("FooterComponent stacked render", () => {
 		const footer = new FooterComponent(session, createFooterData(2));
 
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 		for (const line of lines) {
 			assert.ok(visibleWidth(line) <= width);
 		}
 	});
 
-	it("renders exactly two full-width rows with a 10-cell context bar on row 2", () => {
+	it("renders four full-width rows with a 10-cell context bar on row 2", () => {
 		const width = 120;
 		const session = createSession({ sessionName: "demo" });
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 		for (const line of lines) {
 			assert.equal(visibleWidth(line), width);
 		}
@@ -213,28 +214,35 @@ describe("FooterComponent stacked render", () => {
 		assert.ok(barMatch, `expected a 10-cell bar drawn from the █/░ vocabulary, got: ${row2Plain}`);
 	});
 
-	it("renders the usage row's three labelled segments, honestly reporting session/weekly as unavailable", () => {
+	it("renders context, session, and weekly meters each on their own row, honestly reporting session/weekly as unavailable", () => {
 		const width = 120;
 		const session = createSession({ sessionName: "demo" });
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 		for (const line of lines) {
 			assert.equal(visibleWidth(line), width);
 		}
 
-		const row2Plain = stripVTControlCharacters(lines[1]!);
-		assert.match(row2Plain, /context:/);
-		assert.match(row2Plain, /session:/);
-		assert.match(row2Plain, /weekly:/);
+		const contextPlain = stripVTControlCharacters(lines[1]!);
+		const sessionPlain = stripVTControlCharacters(lines[2]!);
+		const weeklyPlain = stripVTControlCharacters(lines[3]!);
+		assert.match(contextPlain, /context:/);
+		assert.match(sessionPlain, /session:/);
+		assert.match(weeklyPlain, /weekly:/);
 
-		const unavailableCount = row2Plain.split("unavailable").length - 1;
-		assert.equal(unavailableCount, 2, `expected exactly 2 "unavailable" literals, got: ${row2Plain}`);
-		assert.doesNotMatch(row2Plain, /context: unavailable/);
+		const unavailableCount =
+			sessionPlain.split("unavailable").length - 1 + (weeklyPlain.split("unavailable").length - 1);
+		assert.equal(
+			unavailableCount,
+			2,
+			`expected exactly 2 "unavailable" literals across the session+weekly rows, got: ${sessionPlain} | ${weeklyPlain}`,
+		);
+		assert.doesNotMatch(contextPlain, /context: unavailable/);
 	});
 
-	it("renders real session and weekly windows with bar, percent, and reset countdown when both are supplied", () => {
+	it("renders real session and weekly windows with bar, percent, and reset countdown on their own rows when both are supplied", () => {
 		const width = 120;
 		const nowEpochSec = Math.floor(Date.now() / 1000);
 		const session = createSession({
@@ -247,29 +255,32 @@ describe("FooterComponent stacked render", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 		for (const line of lines) {
 			assert.equal(visibleWidth(line), width);
 		}
 
-		const row2Plain = stripVTControlCharacters(lines[1]!);
-		assert.match(row2Plain, /session: [█░]{10} 42% ↻1h/);
-		assert.match(row2Plain, /weekly: [█░]{10} 10% ↻1d/);
-		assert.equal(row2Plain.includes("unavailable"), false);
+		const sessionPlain = stripVTControlCharacters(lines[2]!);
+		const weeklyPlain = stripVTControlCharacters(lines[3]!);
+		assert.match(sessionPlain, /session: [█░]{10} 42% ↻1h/);
+		assert.match(weeklyPlain, /weekly: [█░]{10} 10% ↻1d/);
+		assert.equal(sessionPlain.includes("unavailable"), false);
+		assert.equal(weeklyPlain.includes("unavailable"), false);
 	});
 
-	it("renders unavailable for both usage segments when getRateLimitStatus() returns undefined", () => {
+	it("renders unavailable for both the session and weekly rows when getRateLimitStatus() returns undefined", () => {
 		const width = 120;
 		const session = createSession({ sessionName: "demo", rateLimitStatus: undefined });
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		const row2Plain = stripVTControlCharacters(lines[1]!);
-		const unavailableCount = row2Plain.split("unavailable").length - 1;
-		assert.equal(unavailableCount, 2, `expected exactly 2 "unavailable" literals, got: ${row2Plain}`);
+		const sessionPlain = stripVTControlCharacters(lines[2]!);
+		const weeklyPlain = stripVTControlCharacters(lines[3]!);
+		assert.match(sessionPlain, /session: unavailable/);
+		assert.match(weeklyPlain, /weekly: unavailable/);
 	});
 
-	it("renders a real session segment and unavailable weekly when only the session window is supplied (A-28-01)", () => {
+	it("renders a real session row and unavailable weekly row when only the session window is supplied (A-28-01)", () => {
 		const width = 120;
 		const nowEpochSec = Math.floor(Date.now() / 1000);
 		const session = createSession({
@@ -282,10 +293,10 @@ describe("FooterComponent stacked render", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		const row2Plain = stripVTControlCharacters(lines[1]!);
-		assert.match(row2Plain, /session: [█░]{10} 55%/);
-		const unavailableCount = row2Plain.split("unavailable").length - 1;
-		assert.equal(unavailableCount, 1, `expected exactly 1 "unavailable" literal, got: ${row2Plain}`);
+		const sessionPlain = stripVTControlCharacters(lines[2]!);
+		const weeklyPlain = stripVTControlCharacters(lines[3]!);
+		assert.match(sessionPlain, /session: [█░]{10} 55%/);
+		assert.match(weeklyPlain, /weekly: unavailable/);
 	});
 
 	it("renders git dirty/staged/untracked/ahead/behind markers attached directly to the branch on row 1", () => {
@@ -295,7 +306,7 @@ describe("FooterComponent stacked render", () => {
 		const footer = new FooterComponent(session, createFooterData(1, { gitStatus }));
 
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 		for (const line of lines) {
 			assert.equal(visibleWidth(line), width);
 		}
@@ -342,6 +353,100 @@ describe("FooterComponent stacked render", () => {
 			`expected row 2 to carry the contextOrange ANSI sequence at 72% context, got: ${JSON.stringify(row2)}`,
 		);
 	});
+
+	it("SL-03: row budget independence — a wide session countdown does not shrink the context row", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+
+		const narrowSession = createSession({ sessionName: "demo", rateLimitStatus: undefined });
+		const narrowFooter = new FooterComponent(narrowSession, createFooterData(1));
+		const narrowLines = narrowFooter.render(width);
+
+		// Widest possible countdown form: a multi-day reset far enough out to render as "999d".
+		const wideSession = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 42, resetsAtEpochSec: nowEpochSec + 999 * 86400 + 1000 },
+				weekly: null,
+			},
+		});
+		const wideFooter = new FooterComponent(wideSession, createFooterData(1));
+		const wideLines = wideFooter.render(width);
+
+		assert.equal(
+			narrowLines[1],
+			wideLines[1],
+			"the context row (index 1) must be byte-identical regardless of the session countdown's width — under the old joined row, widening the session segment necessarily shrank context's available width",
+		);
+	});
+
+	it("SL-03: every row measures exactly the width at 60, 93, and 120 cells", () => {
+		for (const width of [60, 93, 120]) {
+			const session = createSession({
+				sessionName: "a-long-session-name-to-force-truncation",
+				modelId: "a-very-long-model-identifier-string-for-truncation",
+				provider: "a-long-provider-name",
+			});
+			const footer = new FooterComponent(session, createFooterData(2));
+
+			const lines = footer.render(width);
+			assert.equal(lines.length, 4, `expected 4 rows at width ${width}, got ${lines.length}`);
+			for (const [index, line] of lines.entries()) {
+				assert.equal(
+					visibleWidth(line),
+					width,
+					`expected row ${index} to measure exactly ${width} cells at width ${width}, got: ${JSON.stringify(line)}`,
+				);
+			}
+		}
+	});
+
+	it("SL-03: the footer never exceeds 5 rows", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		const dir = mkdtempSync(join(tmpdir(), "footer-max-content-"));
+		writeStateMd(dir, stateMdFixture("Max Content Milestone"));
+
+		const session = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 42, resetsAtEpochSec: nowEpochSec + 3600 },
+				weekly: { usedPercent: 10, resetsAtEpochSec: nowEpochSec + 86400 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = withCwd(dir, () => footer.render(width));
+		assert.equal(
+			lines.length,
+			5,
+			`expected the maximum-content render (both usage windows + milestone row) to stay at 5 rows, got ${lines.length}`,
+		);
+
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("SL-03: a partial usage state renders two independently correct rows", () => {
+		const width = 120;
+		const nowEpochSec = Math.floor(Date.now() / 1000);
+		const session = createSession({
+			sessionName: "demo",
+			rateLimitStatus: {
+				session: { usedPercent: 55, resetsAtEpochSec: nowEpochSec + 3600 },
+				weekly: null,
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		const sessionPlain = stripVTControlCharacters(lines[2]!);
+		const weeklyPlain = stripVTControlCharacters(lines[3]!);
+
+		assert.match(sessionPlain, /session: [█░]{10} 55%/, `expected a real bar+percent on the session row, got: ${sessionPlain}`);
+		assert.doesNotMatch(sessionPlain, /unavailable/, `session row must not carry the weekly row's unavailable content, got: ${sessionPlain}`);
+		assert.match(weeklyPlain, /weekly: unavailable/, `expected the unavailable literal on the weekly row, got: ${weeklyPlain}`);
+		assert.doesNotMatch(weeklyPlain, /[█░]{10}/, `weekly row must not carry the session row's bar content, got: ${weeklyPlain}`);
+	});
 });
 
 /** Byte-for-byte-shaped (not byte-for-byte content) `.planning/STATE.md` fixture — real field names, a
@@ -360,8 +465,8 @@ progress:
 `;
 }
 
-describe("FooterComponent milestone row (row 3, SL-02/ROADMAP SC-4/SC-5)", () => {
-	it("renders exactly 3 rows with the milestone line when .planning/STATE.md resolves", () => {
+describe("FooterComponent milestone row (row 5, SL-02/ROADMAP SC-4/SC-5)", () => {
+	it("renders exactly 5 rows with the milestone line when .planning/STATE.md resolves", () => {
 		const width = 120;
 		const dir = mkdtempSync(join(tmpdir(), "footer-milestone-"));
 		writeStateMd(dir, stateMdFixture("Operator-Surface Finish + Reliability Tail"));
@@ -370,36 +475,36 @@ describe("FooterComponent milestone row (row 3, SL-02/ROADMAP SC-4/SC-5)", () =>
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = withCwd(dir, () => footer.render(width));
-		assert.equal(lines.length, 3);
-		const row3Plain = stripVTControlCharacters(lines[2]!);
-		assert.ok(row3Plain.startsWith("v6"), `expected row 3 to start with the milestone version, got: ${row3Plain}`);
+		assert.equal(lines.length, 5);
+		const row5Plain = stripVTControlCharacters(lines[4]!);
+		assert.ok(row5Plain.startsWith("v6"), `expected row 5 to start with the milestone version, got: ${row5Plain}`);
 		assert.ok(
-			row3Plain.trimEnd().endsWith("Phase 28 planning"),
-			`expected row 3 to end with the scene phrase (after trimming the row's full-width padding), got: ${JSON.stringify(row3Plain)}`,
+			row5Plain.trimEnd().endsWith("Phase 28 planning"),
+			`expected row 5 to end with the scene phrase (after trimming the row's full-width padding), got: ${JSON.stringify(row5Plain)}`,
 		);
-		assert.equal(visibleWidth(lines[2]!), width);
+		assert.equal(visibleWidth(lines[4]!), width);
 
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("renders exactly 2 rows when no .planning/STATE.md is resolvable", () => {
+	it("renders exactly 4 rows when no .planning/STATE.md is resolvable", () => {
 		const width = 120;
 		const session = createSession({ sessionName: "demo" });
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		// Default process.cwd() override (NO_PLANNING_CWD) has no .planning anywhere up to the
-		// filesystem root — row 3 must be omitted entirely, never a blank third row.
+		// filesystem root — the milestone row must be omitted entirely, never a blank fifth row.
 		const lines = footer.render(width);
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 4);
 	});
 
 	it(
-		"SC-5: a 1000-character milestone name leaves rows 1 and 2 byte-identical and row 3 still measures exactly the width",
+		"SC-5: a 1000-character milestone name leaves rows 1 through 4 byte-identical and row 5 still measures exactly the width",
 		{ timeout: 10_000 },
 		async () => {
 			const width = 120;
 			// One fixed directory (and therefore one fixed displayed cwd) for both renders — SC-5 is
-			// about the MILESTONE NAME's length not disturbing rows 1/2, so everything else (session,
+			// about the MILESTONE NAME's length not disturbing rows 1-4, so everything else (session,
 			// footerData, displayed cwd) must be held constant; only the STATE.md content changes.
 			const dir = mkdtempSync(join(tmpdir(), "footer-milestone-sc5-"));
 			const statePath = join(dir, ".planning", "STATE.md");
@@ -418,13 +523,18 @@ describe("FooterComponent milestone row (row 3, SL-02/ROADMAP SC-4/SC-5)", () =>
 
 			const longLines = withCwd(dir, () => footer.render(width));
 
-			assert.equal(shortLines.length, 3);
-			assert.equal(longLines.length, 3);
-			assert.equal(shortLines[0], longLines[0], "row 1 must be byte-identical regardless of milestone name length");
-			assert.equal(shortLines[1], longLines[1], "row 2 must be byte-identical regardless of milestone name length");
-			assert.notEqual(shortLines[2], longLines[2]);
-			assert.equal(visibleWidth(shortLines[2]!), width);
-			assert.equal(visibleWidth(longLines[2]!), width);
+			assert.equal(shortLines.length, 5);
+			assert.equal(longLines.length, 5);
+			for (let i = 0; i < 4; i++) {
+				assert.equal(
+					shortLines[i],
+					longLines[i],
+					`row ${i + 1} must be byte-identical regardless of milestone name length`,
+				);
+			}
+			assert.notEqual(shortLines[4], longLines[4]);
+			assert.equal(visibleWidth(shortLines[4]!), width);
+			assert.equal(visibleWidth(longLines[4]!), width);
 
 			rmSync(dir, { recursive: true, force: true });
 		},

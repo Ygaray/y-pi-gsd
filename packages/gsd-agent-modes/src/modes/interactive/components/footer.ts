@@ -223,19 +223,18 @@ export class FooterComponent implements Component {
 		const sessionRowSegment = formatMeterRowSegment("session", rateLimits?.session ?? null, nowEpochSec);
 		const weeklyRowSegment = formatMeterRowSegment("weekly", rateLimits?.weekly ?? null, nowEpochSec);
 
-		const row2Separator = theme.fg("dim", " · ");
-		const row2Segments = [contextRowSegment, sessionRowSegment, weeklyRowSegment].filter(
-			(segment): segment is string => !!segment,
-		);
-		const line2 = row2Segments.join(row2Separator);
-
 		const planningState = readPlanningState(rawCwd);
 		const line3 = formatMilestoneRow(planningState);
 
-		const lines = [...renderMinimalFooterLine(line1, width), ...renderMinimalFooterLine(line2, width)];
+		// Rows 2 onward: each meter gets its own `renderMinimalFooterLine` call and never shares
+		// another row's truncation budget — the mechanism behind ROADMAP SC-5 and now SL-03.
+		const lines = [
+			...renderMinimalFooterLine(line1, width),
+			...renderMinimalFooterLine(contextRowSegment, width),
+			...renderMinimalFooterLine(sessionRowSegment, width),
+			...renderMinimalFooterLine(weeklyRowSegment, width),
+		];
 		if (line3) {
-			// Own `renderMinimalFooterLine` call, never sharing row 1/2's truncation budget — this
-			// independent per-row truncation is the entire mechanism behind ROADMAP SC-5.
 			lines.push(...renderMinimalFooterLine(line3, width));
 		}
 		return lines;
