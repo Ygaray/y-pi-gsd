@@ -25,7 +25,6 @@
     "gsd-seam-types.ts",
     "gsd-extension-types.ts",
     "session-cwd.ts",
-    "extension-session-types.ts",
     "extensions/types.ts",
     "extensions/extension-upstream-types.ts"
   ],
@@ -50,30 +49,17 @@
       "../agent-session.js": "@gsd/agent-core",
       "./bash-executor.js": "@gsd/agent-core",
       "../bash-executor.js": "@gsd/agent-core",
-      "./fallback-resolver.js": "@gsd/agent-core",
-      "../fallback-resolver.js": "@gsd/agent-core",
       "./compaction/index.js": "@gsd/agent-core",
       "../compaction/index.js": "@gsd/agent-core",
-      "./keybindings.js": "@gsd/agent-core",
-      "../keybindings.js": "@gsd/agent-core",
       "./contextual-tips.js": "@gsd/agent-core",
       "../contextual-tips.js": "@gsd/agent-core",
-      "./blob-store.js": "@gsd/agent-core",
-      "../blob-store.js": "@gsd/agent-core",
-      "./artifact-manager.js": "@gsd/agent-core",
-      "../artifact-manager.js": "@gsd/agent-core",
-      "./system-prompt.js": "@gsd/agent-core",
-      "../system-prompt.js": "@gsd/agent-core",
-      "./lifecycle-hooks.js": "@gsd/agent-core",
-      "../lifecycle-hooks.js": "@gsd/agent-core",
       "./sdk.js": "@gsd/agent-core",
       "../sdk.js": "@gsd/agent-core"
     },
     "agentModes": {
       "../cli/args.js": "@gsd/agent-modes",
       "../../cli/args.js": "@gsd/agent-modes",
-      "../modes/interactive/controllers/chat-controller.js": "@gsd/agent-modes",
-      "@gsd/pi-coding-agent/core/keybindings.js": "@gsd/agent-core"
+      "../modes/interactive/controllers/chat-controller.js": "@gsd/agent-modes"
     }
   },
   "piInternalPathFixes": [

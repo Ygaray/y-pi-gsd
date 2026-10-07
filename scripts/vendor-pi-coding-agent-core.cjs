@@ -26,7 +26,6 @@ const PROTECTED = new Set([
   'gsd-seam-types.ts',
   'gsd-extension-types.ts',
   'session-cwd.ts',
-  'extension-session-types.ts',
   'extensions/types.ts',
   'extensions/extension-upstream-types.ts',
 ])
