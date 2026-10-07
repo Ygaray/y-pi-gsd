@@ -68,6 +68,13 @@ function preserveGsdPackageJson(targetDir, upstreamPkgJson) {
       gsd: existing.gsd,
       piConfig: existing.piConfig,
     }
+    // WR-01 follow-up (35-REVIEW.md re-review): preserve a top-level "//" GSD
+    // cross-reference comment across a resync, the same way `gsd`/`piConfig`
+    // already survive. Without this, any such note (e.g. documenting a
+    // GSD-side dependency removal and its now-dangling runtime fallback) is
+    // silently wiped by the next vendoring run — reintroducing exactly the
+    // kind of undocumented drift these notes exist to prevent.
+    if (existing['//'] !== undefined) gsdFields['//'] = existing['//']
   }
 
   const merged = { ...upstreamPkgJson, ...gsdFields }
