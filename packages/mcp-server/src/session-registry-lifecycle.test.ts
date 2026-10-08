@@ -700,3 +700,153 @@ describe('Phase 41 driver registry lifecycle - D-02 registry-first stop (SC2)', 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-04 reconnect reconcile (SC4)
+// ---------------------------------------------------------------------------
+
+/** Run `fn` with the DB bridge forced off and GSD_WORKFLOW_PROJECT_ROOT unset. */
+async function withBridgeDisabled<T>(fn: () => Promise<T>): Promise<T> {
+  const savedDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+  process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+  try {
+    return await withoutProjectRoot(fn);
+  } finally {
+    if (savedDisable === undefined) delete process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    else process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = savedDisable;
+  }
+}
+
+function nonZeroSignals(sm: TestableSessionManager): Array<{ pid: number; signal: NodeJS.Signals | 0 | undefined }> {
+  return sm.killedPids.filter((k) => k.signal !== 0 && k.signal !== undefined);
+}
+
+describe('Phase 41 driver registry lifecycle - D-04 reconnect reconcile (SC4)', () => {
+  it('D-04 reconcileRegisteredDriver never signals and tombstones a dead row', async () => {
+    const sm = createManager();
+    const deadDir = join(tmp, 'proj-recon-dead');
+    const trackedDir = join(tmp, 'proj-recon-tracked');
+    mkdirSync(deadDir);
+    mkdirSync(trackedDir);
+    registerSessionEntry(
+      {
+        sessionId: 'dead-sess',
+        projectDir: deadDir,
+        pid: 42001,
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: 999999,
+      },
+      sm.registryPath,
+    );
+    // An in-flight row (sessionId '') must never match an empty reference.
+    registerSessionEntry(
+      {
+        sessionId: '',
+        projectDir: join(tmp, 'proj-inflight'),
+        pid: 42003,
+        startTime: new Date().toISOString(),
+        status: 'starting',
+      },
+      sm.registryPath,
+    );
+
+    const first = sm.reconcileRegisteredDriver({ projectDir: deadDir });
+    assert.equal(first.outcome, 'dead-reconciled');
+    const row = getSessionEntry(deadDir, sm.registryPath);
+    assert.equal(row?.status, 'exited');
+    assert.ok(row?.exit?.reason.includes('not running when reconciled'), row?.exit?.reason);
+    assert.ok(row?.exit?.reason.includes('42001'), 'reason names the pid');
+
+    const second = sm.reconcileRegisteredDriver({ projectDir: deadDir });
+    assert.equal(second.outcome, 'dead-reconciled');
+    assert.deepEqual(getSessionEntry(deadDir, sm.registryPath)?.exit, row?.exit, 'first exit record (incl. at) is kept');
+
+    assert.equal(sm.reconcileRegisteredDriver({ sessionId: '' }).outcome, 'no-entry');
+    assert.equal(sm.reconcileRegisteredDriver({}).outcome, 'no-entry');
+
+    await sm.startSession(trackedDir, { cliPath: '/usr/bin/gsd' });
+    const before = getSessionEntry(trackedDir, sm.registryPath);
+    assert.equal(sm.reconcileRegisteredDriver({ projectDir: trackedDir }).outcome, 'tracked');
+    assert.deepEqual(getSessionEntry(trackedDir, sm.registryPath), before);
+
+    assert.deepEqual(nonZeroSignals(sm), [], 'a read path must never send a non-zero signal');
+    assert.deepEqual(sm.reconcileCalls, [], 'no Attempt settle on a read path');
+  });
+
+  it('D-04 reconcileRegisteredDriver reports a live untracked driver without touching it', () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-recon-live');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 42002, 'live-sess');
+    const before = structuredClone(getSessionEntry(projectDir, sm.registryPath));
+
+    const result = sm.reconcileRegisteredDriver({ projectDir });
+
+    assert.equal(result.outcome, 'orphan-alive');
+    assert.equal(result.ownerAlive, false, 'ownerPid 999999 is not alive');
+    assert.equal(result.entry?.pid, 42002);
+    assert.deepEqual(getSessionEntry(projectDir, sm.registryPath), before);
+    assert.deepEqual(nonZeroSignals(sm), []);
+    assert.deepEqual(sm.reconcileCalls, []);
+
+    const bySession = sm.reconcileRegisteredDriver({ sessionId: 'live-sess' });
+    assert.equal(bySession.outcome, 'orphan-alive');
+  });
+
+  it('D-04 gsd_status and gsd_result return the same reconciled driver payload', async () => {
+    const sm = createManager();
+    const liveDir = join(tmp, 'proj-h-live');
+    const deadDir = join(tmp, 'proj-h-dead');
+    const noneDir = join(tmp, 'proj-h-none');
+    mkdirSync(liveDir);
+    mkdirSync(deadDir);
+    mkdirSync(noneDir);
+    liveRow(sm, liveDir, 42010, 'h-live-sess');
+    registerSessionEntry(
+      {
+        sessionId: 'h-dead-sess',
+        projectDir: deadDir,
+        pid: 42011,
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: 999999,
+      },
+      sm.registryPath,
+    );
+
+    await withBridgeDisabled(async () => {
+      const payloads: Record<string, Record<string, unknown>> = {};
+      for (const dir of [liveDir, deadDir]) {
+        const perTool: Array<Record<string, any>> = [];
+        for (const tool of ['gsd_status', 'gsd_result']) {
+          const out = await callTool(sm, tool, { sessionId: 'stale-x', projectDir: dir });
+          assert.equal(out.isError, false, `${tool}: ${out.text}`);
+          perTool.push(JSON.parse(out.text));
+        }
+        assert.deepEqual(perTool[0], perTool[1], `both tools must agree for ${dir}`);
+        payloads[dir] = perTool[0];
+      }
+
+      const live = payloads[liveDir] as Record<string, any>;
+      assert.equal(live.status, 'untracked');
+      assert.equal(live.reconciledFromDb, false);
+      assert.equal(live.driver.outcome, 'orphan-alive');
+      assert.equal(live.driver.pid, 42010);
+      assert.equal(live.driver.ownerAlive, false);
+
+      const dead = payloads[deadDir] as Record<string, any>;
+      assert.equal(dead.status, 'untracked');
+      assert.equal(dead.driver.outcome, 'dead-reconciled');
+      assert.ok(String(dead.driver.exit.reason).includes('not running'), dead.driver.exit.reason);
+
+      for (const tool of ['gsd_status', 'gsd_result']) {
+        const none = await callTool(sm, tool, { sessionId: 'stale-x', projectDir: noneDir });
+        assert.equal(none.isError, true, tool);
+        assert.match(none.text, /Session not found/);
+      }
+    });
+
+    assert.deepEqual(nonZeroSignals(sm), [], 'status/result polls must never signal');
+  });
+});

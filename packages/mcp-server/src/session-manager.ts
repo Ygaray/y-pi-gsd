@@ -24,6 +24,7 @@ import {
   findSessionEntryBySessionId,
   getSessionEntry,
   isOrphanEntryAlive,
+  isRegistryOwnerAlive,
   isTombstoneEntry,
   killOrphanSessionPid,
   recordSessionExit,
@@ -226,6 +227,30 @@ export interface RegisteredDriverStopResult {
   entry?: SessionRegistryEntry;
   /** Underlying kill error (only for `'kill-failed'`). */
   error?: string;
+}
+
+/**
+ * Classification returned by `SessionManager.reconcileRegisteredDriver` (D-04,
+ * Phase 41 / DRIVER-02): what the persisted registry says about a driver that
+ * a read tool (gsd_status / gsd_result) could not resolve in memory.
+ *
+ * - `'no-entry'` - nothing persisted for the reference.
+ * - `'tracked'` - this process holds an in-memory session for the row's dir;
+ *   the row is its mirror and is left untouched.
+ * - `'dead-reconciled'` - the pid is dead or recycled, or the row is already an
+ *   exit tombstone; the row is an exit tombstone and nothing was signalled.
+ * - `'orphan-alive'` - the pid is alive but not tracked by this process; it is
+ *   reported, never signalled or settled.
+ */
+export type DriverReconcileOutcome = 'no-entry' | 'tracked' | 'dead-reconciled' | 'orphan-alive';
+
+/** Result of `SessionManager.reconcileRegisteredDriver`. */
+export interface DriverReconcileResult {
+  outcome: DriverReconcileOutcome;
+  /** The registry row as it stands after reconciling (absent for `'no-entry'`). */
+  entry?: SessionRegistryEntry;
+  /** Advisory owner-liveness (only for `'orphan-alive'`; null when no ownerPid). */
+  ownerAlive?: boolean | null;
 }
 
 /**
@@ -945,6 +970,50 @@ export class SessionManager {
    */
   findRegisteredDriverBySessionId(sessionId: string): SessionRegistryEntry | undefined {
     return findSessionEntryBySessionId(sessionId, this.getSessionRegistryPath());
+  }
+
+  /**
+   * D-04 (Phase 41 / DRIVER-02): classify what the persisted registry says
+   * about a driver that has no in-memory session here, so gsd_status and
+   * gsd_result can self-reconcile after an MCP-server restart.
+   *
+   * READ PATHS NEVER KILL. The registry is shared by every MCP-server process
+   * on the box, so an untracked live row may be a healthy driver owned by a
+   * peer server. Liveness comes only from `isOrphanEntryAlive` (signal 0 plus
+   * the start-time guard - the single-authority rule in orphan-reconcile.ts).
+   * This method never runs the Attempt-settle seam or any kill helper; a dead
+   * or recycled pid's row is rewritten as an exit tombstone, a live one is left
+   * byte-for-byte unchanged. Stopping is gsd_cancel's job (stopRegisteredDriver).
+   * Idempotent: an existing tombstone is neither probed nor rewritten.
+   */
+  reconcileRegisteredDriver(ref: { projectDir?: string; sessionId?: string }): DriverReconcileResult {
+    const registryPath = this.getSessionRegistryPath();
+    let entry: SessionRegistryEntry | undefined;
+    if (typeof ref.projectDir === 'string' && ref.projectDir.trim() !== '') {
+      entry = getSessionEntry(ref.projectDir.trim(), registryPath);
+    } else if (typeof ref.sessionId === 'string') {
+      entry = findSessionEntryBySessionId(ref.sessionId, registryPath);
+    }
+    if (!entry) return { outcome: 'no-entry' };
+
+    if (this.getSessionByDir(entry.projectDir)) return { outcome: 'tracked', entry };
+
+    if (isTombstoneEntry(entry)) return { outcome: 'dead-reconciled', entry };
+
+    const livenessOptions = this.getSessionLivenessOptions();
+    if (!isOrphanEntryAlive(entry, livenessOptions)) {
+      this.tombstoneDeadEntry(entry);
+      return {
+        outcome: 'dead-reconciled',
+        entry: getSessionEntry(entry.projectDir, registryPath) ?? entry,
+      };
+    }
+
+    return {
+      outcome: 'orphan-alive',
+      entry,
+      ownerAlive: isRegistryOwnerAlive(entry, livenessOptions),
+    };
   }
 
   /**

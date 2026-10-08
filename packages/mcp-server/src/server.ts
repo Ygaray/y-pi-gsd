@@ -283,6 +283,9 @@ export function resolveStatusSession(
  * Returns null (never throws) when the bridge isn't configured, there's no
  * DB, or it can't be opened/read — callers fall through to the existing
  * "Session not found" error in that case.
+ *
+ * Phase 41 (D-04): reached only through `buildUntrackedSessionPayload`, which
+ * runs the driver-registry reconcile first and independently of this DB gate.
  */
 async function reconcileResultFromDb(
   sessionId: string | undefined,
@@ -303,6 +306,62 @@ async function reconcileResultFromDb(
   } catch {
     return null;
   }
+}
+
+/**
+ * The single no-in-memory-session seam for BOTH gsd_status and gsd_result
+ * (RELY-07 / INC-2026-09-29-02 dual-handler rule; D-04, Phase 41 / DRIVER-02).
+ *
+ * The driver registry is reconciled FIRST and independently of the DB bridge,
+ * so a registered-but-untracked driver is reported even when the bridge is not
+ * configured. Read paths never kill: `reconcileRegisteredDriver` only probes
+ * with signal 0 and tombstones dead rows.
+ *
+ * Returns null when neither the registry nor the DB knows the session; the
+ * caller then returns its pre-existing "Session not found" error. A
+ * DB-reconciled payload keeps its shape and only gains a `driver` field.
+ */
+async function buildUntrackedSessionPayload(
+  sessionManager: SessionManager,
+  sessionId: string | undefined,
+  projectDir: string | undefined,
+): Promise<Record<string, unknown> | null> {
+  const driver = sessionManager.reconcileRegisteredDriver({ projectDir, sessionId });
+  const db = projectDir ? await reconcileResultFromDb(sessionId, projectDir) : null;
+  if (driver.outcome === 'no-entry' || !driver.entry) {
+    return db;
+  }
+
+  const entry = driver.entry;
+  const driverPayload = {
+    outcome: driver.outcome,
+    pid: entry.pid ?? null,
+    startTime: entry.startTime ?? null,
+    registryStatus: entry.status ?? null,
+    ownerPid: entry.ownerPid ?? null,
+    ownerAlive: driver.ownerAlive ?? null,
+    exit: entry.exit ?? null,
+  };
+  if (db) return { ...db, driver: driverPayload };
+
+  let note: string;
+  if (driver.outcome === 'orphan-alive') {
+    note =
+      'A driver is registered for this projectDir and its pid is alive, but this MCP-server process does not track it (e.g. after an MCP-server restart, or it was started by another MCP server). It was not signalled; call gsd_cancel with this projectDir to stop it. Reconciled from the session registry - this is not a live session handle.';
+  } else if (driver.outcome === 'dead-reconciled') {
+    note =
+      'The registered driver for this projectDir is no longer running; its registry row was reconciled to an exit record (see driver.exit). Reconciled from the session registry - this is not a live session.';
+  } else {
+    note = 'Reconciled from the session registry.';
+  }
+  return {
+    sessionId: sessionId || entry.sessionId || null,
+    projectDir: projectDir ?? entry.projectDir,
+    status: 'untracked',
+    reconciledFromDb: false,
+    note,
+    driver: driverPayload,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,12 +1309,11 @@ export async function createMcpServer(
       try {
         const resolved = resolveStatusSession(sessionManager, { sessionId, projectDir });
         if (!resolved.session) {
-          // INC-2026-09-29-02 fix 3: no in-memory session survived (e.g. an
-          // MCP-server restart) — reconcile against the DB before failing.
-          if (projectDir) {
-            const reconciled = await reconcileResultFromDb(sessionId, projectDir);
-            if (reconciled) return jsonContent(reconciled);
-          }
+          // INC-2026-09-29-02 fix 3 + Phase 41 D-04: no in-memory session
+          // survived (e.g. an MCP-server restart) - reconcile the driver
+          // registry and the DB through the shared seam before failing.
+          const untracked = await buildUntrackedSessionPayload(sessionManager, sessionId, projectDir);
+          if (untracked) return jsonContent(untracked);
           return errorContent(resolved.error ?? 'Session not found');
         }
         return jsonContent(getSessionStatusPayload(resolved.session));
@@ -1283,13 +1341,11 @@ export async function createMcpServer(
         // fatally on a stale/mismatched sessionId.
         const resolved = resolveStatusSession(sessionManager, { sessionId, projectDir });
         if (!resolved.session) {
-          // INC-2026-09-29-02 fix 3: final tier — reconcile from the DB
-          // before giving up, so a wiped in-memory registry (server
-          // restart) still surfaces real progress instead of a dead end.
-          if (projectDir) {
-            const reconciled = await reconcileResultFromDb(sessionId, projectDir);
-            if (reconciled) return jsonContent(reconciled);
-          }
+          // INC-2026-09-29-02 fix 3 + Phase 41 D-04: final tier - same shared
+          // seam as gsd_status, so a wiped in-memory registry (server
+          // restart) still surfaces the registered driver and real progress.
+          const untracked = await buildUntrackedSessionPayload(sessionManager, sessionId, projectDir);
+          if (untracked) return jsonContent(untracked);
           return errorContent(resolved.error ?? 'Session not found');
         }
         const result = sessionManager.getResult(resolved.session.sessionId);
