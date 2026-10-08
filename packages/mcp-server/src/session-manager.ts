@@ -29,7 +29,7 @@ import {
   killOrphanSessionPid,
   recordSessionExit,
   registerSessionEntry,
-  removeSessionEntry,
+  removeSessionEntryIfPid,
   type SessionLivenessOptions,
   type SessionRegistryEntry,
 } from './session-persist.js';
@@ -383,7 +383,7 @@ export class SessionManager {
         // persisted registry row for its dir - drop it now that we're
         // reclaiming its child, so a future restart doesn't mistake it for an
         // orphan.
-        removeSessionEntry(existing.projectDir, this.getSessionRegistryPath());
+        this.releaseRegistryRow(existing);
       } finally {
         this.startingLocks.delete(lockKey);
       }
@@ -464,17 +464,15 @@ export class SessionManager {
         // dispatched to without a registry row.
         throw new Error('driver pid unavailable after start(); refusing to dispatch an unregistered driver');
       }
-      registerSessionEntry(
-        {
-          sessionId: '',
-          projectDir: resolvedDir,
-          pid: childPid,
-          startTime: registeredStartTime,
-          status: 'starting',
-          ownerPid: process.pid,
-        },
-        this.getSessionRegistryPath(),
-      );
+      session.driverPid = childPid;
+      this.registerDriverRow({
+        sessionId: '',
+        projectDir: resolvedDir,
+        pid: childPid,
+        startTime: registeredStartTime,
+        status: 'starting',
+        ownerPid: process.pid,
+      });
 
       // Perform v2 init handshake
       const initResult: RpcInitResult = await Promise.race([
@@ -487,17 +485,14 @@ export class SessionManager {
 
       // Upgrade the same registry key in place with the real sessionId and
       // 'running' status (registerSessionEntry overwrites the key).
-      registerSessionEntry(
-        {
-          sessionId: session.sessionId,
-          projectDir: resolvedDir,
-          pid: childPid,
-          startTime: registeredStartTime,
-          status: 'running',
-          ownerPid: process.pid,
-        },
-        this.getSessionRegistryPath(),
-      );
+      this.registerDriverRow({
+        sessionId: session.sessionId,
+        projectDir: resolvedDir,
+        pid: childPid,
+        startTime: registeredStartTime,
+        status: 'running',
+        ownerPid: process.pid,
+      });
 
       // Wire event tracking
       const unsubscribeEvents = client.onEvent((event: SdkAgentEvent) => {
@@ -535,7 +530,7 @@ export class SessionManager {
       // stop above is awaited), mirroring _cancelSessionObject. A registry
       // I/O error must not mask the original start failure.
       try {
-        removeSessionEntry(resolvedDir, this.getSessionRegistryPath());
+        this.releaseRegistryRow(session);
       } catch { /* swallow registry cleanup errors */ }
 
       // Keep session in map so callers can inspect the error
@@ -601,6 +596,44 @@ export class SessionManager {
         `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; ${detail})`
       );
     }
+  }
+
+  /**
+   * Persist `entry`, refusing to overwrite a LIVE row held by a different pid
+   * (WR-02, 41-REVIEW.md). `startingLocks` only excludes callers inside this
+   * process; the registry is shared by every MCP server, so a peer that raced
+   * the same worktree may already have registered its own driver. Registering
+   * over it would leave that live, detached driver absent from the registry -
+   * the exact SC1 failure this phase closes. Throwing makes `startSession`'s
+   * catch stop THIS driver and (pid-bound) leave the peer's row untouched.
+   * Tombstones and dead rows are superseded as before.
+   */
+  private registerDriverRow(entry: SessionRegistryEntry): void {
+    const registryPath = this.getSessionRegistryPath();
+    const held = getSessionEntry(entry.projectDir, registryPath);
+    if (
+      held &&
+      !isTombstoneEntry(held) &&
+      held.pid !== entry.pid &&
+      isOrphanEntryAlive(held, this.getSessionLivenessOptions())
+    ) {
+      throw new Error(
+        `another live driver (pid=${held.pid}, owner=${held.ownerPid ?? 'unknown'}) is already registered for ${entry.projectDir}; refusing to register pid=${entry.pid} over it`,
+      );
+    }
+    registerSessionEntry(entry, registryPath);
+  }
+
+  /**
+   * Drop the registry row this session's driver owns, bound to the pid captured
+   * at registration so a newer/peer driver's row for the same worktree is never
+   * deleted (WR-02, 41-REVIEW.md). No-op when the session never registered a
+   * driver pid.
+   */
+  private releaseRegistryRow(session: ManagedSession): void {
+    const pid = session.driverPid ?? session.client.pid;
+    if (typeof pid !== 'number') return;
+    removeSessionEntryIfPid(session.projectDir, pid, this.getSessionRegistryPath());
   }
 
   /**
@@ -695,13 +728,13 @@ export class SessionManager {
     // live claim. Its pid may have been recycled to an unrelated process, so
     // it is dropped WITHOUT any liveness probe or signal.
     if (isTombstoneEntry(entry)) {
-      removeSessionEntry(resolvedDir, registryPath);
+      removeSessionEntryIfPid(resolvedDir, entry.pid, registryPath);
       return 'stale-entry-dropped';
     }
 
     const livenessOptions = this.getSessionLivenessOptions();
     if (!isOrphanEntryAlive(entry, livenessOptions)) {
-      removeSessionEntry(resolvedDir, registryPath);
+      removeSessionEntryIfPid(resolvedDir, entry.pid, registryPath);
       return 'stale-entry-dropped';
     }
 
@@ -760,7 +793,7 @@ export class SessionManager {
     process.stderr.write(
       `[gsd-mcp-server] INC-2026-09-29-02: reaped orphaned headless session for ${resolvedDir} left by a prior MCP server instance — ${label}\n`,
     );
-    removeSessionEntry(resolvedDir, registryPath);
+    removeSessionEntryIfPid(resolvedDir, entry.pid, registryPath);
     return 'reaped';
   }
 
@@ -959,7 +992,7 @@ export class SessionManager {
     }
 
     if (result === 'killed' || result === 'force-killed') {
-      removeSessionEntry(resolvedDir, registryPath);
+      removeSessionEntryIfPid(resolvedDir, entry.pid, registryPath);
       return { outcome: 'stopped', entry };
     }
 
@@ -1079,7 +1112,7 @@ export class SessionManager {
     // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped now
     // — drop its persisted registry row so a future restart doesn't treat it
     // as a live orphan.
-    removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
+    this.releaseRegistryRow(session);
   }
 
   /**
@@ -1135,7 +1168,7 @@ export class SessionManager {
       // records a driver that already died and is kept for Phase 42.
       const registryPath = this.getSessionRegistryPath();
       if (!isTombstoneEntry(getSessionEntry(session.projectDir, registryPath))) {
-        removeSessionEntry(session.projectDir, registryPath);
+        this.releaseRegistryRow(session);
       }
     }
 
@@ -1256,7 +1289,7 @@ export class SessionManager {
         // leaking it until the next same-projectDir launch (the eviction
         // branch in startSession()) or full server shutdown (cleanup()).
         void this.stopSessionClient(session);
-        removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
+        this.releaseRegistryRow(session);
       }
       return;
     }

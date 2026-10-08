@@ -888,3 +888,91 @@ describe('Phase 41 driver registry lifecycle - D-04 reconnect reconcile (SC4)', 
     assert.deepEqual(nonZeroSignals(sm), []);
   });
 });
+
+// ---------------------------------------------------------------------------
+// WR-02 (41-REVIEW.md): rows are bound to the driver pid
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - WR-02 pid-bound row ownership', () => {
+  const PEER_PID = 70001;
+
+  function seedPeerRow(sm: TestableSessionManager, projectDir: string): void {
+    sm.alivePids.add(PEER_PID);
+    registerSessionEntry(
+      {
+        sessionId: 'peer-session',
+        projectDir,
+        pid: PEER_PID,
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: 999999,
+      },
+      sm.registryPath,
+    );
+  }
+
+  it('WR-02 a failed start never deletes a peer server\'s live row for the same worktree', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr02-fail');
+
+    let release!: () => void;
+    sm.nextInitGate = new Promise<void>((r) => {
+      release = r;
+    });
+    sm.nextInitError = new Error('init boom');
+    const startPromise = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const settled = assert.rejects(startPromise, /Failed to start session/);
+    await new Promise((r) => setImmediate(r));
+
+    // A peer MCP server wins the row while our init() is still pending.
+    seedPeerRow(sm, projectDir);
+    release();
+    await settled;
+
+    assert.equal(sm.lastClient!.stopped, true);
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, PEER_PID, 'peer row must survive our cleanup');
+  });
+
+  it('WR-02 refuses to register over a live peer row and stops its own driver', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr02-overwrite');
+
+    let release!: () => void;
+    sm.nextInitGate = new Promise<void>((r) => {
+      release = r;
+    });
+    const startPromise = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const settled = assert.rejects(startPromise, /another live driver/);
+    await new Promise((r) => setImmediate(r));
+
+    // Overwrite the 'starting' row with the peer's (as a racing peer would).
+    seedPeerRow(sm, projectDir);
+    release();
+    await settled;
+
+    const ours = sm.lastClient!;
+    assert.equal(ours.stopped, true, 'our un-registrable driver must be stopped');
+    assert.equal(ours.prompted.length, 0, 'no prompt may be dispatched for it');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, PEER_PID);
+  });
+
+  it('WR-02 a dead or tombstoned prior row is still superseded by a fresh registration', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr02-supersede');
+    // Dead peer (not in alivePids) is reaped as stale on start, then superseded.
+    registerSessionEntry(
+      {
+        sessionId: 'old',
+        projectDir,
+        pid: PEER_PID,
+        startTime: new Date().toISOString(),
+        status: 'running',
+      },
+      sm.registryPath,
+    );
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, sm.lastClient!.pid);
+  });
+});

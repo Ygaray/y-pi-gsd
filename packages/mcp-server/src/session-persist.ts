@@ -315,6 +315,33 @@ export function removeSessionEntry(projectDir: string, registryPath = REGISTRY_P
 }
 
 /**
+ * Remove the persisted entry for a projectDir ONLY when its row is bound to
+ * `expectedPid` (WR-02, 41-REVIEW.md). The registry is shared by every MCP
+ * server on the box, so a directory-keyed delete can erase a newer driver's
+ * live row that a peer wrote in the meantime; binding the delete to the pid the
+ * caller actually spawned/knew (mirroring `recordSessionExit`) closes that.
+ * Returns true when a row was removed, false when absent or held by another pid.
+ */
+export function removeSessionEntryIfPid(
+  projectDir: string,
+  expectedPid: number,
+  registryPath = REGISTRY_PATH,
+): boolean {
+  const registry = readSessionRegistry(registryPath);
+  const key = keyFor(projectDir);
+  const legacyKey = legacyKeyFor(projectDir);
+  let changed = false;
+  for (const k of legacyKey !== key ? [key, legacyKey] : [key]) {
+    if (registry[k] && registry[k].pid === expectedPid) {
+      delete registry[k];
+      changed = true;
+    }
+  }
+  if (changed) writeSessionRegistry(registry, registryPath);
+  return changed;
+}
+
+/**
  * Find the persisted row whose non-empty `sessionId` equals `sessionId`.
  * Empty or whitespace-only input returns undefined: in-flight rows carry
  * `sessionId: ''` until init() resolves and must never match (same guard as

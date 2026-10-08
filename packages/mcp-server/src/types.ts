@@ -58,6 +58,13 @@ export interface ManagedSession {
    * `client.stop()` / `client.abort()` once this is set (CR-01, 41-REVIEW.md).
    */
   driverExited?: boolean;
+
+  /**
+   * Pid of the driver child, captured when it was registered. `RpcClient.pid`
+   * is `undefined` once `stop()` has run, so registry rows are removed against
+   * this captured value (WR-02, 41-REVIEW.md: never delete a peer's row).
+   */
+  driverPid?: number;
 }
 
 export type { PendingBlocker };

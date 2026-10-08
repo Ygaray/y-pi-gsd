@@ -25,6 +25,7 @@ import {
   recordSessionExit,
   registerSessionEntry,
   removeSessionEntry,
+  removeSessionEntryIfPid,
   type SessionExitRecord,
   type SessionRegistryEntry,
 } from './session-persist.js';
@@ -143,6 +144,16 @@ describe('registerSessionEntry / getSessionEntry / removeSessionEntry', () => {
 
     assert.equal(getSessionEntry(entryA.projectDir, registryPath), undefined);
     assert.equal(getSessionEntry(entryB.projectDir, registryPath)?.pid, 2);
+  });
+
+  test('WR-02 removeSessionEntryIfPid removes only a row bound to the expected pid', () => {
+    const entry = makeEntry({ pid: 4321 });
+    registerSessionEntry(entry, registryPath);
+    assert.equal(removeSessionEntryIfPid(entry.projectDir, 9999, registryPath), false);
+    assert.equal(getSessionEntry(entry.projectDir, registryPath)?.pid, 4321, 'peer-owned row must survive');
+    assert.equal(removeSessionEntryIfPid(entry.projectDir, 4321, registryPath), true);
+    assert.equal(getSessionEntry(entry.projectDir, registryPath), undefined);
+    assert.equal(removeSessionEntryIfPid(entry.projectDir, 4321, registryPath), false);
   });
 
   test('removeSessionEntry on an absent entry is a safe no-op', () => {
