@@ -458,8 +458,10 @@ describe("RpcClient construction", () => {
 
 		const client = new RpcClient({ cliPath: scriptPath, detached: true });
 		let gcPid = 0;
+		let agentPid = 0;
 		try {
 			await client.start();
+			agentPid = (client as any).process.pid as number;
 			for (let i = 0; i < 100 && !(gcPid > 0); i++) {
 				try {
 					gcPid = Number(readFileSync(pidFile, "utf8"));
@@ -482,6 +484,15 @@ describe("RpcClient construction", () => {
 				"stop() must kill the whole group, leaving no orphaned grandchild",
 			);
 		} finally {
+			// Belt-and-braces: reap the whole group first so no descendant leaks if
+			// the regression this test guards against reappears.
+			if (agentPid > 0) {
+				try {
+					process.kill(-agentPid, "SIGKILL");
+				} catch {
+					/* group already gone */
+				}
+			}
 			if (gcPid > 0 && alive(gcPid)) {
 				try {
 					process.kill(gcPid, "SIGKILL");
