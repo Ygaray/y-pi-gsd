@@ -242,7 +242,20 @@ export function resolveStatusSession(
       };
     }
     const only = sessionManager.getOnlySession();
-    if (only) return { session: only };
+    if (only) {
+      // WR-05 (41-REVIEW.md): same masking defect as the projectDir case above.
+      // If the registry knows this (stale) sessionId and it belongs to a
+      // worktree OTHER than the sole tracked session's, returning the sole
+      // session would silently answer for a different project and the registry
+      // reconcile would never run.
+      const registered = sessionManager.findRegisteredDriverBySessionId(sessionId);
+      if (registered && sessionManager.getSessionByDir(registered.projectDir) !== only) {
+        return {
+          error: `Session not found: ${sessionId} (sessionId belongs to a registered driver for ${registered.projectDir}, which this server does not track)`,
+        };
+      }
+      return { session: only };
+    }
 
     return {
       error: `Session not found: ${sessionId} (sessionId is stale and no recoverable session was found by projectDir or as the sole tracked session)`,

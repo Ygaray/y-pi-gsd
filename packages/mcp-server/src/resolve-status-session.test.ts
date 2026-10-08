@@ -14,9 +14,12 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
+import { mkdtempSync, rmSync } from 'node:fs';
 import { SessionManager } from './session-manager.js';
+import { registerSessionEntry } from './session-persist.js';
 import { createMcpServer, resolveStatusSession } from './server.js';
 import type { ManagedSession } from './types.js';
 
@@ -25,6 +28,11 @@ import type { ManagedSession } from './types.js';
 // ---------------------------------------------------------------------------
 
 class FakeSessionManager extends SessionManager {
+  /** Never read the operator's real ~/.gsd registry from a unit test. */
+  protected override getSessionRegistryPath(): string | undefined {
+    return join(tmpdir(), 'resolve-status-session-no-such-registry', 'session-instances.json');
+  }
+
   /** Insert a session directly into the private sessions map for test setup. */
   putSession(projectDir: string, session: ManagedSession): void {
     (this as unknown as { sessions: Map<string, ManagedSession> }).sessions.set(
@@ -104,6 +112,55 @@ describe('resolveStatusSession (INC-2026-09-29-02)', () => {
 
     assert.equal(result.session, undefined);
     assert.match(result.error ?? '', /Session not found: stale-session-id/);
+  });
+
+  it('WR-05 does NOT return the sole tracked session for a stale sessionId the registry knows under another worktree', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'resolve-status-wr05-'));
+    try {
+      class RegistryBackedManager extends FakeSessionManager {
+        protected override getSessionRegistryPath(): string | undefined {
+          return join(tmp, 'session-instances.json');
+        }
+      }
+      const sm = new RegistryBackedManager();
+      const dirX = '/tmp/resolve-status-wr05-x';
+      const dirY = '/tmp/resolve-status-wr05-y';
+      const tracked = makeSession({ sessionId: 'session-x', projectDir: resolve(dirX) });
+      sm.putSession(dirX, tracked);
+      registerSessionEntry(
+        {
+          sessionId: 'pre-restart-y',
+          projectDir: dirY,
+          pid: 42500,
+          startTime: new Date().toISOString(),
+          status: 'running',
+        },
+        join(tmp, 'session-instances.json'),
+      );
+
+      const foreign = resolveStatusSession(sm, { sessionId: 'pre-restart-y' });
+      assert.equal(foreign.session, undefined, 'must not answer for project Y with project X');
+      assert.match(foreign.error ?? '', /Session not found: pre-restart-y/);
+
+      // An id the registry does not know keeps the sole-session recovery.
+      const unknown = resolveStatusSession(sm, { sessionId: 'unknown-id' });
+      assert.equal(unknown.session, tracked);
+
+      // An id the registry maps to the tracked session's own worktree still resolves it.
+      registerSessionEntry(
+        {
+          sessionId: 'old-x',
+          projectDir: dirX,
+          pid: 42501,
+          startTime: new Date().toISOString(),
+          status: 'running',
+        },
+        join(tmp, 'session-instances.json'),
+      );
+      assert.equal(resolveStatusSession(sm, { sessionId: 'old-x' }).session, tracked);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('still errors when sessionId is stale and no sessions are tracked at all', () => {
