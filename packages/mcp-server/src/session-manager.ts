@@ -23,6 +23,7 @@ import {
   canonicalProjectDir,
   getSessionEntry,
   isOrphanEntryAlive,
+  isTombstoneEntry,
   killOrphanSessionPid,
   registerSessionEntry,
   removeSessionEntry,
@@ -176,8 +177,9 @@ export function projectRecentEvents(events: SdkAgentEvent[], limit: number): Sdk
  * start proceeds or is declined.
  *
  * - `'no-entry'` — no persisted row existed for this `resolvedDir`.
- * - `'stale-entry-dropped'` — the row's pid was dead or recycled; the row
- *   was dropped and nothing was signalled.
+ * - `'stale-entry-dropped'` — the row's pid was dead or recycled, or the row
+ *   was an exit tombstone (never probed or signalled - its pid may have been
+ *   recycled); the row was dropped and nothing was signalled.
  * - `'reaped'` — a confirmed-alive orphan was reconciled to a non-settled
  *   outcome (`'no-attempt'` or `'db-unavailable'`) and its pid was killed.
  * - `'settled-alive'` — a confirmed-alive orphan's Task Attempt was
@@ -260,6 +262,11 @@ export class SessionManager {
    * adds an `await` in that stretch would silently reopen the exact race
    * this lock exists to close. Keep that stretch synchronous, or move the
    * lock's release to cover it, before adding any `await` there.
+   *
+   * Phase 41 (SC3): the reservation is keyed by the canonical (realpath)
+   * dir via `startLockKey()` and ALSO covers the awaited `stop()` of an
+   * evicted terminal session, so the replacement driver is never created
+   * while the old one is still shutting down.
    */
   private startingLocks = new Set<string>();
 
@@ -284,6 +291,16 @@ export class SessionManager {
     }
 
     const resolvedDir = resolve(projectDir);
+    const lockKey = this.startLockKey(resolvedDir);
+
+    // A concurrent startSession() for this worktree is already inside the
+    // awaited eviction stop or orphan reap - reject it exactly like the
+    // in-memory "already active" case (CR-02 guarantee, preserved across the
+    // now-async reap and eviction). Checked FIRST: an evicting session is
+    // still in `this.sessions` while its stop() is awaited.
+    if (this.startingLocks.has(lockKey)) {
+      throw new SessionDeclinedError('reap-in-progress', `Session already active for ${resolvedDir} (reap in progress)`);
+    }
 
     const existing = this.getSessionByDir(resolvedDir);
     if (existing) {
@@ -299,23 +316,29 @@ export class SessionManager {
       existing.unsubscribe?.();
       // Reclaim the evicted session's live headless child process. A paused (or
       // otherwise terminal) session keeps its RpcClient alive, so deleting the
-      // map entry alone would orphan the child process.
-      void existing.client.stop().catch(() => { /* swallow */ });
-      this.sessions.delete(existing.projectDir);
-      // INC-2026-09-29-02 fix 3 (Option B): this in-memory session owned the
-      // persisted registry row for its dir — drop it now that we're
-      // reclaiming its child, so a future restart doesn't mistake it for an
-      // orphan.
-      removeSessionEntry(existing.projectDir, this.getSessionRegistryPath());
-    } else if (this.startingLocks.has(this.startLockKey(resolvedDir))) {
-      // A concurrent startSession() call for this same resolvedDir is
-      // already inside the awaited reap below — reject it exactly like the
-      // in-memory "already active" case above (CR-02 guarantee, preserved
-      // across the now-async reap).
-      throw new SessionDeclinedError('reap-in-progress', `Session already active for ${resolvedDir} (reap in progress)`);
+      // map entry alone would orphan the child process. SC3 (Phase 41): the
+      // stop is AWAITED under the start lock, so the replacement driver is
+      // never created until the old one is confirmed stopped, and a racing
+      // startSession() during the stop is declined 'reap-in-progress'.
+      this.startingLocks.add(lockKey);
+      try {
+        try {
+          await existing.client.stop();
+        } catch {
+          /* swallow */
+        }
+        this.sessions.delete(existing.projectDir);
+        // INC-2026-09-29-02 fix 3 (Option B): this in-memory session owned the
+        // persisted registry row for its dir - drop it now that we're
+        // reclaiming its child, so a future restart doesn't mistake it for an
+        // orphan.
+        removeSessionEntry(existing.projectDir, this.getSessionRegistryPath());
+      } finally {
+        this.startingLocks.delete(lockKey);
+      }
     } else {
       // INC-2026-09-29-02 fix 3 (Option B): no in-memory session for this
-      // projectDir — but a persisted registry entry may reference a headless
+      // projectDir - but a persisted registry entry may reference a headless
       // child that is still alive from a PRIOR MCP server instance (the
       // in-memory Map is wiped on restart, so startSession()'s "already
       // active" guard above can't see it). Reap it before starting a new
@@ -589,6 +612,14 @@ export class SessionManager {
     const registryPath = this.getSessionRegistryPath();
     const entry = getSessionEntry(resolvedDir, registryPath);
     if (!entry) return 'no-entry';
+
+    // Phase 41 safety (T-41-01): an exit tombstone records a death, never a
+    // live claim. Its pid may have been recycled to an unrelated process, so
+    // it is dropped WITHOUT any liveness probe or signal.
+    if (isTombstoneEntry(entry)) {
+      removeSessionEntry(resolvedDir, registryPath);
+      return 'stale-entry-dropped';
+    }
 
     const livenessOptions = this.getSessionLivenessOptions();
     if (!isOrphanEntryAlive(entry, livenessOptions)) {

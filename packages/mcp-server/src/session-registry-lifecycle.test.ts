@@ -66,8 +66,15 @@ class MockRpcClient {
     this.started = true;
   }
 
+  /** When set, stop() awaits it before recording the stop. */
+  stopGate: Promise<void> | null = null;
+  /** When set, stop() appends `stopped:<pid>` after the gate. */
+  orderLog: string[] | null = null;
+
   async stop(): Promise<void> {
+    if (this.stopGate) await this.stopGate;
     this.stopped = true;
+    this.orderLog?.push(`stopped:${this.pid}`);
   }
 
   async init(): Promise<{ sessionId: string; version: string }> {
@@ -132,6 +139,9 @@ class TestableSessionManager extends SessionManager {
   nextPromptError: Error | null = null;
   nextPidUndefined = false;
 
+  /** Ordered log of `create:<pid>` / `stopped:<pid>` events. */
+  order: string[] = [];
+
   constructor(registryPath: string) {
     super();
     this.registryPath = registryPath;
@@ -153,6 +163,8 @@ class TestableSessionManager extends SessionManager {
     this.nextInitGate = null;
     this.nextInitError = null;
     this.nextPromptError = null;
+    client.orderLog = this.order;
+    this.order.push(`create:${client.pid}`);
     this.lastClient = client;
     this.allClients.push(client);
     return client as unknown as RpcClient;
@@ -334,5 +346,77 @@ describe('Phase 41 driver registry lifecycle - SC3 duplicate drivers', () => {
 
     await sm.cancelSessionByDir(real);
     assert.deepEqual(readSessionRegistry(sm.registryPath), {});
+  });
+
+  it('SC3 eviction awaits the old driver stop before spawning the replacement', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-evict');
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const oldClient = sm.lastClient!;
+    oldClient.emitEvent({ type: 'extension_ui_request', method: 'notify', message: 'Auto-mode paused (Escape).' });
+    assert.equal(sm.getInternalSession(projectDir)?.status, 'paused');
+
+    let openGate!: () => void;
+    oldClient.stopGate = new Promise<void>((r) => {
+      openGate = r;
+    });
+
+    const restart = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(sm.allClients.length, 1, 'replacement must not be created while stop() is pending');
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      (err: unknown) => {
+        assert.ok(err instanceof SessionDeclinedError);
+        assert.equal(err.reason, 'reap-in-progress');
+        return true;
+      },
+    );
+    assert.equal(sm.allClients.length, 1, 'declined racing start must create no client');
+
+    openGate();
+    await restart;
+
+    assert.equal(sm.allClients.length, 2);
+    const newClient = sm.lastClient!;
+    assert.deepEqual(sm.order, [
+      `create:${oldClient.pid}`,
+      `stopped:${oldClient.pid}`,
+      `create:${newClient.pid}`,
+    ]);
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, newClient.pid);
+  });
+
+  it('SC3 the start-time reap never probes or signals an exit tombstone pid', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-tombstone');
+    const tombPid = 40999;
+    sm.alivePids.add(tombPid); // models pid recycling: the dead driver's pid is now someone else's live process
+
+    registerSessionEntry(
+      {
+        sessionId: 'dead-session',
+        projectDir,
+        pid: tombPid,
+        startTime: new Date().toISOString(),
+        status: 'exited',
+        exit: { reason: 'driver exited code=1', code: 1, signal: null, at: new Date().toISOString() },
+      },
+      sm.registryPath,
+    );
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+
+    assert.deepEqual(
+      sm.killedPids.filter((k) => k.pid === tombPid),
+      [],
+      'tombstone pid must not be probed (not even signal 0) or signalled',
+    );
+    assert.equal(sm.alivePids.has(tombPid), true);
+    const row = getSessionEntry(projectDir, sm.registryPath);
+    assert.equal(row?.pid, sm.lastClient!.pid);
+    assert.equal(row?.exit, undefined);
   });
 });
