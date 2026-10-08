@@ -436,9 +436,11 @@ describe("RpcClient construction", () => {
 			scriptPath,
 			[
 				'const { spawn } = require("node:child_process");',
-				'const { writeFileSync } = require("node:fs");',
+				'const { writeFileSync, renameSync } = require("node:fs");',
 				'const gc = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });',
-				`writeFileSync(${JSON.stringify(pidFile)}, String(gc.pid));`,
+				// Write-then-rename so the reader never observes a partial pid.
+				`writeFileSync(${JSON.stringify(`${pidFile}.tmp`)}, String(gc.pid));`,
+				`renameSync(${JSON.stringify(`${pidFile}.tmp`)}, ${JSON.stringify(pidFile)});`,
 				"setInterval(() => {}, 1000);",
 				"",
 			].join("\n"),
@@ -474,7 +476,8 @@ describe("RpcClient construction", () => {
 			agentPid = (client as any).process.pid as number;
 			await waitFor(() => {
 				try {
-					gcPid = Number(readFileSync(pidFile, "utf8"));
+					const raw = readFileSync(pidFile, "utf8").trim();
+					gcPid = /^\d+$/.test(raw) ? Number(raw) : 0;
 				} catch {
 					gcPid = 0;
 				}
