@@ -1307,9 +1307,13 @@ export async function createMcpServer(
   //   1. sessionId  — the ID returned from gsd_execute (primary)
   //   2. projectDir — absolute path to the project directory (fallback)
   //
-  // The projectDir fallback handles interactive sessions (started via
-  // `/gsd auto` in the terminal) and post-restart MCP sessions that were
-  // never registered with a sessionId in this server instance.
+  // Order: a sessionId held by an in-memory session cancels that session.
+  // Otherwise projectDir - or, for a sessionId-only call, the registry row
+  // that carries the sessionId - goes to cancelSessionByDir, which stops the
+  // persisted registry's driver by its registered pid only (D-02, Phase 41);
+  // the legacy .gsd/auto.lock is consulted only for unregistered,
+  // terminal-started drivers. Handles post-restart MCP sessions whose
+  // sessionId this server instance no longer holds.
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_cancel',
@@ -1325,16 +1329,26 @@ export async function createMcpServer(
           return errorContent('Either sessionId or projectDir must be provided');
         }
         // Same validation gsd_cancel_by_project applies — projectDir reaches
-        // cancelSessionByDir, which reads .gsd/auto.lock under it.
+        // cancelSessionByDir (registry first, then the unregistered-driver lock).
         const validatedDir = projectDir ? validateProjectDir(projectDir) : undefined;
         if (sessionId) {
           try {
             await sessionManager.cancelSession(sessionId);
           } catch (err) {
-            if (!validatedDir || !(err instanceof Error) || !err.message.includes('Session not found')) {
+            if (!(err instanceof Error) || !err.message.includes('Session not found')) {
               throw err;
             }
-            await sessionManager.cancelSessionByDir(validatedDir);
+            if (validatedDir) {
+              await sessionManager.cancelSessionByDir(validatedDir);
+            } else {
+              // No projectDir: a stale sessionId (e.g. after an MCP-server
+              // restart) may still name a registered driver. Re-validate the
+              // row's projectDir - the registry file is not trusted input for
+              // the allowed-root check (T-41-03).
+              const entry = sessionManager.findRegisteredDriverBySessionId(sessionId);
+              if (!entry) throw err;
+              await sessionManager.cancelSessionByDir(validateProjectDir(entry.projectDir));
+            }
           }
         } else if (validatedDir) {
           await sessionManager.cancelSessionByDir(validatedDir);

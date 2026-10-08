@@ -508,4 +508,195 @@ describe('Phase 41 driver registry lifecycle - D-02 registry-first stop (SC2)', 
     assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
     assert.deepEqual(sm.lockFallbackCalls, []);
   });
+
+  it('D-02 a kill failure keeps the row and throws', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-kill-fail');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41002, 'reg-sess-2');
+    sm.killErrorOnSigterm = 'EPERM';
+
+    await assert.rejects(
+      () => sm.cancelSessionByDir(projectDir),
+      (err: Error) => {
+        assert.match(err.message, /pid=41002 kill signal failed/);
+        assert.match(err.message, /registry row preserved/);
+        return true;
+      },
+    );
+
+    const row = getSessionEntry(projectDir, sm.registryPath);
+    assert.ok(row, 'row must be kept on an unconfirmed kill');
+    assert.equal(row.pid, 41002);
+    assert.equal(row.status, 'running');
+    assert.equal(row.exit, undefined);
+    assert.deepEqual(sm.lockFallbackCalls, []);
+  });
+
+  it('D-02 a dead registered driver is tombstoned, not signalled, and the cancel falls through', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-dead');
+    mkdirSync(projectDir);
+    registerSessionEntry(
+      {
+        sessionId: 'reg-sess-3',
+        projectDir,
+        pid: 41003, // not in alivePids -> probe reports ESRCH
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: 999999,
+      },
+      sm.registryPath,
+    );
+
+    await assert.rejects(
+      () => sm.cancelSessionByDir(projectDir),
+      (err: Error) => {
+        assert.ok(err.message.startsWith('Session not found for projectDir: '), err.message);
+        assert.ok(err.message.includes('was no longer running'), err.message);
+        return true;
+      },
+    );
+
+    assert.equal(sm.killedPids.filter((k) => k.signal === 'SIGTERM' || k.signal === 'SIGKILL').length, 0);
+    const row = getSessionEntry(projectDir, sm.registryPath);
+    assert.equal(row?.status, 'exited');
+    assert.ok(row?.exit?.reason.includes('not running when reconciled'), row?.exit?.reason);
+    assert.equal(sm.lockFallbackCalls.length, 1);
+  });
+
+  it('D-02 a registered driver never reaches the legacy lock path', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-no-lock');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41004, 'reg-sess-4');
+    sm.lockFallbackResult = true;
+
+    await sm.cancelSessionByDir(projectDir);
+
+    assert.ok(sm.killedPids.some((k) => k.pid === 41004 && k.signal === 'SIGTERM'));
+    assert.deepEqual(sm.lockFallbackCalls, []);
+  });
+
+  it('D-02 an unregistered driver still reaches the legacy lock path', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-unregistered');
+    mkdirSync(projectDir);
+    sm.lockFallbackResult = true;
+
+    await sm.cancelSessionByDir(projectDir);
+
+    assert.equal(sm.lockFallbackCalls.length, 1);
+    assert.equal(sm.killedPids.filter((k) => k.signal !== 0 && k.signal !== undefined).length, 0);
+  });
+
+  it('D-02 explicit cancel kills even when the attempt settles', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-settled');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41005, 'reg-sess-5');
+    sm.reconcileResults = ['settled'];
+
+    await sm.cancelSessionByDir(projectDir);
+
+    assert.equal(sm.reconcileCalls.length, 1);
+    assert.ok(sm.killedPids.some((k) => k.pid === 41005 && k.signal === 'SIGTERM'), 'Q3: settled must not spare the pid');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
+  });
+
+  it('D-02 cancel holds the start lock so a concurrent start is declined', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-cancel-lock');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41006, 'reg-sess-6');
+
+    let release!: () => void;
+    sm.reconcileGate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    const cancel = sm.cancelSessionByDir(projectDir);
+    await new Promise((r) => setImmediate(r));
+
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      (err: unknown) => {
+        assert.ok(err instanceof SessionDeclinedError);
+        assert.equal(err.reason, 'reap-in-progress');
+        return true;
+      },
+    );
+    assert.equal(sm.allClients.length, 0, 'declined start must create no client');
+
+    release();
+    await cancel;
+    sm.reconcileGate = null;
+
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    assert.equal(sm.allClients.length, 1);
+  });
+
+  it('D-02 cancel during a start reap is refused instead of racing', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-start-reap');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41008, 'reg-sess-8');
+
+    let release!: () => void;
+    sm.reconcileGate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    const start = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sm.reconcileCalls.length, 1, 'the start reap must be inside its settle');
+
+    await assert.rejects(
+      () => sm.cancelSessionByDir(projectDir),
+      (err: Error) => {
+        assert.ok(err.message.includes('a session start or reap for this projectDir is in progress'), err.message);
+        return true;
+      },
+    );
+    assert.equal(sm.killedPids.filter((k) => k.signal === 'SIGTERM').length, 0, 'refused cancel must not signal');
+
+    release();
+    await start;
+    assert.equal(sm.allClients.length, 1);
+  });
+
+  it('D-02 a second cancel sends no further signal', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-idempotent');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41009, 'reg-sess-9');
+
+    await sm.cancelSessionByDir(projectDir);
+    const signalsAfterFirst = sm.killedPids.filter((k) => k.signal !== 0 && k.signal !== undefined).length;
+    assert.ok(signalsAfterFirst > 0);
+
+    await assert.rejects(() => sm.cancelSessionByDir(projectDir), {
+      message: `Session not found for projectDir: ${projectDir}`,
+    });
+    assert.equal(sm.killedPids.filter((k) => k.signal !== 0 && k.signal !== undefined).length, signalsAfterFirst);
+  });
+
+  it('D-02 gsd_cancel with only a stale sessionId stops the registered driver', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-session-only');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41007, 'reg-sess-7');
+
+    await withoutProjectRoot(async () => {
+      const out = await callTool(sm, 'gsd_cancel', { sessionId: 'reg-sess-7' });
+      assert.equal(out.isError, false, out.text);
+      assert.equal(JSON.parse(out.text).cancelled, true);
+      assert.ok(sm.killedPids.some((k) => k.pid === 41007 && k.signal === 'SIGTERM'));
+      assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
+
+      const unknown = await callTool(sm, 'gsd_cancel', { sessionId: 'no-such-session' });
+      assert.equal(unknown.isError, true);
+      assert.ok(unknown.text.includes('Session not found: no-such-session'), unknown.text);
+    });
+  });
 });
