@@ -32,8 +32,10 @@
  *   and never bounds its map. Shared observable rule (terminal sessions do not
  *   block a fresh start for the same dir) IS asserted on both.
  * - mcp-only: getOnlySession()/listSessions() (single-server diagnostics) and the
- *   detached-process kill fallback in cancelSessionByDir (.gsd/auto.lock +
- *   pid-registry with PID-reuse guard). The daemon owns its children via
+ *   registry-first cancelSessionByDir (D-02, Phase 41): a registered driver is
+ *   stopped by its registered pid via the persisted session registry, and the
+ *   detached-process kill fallback (.gsd/auto.lock + pid-registry with PID-reuse
+ *   guard) now serves unregistered drivers only. The daemon has neither. The daemon owns its children via
  *   RpcClient and has no detached-process equivalent — porting that is option A
  *   (shared core) territory, out of scope for parity tests. MCP cleanup also
  *   retains cancelled sessions for inspection, while daemon cleanup clears its
@@ -907,9 +909,10 @@ function registerSharedScenarios(create: (workDir: string) => Promise<Harness>):
     assert.ok(h.recorderOf(session.client).stopped);
 
     // No tracked session and no .gsd/auto.lock in a fresh dir → the same error on
-    // both sides. (mcp additionally has a detached-process auto.lock fallback
-    // here by design; the daemon has no detached-process equivalent — see the
-    // intentional-divergence notes in the file header.)
+    // both sides. (mcp is registry-first here: no registry row, then its
+    // detached-process auto.lock fallback for unregistered drivers only, by
+    // design; the daemon has neither — see the intentional-divergence notes in
+    // the file header.)
     const unknownDir = join(workDir, 'never-started-cancel');
     await assert.rejects(
       () => h.manager.cancelSessionByDir(unknownDir),
