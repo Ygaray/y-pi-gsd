@@ -440,12 +440,16 @@ describe("RpcClient construction", () => {
 				"",
 			].join("\n"),
 		);
+		// Zombie-aware liveness: kill(pid, 0) succeeds for a killed-but-unreaped
+		// zombie, which would false-fail this test in containers whose PID 1 never
+		// reaps orphans. Read the state from /proc instead (Z/X = dead).
 		const alive = (pid: number): boolean => {
 			try {
-				process.kill(pid, 0);
-				return true;
+				const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+				const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+				return state !== "Z" && state !== "X";
 			} catch {
-				return false;
+				return false; // ENOENT: reaped
 			}
 		};
 
