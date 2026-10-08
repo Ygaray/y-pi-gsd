@@ -322,7 +322,17 @@ export class SessionManager {
     if (options.model) args.push('--model', options.model);
     if (options.bare) args.push('--bare');
 
-    const client = this.createClient({ cliPath, cwd: resolvedDir, args });
+    // Spawn the auto-driver DETACHED (its own process group). This session is a
+    // long-lived daemon that must outlive the interactive session that started
+    // it via gsd_execute — without detachment it shares that session's process
+    // group and is killed the instant that session's turn completes (the
+    // group-directed signal reaches the driver), aborting its first unit with
+    // "received a termination signal" and stalling the milestone. The driver is
+    // still owned here via RPC pipes + the persisted session registry, and torn
+    // down explicitly (cancelSession/cleanup/reapOrDeclineOrphan all signal by
+    // pid). Detachment is what makes the Phase 39 orphan-reconcile design real:
+    // the driver can genuinely outlive this server and be reaped on restart.
+    const client = this.createClient({ cliPath, cwd: resolvedDir, args, detached: true });
 
     // Build the session shell before async operations so we can track state
     const session: ManagedSession = {
@@ -474,7 +484,7 @@ export class SessionManager {
    * Subclasses can override to inject a duck-typed mock client without full
    * module mocking, while still exercising the real `startSession()` wiring.
    */
-  protected createClient(options: { cliPath: string; cwd: string; args: string[] }): RpcClient {
+  protected createClient(options: { cliPath: string; cwd: string; args: string[]; detached?: boolean }): RpcClient {
     return new RpcClient(options);
   }
 

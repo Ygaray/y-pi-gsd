@@ -362,6 +362,64 @@ describe("RpcClient construction", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("spawns detached into its own process group, isolating the auto-driver from the parent's group signals", async () => {
+		// Regression (auto-mode stall): the gsd_execute auto-driver must NOT share
+		// the interactive session's process group. When it did, the group-directed
+		// signal the harness sends at turn-completion reached the driver and aborted
+		// its first unit — "Auto-mode process received a termination signal" — so
+		// every dispatch died ~instantly and the milestone never progressed.
+		// detached:true makes the child its own group leader, immune to that signal;
+		// the parent still owns it over RPC and tears it down explicitly.
+		// Read a process's group id from the kernel. `process.getpgid` is stripped
+		// in worker threads (node:test runs files in a Worker), so parse
+		// /proc/<pid>/stat instead — field after the final ')' is state, ppid, pgrp.
+		if (process.platform !== "linux") return; // /proc-based; host is Linux
+		const pgrpOf = (pid: number): number => {
+			const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+			const after = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+			return Number(after[2]); // [0]=state, [1]=ppid, [2]=pgrp
+		};
+		const parentGroup = pgrpOf(process.pid);
+
+		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
+		const scriptPath = join(dir, "agent.js");
+		writeFileSync(scriptPath, "setInterval(() => {}, 1000);\n");
+
+		// Default spawn shares the parent's process group (ephemeral-child contract).
+		const attached = new RpcClient({ cliPath: scriptPath });
+		try {
+			await attached.start();
+			const attachedPid = (attached as any).process.pid as number;
+			assert.equal(
+				pgrpOf(attachedPid),
+				parentGroup,
+				"non-detached child must stay in the parent's process group",
+			);
+		} finally {
+			await attached.stop();
+		}
+
+		// Detached spawn is its own group leader → a parent-group signal can't reach it.
+		const detached = new RpcClient({ cliPath: scriptPath, detached: true });
+		try {
+			await detached.start();
+			const detachedPid = (detached as any).process.pid as number;
+			assert.equal(
+				pgrpOf(detachedPid),
+				detachedPid,
+				"detached child must be its own process-group leader",
+			);
+			assert.notEqual(
+				pgrpOf(detachedPid),
+				parentGroup,
+				"detached child must NOT share the parent's process group",
+			);
+		} finally {
+			await detached.stop();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 // ============================================================================

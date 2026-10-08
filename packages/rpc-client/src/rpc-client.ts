@@ -48,6 +48,20 @@ export interface RpcClientOptions {
 	model?: string;
 	/** Additional CLI arguments */
 	args?: string[];
+	/**
+	 * Spawn the agent in its own process group (`detached: true`), isolating it
+	 * from signals delivered to the parent's process group. Required for the
+	 * long-lived `gsd_execute` auto-driver: without it the driver shares the
+	 * interactive session's group and is killed the instant that session's turn
+	 * completes (a group-directed SIGINT/SIGHUP reaches the driver), aborting the
+	 * in-flight unit with "received a termination signal" and stalling the
+	 * milestone. The parent still owns the child via its stdio pipes and tears it
+	 * down explicitly through `stop()`/`shutdown()` — which kill the whole process
+	 * group when detached so the driver's per-unit grandchildren go with it.
+	 * Leave false (the default) for ephemeral in-turn children that SHOULD die
+	 * with their parent's turn.
+	 */
+	detached?: boolean;
 }
 
 export type RpcEventListener = (event: SdkAgentEvent) => void;
@@ -89,6 +103,8 @@ export class RpcClient {
 	private requestId = 0;
 	private stderr = "";
 	private _stopped = false;
+	/** True when the child was spawned detached (its own process group). */
+	private _detached = false;
 
 	constructor(private options: RpcClientOptions = {}) {}
 
@@ -117,10 +133,18 @@ export class RpcClient {
 
 		let startupError: Error | null = null;
 
+		// `detached: true` makes the child a process-group leader (its own
+		// session on POSIX), so a signal delivered to the PARENT's group — e.g.
+		// the SIGINT/SIGHUP the interactive harness sends its foreground group
+		// when a turn completes — does NOT reach it. We keep the stdio pipes and
+		// deliberately do NOT `unref()`: the parent still owns this child over RPC
+		// and tears it down explicitly in stop()/shutdown(). See RpcClientOptions.detached.
+		this._detached = this.options.detached ?? false;
 		this.process = spawn(process.execPath, [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
+			detached: this._detached,
 		});
 
 		const onProcessError = (error: Error) => {
@@ -178,6 +202,34 @@ export class RpcClient {
 	}
 
 	/**
+	 * Signal the agent process. When the child was spawned detached it is its
+	 * own process-group leader, so we signal the whole group (negative pid) —
+	 * otherwise the driver's per-unit grandchildren (fresh sessions it spawns)
+	 * would survive our teardown as orphans. Non-detached children are signalled
+	 * directly. ESRCH (group/process already gone) is swallowed, and any failure
+	 * falls back to a direct `ChildProcess.kill()`.
+	 */
+	private signalProcess(signal: NodeJS.Signals): void {
+		const proc = this.process;
+		if (!proc) return;
+		const pid = proc.pid;
+		if (this._detached && typeof pid === "number") {
+			try {
+				process.kill(-pid, signal);
+				return;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException)?.code === "ESRCH") return;
+				// Fall through to a direct child kill on any other error.
+			}
+		}
+		try {
+			proc.kill(signal);
+		} catch {
+			/* already exited */
+		}
+	}
+
+	/**
 	 * Stop the RPC agent process.
 	 */
 	async stop(): Promise<void> {
@@ -191,12 +243,12 @@ export class RpcClient {
 			this.process.stderr?.removeListener("data", this._stderrHandler);
 			this._stderrHandler = undefined;
 		}
-		this.process.kill("SIGTERM");
+		this.signalProcess("SIGTERM");
 
 		// Wait for process to exit
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
+				this.signalProcess("SIGKILL");
 				resolve();
 			}, 5000); // match shutdown()'s grace so a cooperative SIGTERM handler can finish
 
@@ -610,7 +662,7 @@ export class RpcClient {
 		if (this.process) {
 			await new Promise<void>((resolve) => {
 				const timeout = setTimeout(() => {
-					this.process?.kill("SIGKILL");
+					this.signalProcess("SIGKILL");
 					resolve();
 				}, 5000);
 				this.process?.on("exit", () => {
