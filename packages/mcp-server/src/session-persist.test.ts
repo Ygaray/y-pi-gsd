@@ -16,12 +16,16 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  findSessionEntryBySessionId,
   getSessionEntry,
   isOrphanEntryAlive,
+  isRegistryOwnerAlive,
   killOrphanSessionPid,
   readSessionRegistry,
+  recordSessionExit,
   registerSessionEntry,
   removeSessionEntry,
+  type SessionExitRecord,
   type SessionRegistryEntry,
 } from './session-persist.js';
 
@@ -167,6 +171,99 @@ describe('Phase 41 canonical registry key (SC3)', () => {
     writeFileSync(registryPath, JSON.stringify({ [legacyKey]: legacy }));
     removeSessionEntry(link, registryPath);
     assert.deepEqual(readSessionRegistry(registryPath), {});
+  });
+});
+
+describe('Phase 41 registry primitives', () => {
+  const exitRecord = (at: string, reason = 'driver exited code=1'): SessionExitRecord => ({
+    reason,
+    code: 1,
+    signal: null,
+    at,
+  });
+
+  test('drops a live claim on the same pid held by another key', () => {
+    const a = makeEntry({ projectDir: join(tmp, 'a'), pid: 777 });
+    const b = makeEntry({ projectDir: join(tmp, 'b'), pid: 777 });
+    registerSessionEntry(a, registryPath);
+    registerSessionEntry(b, registryPath);
+    assert.equal(getSessionEntry(a.projectDir, registryPath), undefined);
+    assert.equal(getSessionEntry(b.projectDir, registryPath)?.pid, 777);
+    assert.equal(Object.keys(readSessionRegistry(registryPath)).length, 1);
+  });
+
+  test('an exit tombstone is not dropped by pid-uniqueness', () => {
+    const a = makeEntry({
+      projectDir: join(tmp, 'a'),
+      pid: 777,
+      status: 'exited',
+      exit: exitRecord('2026-10-08T10:00:00.000Z'),
+    });
+    const b = makeEntry({ projectDir: join(tmp, 'b'), pid: 777 });
+    registerSessionEntry(a, registryPath);
+    registerSessionEntry(b, registryPath);
+    assert.ok(getSessionEntry(a.projectDir, registryPath)?.exit, 'tombstone must survive');
+    assert.equal(getSessionEntry(b.projectDir, registryPath)?.pid, 777);
+    assert.equal(Object.keys(readSessionRegistry(registryPath)).length, 2);
+  });
+
+  test('findSessionEntryBySessionId ignores an empty or whitespace sessionId', () => {
+    registerSessionEntry(makeEntry({ projectDir: join(tmp, 'a'), pid: 11, sessionId: '' }), registryPath);
+    registerSessionEntry(makeEntry({ projectDir: join(tmp, 'b'), pid: 12, sessionId: 'sess-x' }), registryPath);
+    assert.equal(findSessionEntryBySessionId('', registryPath), undefined);
+    assert.equal(findSessionEntryBySessionId('   ', registryPath), undefined);
+    assert.equal(findSessionEntryBySessionId('sess-x', registryPath)?.pid, 12);
+    assert.equal(findSessionEntryBySessionId('sess-missing', registryPath), undefined);
+  });
+
+  test('recordSessionExit tombstones only the matching pid and is idempotent', () => {
+    const entry = makeEntry({ pid: 4321 });
+    registerSessionEntry(entry, registryPath);
+    const first = exitRecord('2026-10-08T10:00:00.000Z', 'first');
+    const second = exitRecord('2026-10-08T11:00:00.000Z', 'second');
+
+    assert.equal(recordSessionExit(entry.projectDir, first, 9999, registryPath), false);
+    assert.deepEqual(getSessionEntry(entry.projectDir, registryPath), entry, 'wrong pid must not write');
+
+    assert.equal(recordSessionExit(entry.projectDir, first, 4321, registryPath), true);
+    const tomb = getSessionEntry(entry.projectDir, registryPath);
+    assert.equal(tomb?.status, 'exited');
+    assert.deepEqual(tomb?.exit, first);
+
+    assert.equal(recordSessionExit(entry.projectDir, second, 4321, registryPath), true);
+    assert.deepEqual(getSessionEntry(entry.projectDir, registryPath)?.exit, first, 'first death record wins');
+    assert.equal(getSessionEntry(entry.projectDir, registryPath)?.exit?.at, first.at);
+
+    assert.equal(recordSessionExit(join(tmp, 'absent'), first, 4321, registryPath), false);
+  });
+
+  test('isRegistryOwnerAlive is null without an ownerPid and probes the owner otherwise', () => {
+    assert.equal(isRegistryOwnerAlive({}), null);
+
+    const probes: number[] = [];
+    const kill = (pid: number) => {
+      probes.push(pid);
+    };
+    assert.equal(isRegistryOwnerAlive({ ownerPid: process.pid }, { kill }), true);
+    assert.deepEqual(probes, [], 'own pid must not be probed');
+
+    assert.equal(isRegistryOwnerAlive({ ownerPid: 31337 }, { kill }), true);
+    assert.deepEqual(probes, [31337]);
+
+    const esrch = () => {
+      const err = new Error('no such process') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    };
+    assert.equal(isRegistryOwnerAlive({ ownerPid: 31337 }, { kill: esrch }), false);
+  });
+
+  test('a pre-phase row without ownerPid or exit still reads back unchanged', () => {
+    const entry = makeEntry({ projectDir: join(tmp, 'legacy-shape'), pid: 55 });
+    assert.equal('ownerPid' in entry, false);
+    assert.equal('exit' in entry, false);
+    registerSessionEntry(entry, registryPath);
+    assert.deepEqual(getSessionEntry(entry.projectDir, registryPath), entry);
   });
 });
 

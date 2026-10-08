@@ -184,7 +184,31 @@ function writeSessionRegistry(registry: SessionRegistry, registryPath = REGISTRY
 // CRUD
 // ---------------------------------------------------------------------------
 
-/** Persist (or overwrite) the session entry for a projectDir. */
+/**
+ * True when the row records a driver death (carries an `exit` record). A
+ * tombstone never claims a live driver; its pid must never be probed or
+ * signalled by any code path (the pid may have been recycled).
+ */
+export function isTombstoneEntry(entry: Pick<SessionRegistryEntry, 'exit'> | undefined): boolean {
+  return entry?.exit !== undefined;
+}
+
+/**
+ * Persist (or overwrite) the session entry for a projectDir.
+ *
+ * SC3 pid uniqueness (Phase 41): when the entry being written is a live claim
+ * (no `exit` record), every OTHER key holding a live-claim row for the same
+ * pid is dropped first - two keys can never claim one live driver. Exit
+ * tombstones are exempt on both sides: a tombstone is a death record, not a
+ * claim, so it is neither dropped by this rule nor does it trigger it.
+ *
+ * Cross-process note (research Q4, accepted deliberately): this
+ * read-modify-write is atomic per write (temp file + rename) but NOT locked
+ * across MCP-server processes sharing ~/.gsd/session-instances.json. Two
+ * processes writing at the same instant can lose one update (the lost-update
+ * window). The window is a microsecond synchronous stretch and no lock
+ * dependency is added; revisit only if a real incident appears.
+ */
 export function registerSessionEntry(
   entry: SessionRegistryEntry,
   registryPath = REGISTRY_PATH,
@@ -192,6 +216,24 @@ export function registerSessionEntry(
   const registry = readSessionRegistry(registryPath);
   const key = keyFor(entry.projectDir);
   const legacyKey = legacyKeyFor(entry.projectDir);
+
+  if (!isTombstoneEntry(entry)) {
+    const dropped: string[] = [];
+    for (const [otherKey, row] of Object.entries(registry)) {
+      if (otherKey === key || otherKey === legacyKey) continue;
+      if (isTombstoneEntry(row)) continue;
+      if (row.pid === entry.pid) {
+        delete registry[otherKey];
+        dropped.push(otherKey);
+      }
+    }
+    if (dropped.length > 0) {
+      process.stderr.write(
+        `[gsd-mcp-server] session registry: dropped stale row(s) ${dropped.join(', ')} claiming pid=${entry.pid} now registered for ${key}\n`,
+      );
+    }
+  }
+
   registry[key] = { ...entry, projectDir: key };
   // Migration on write: a pre-Phase-41 resolve()-keyed row for the same
   // worktree is superseded by the canonical row.
@@ -231,6 +273,57 @@ export function removeSessionEntry(projectDir: string, registryPath = REGISTRY_P
   if (changed) writeSessionRegistry(registry, registryPath);
 }
 
+/**
+ * Find the persisted row whose non-empty `sessionId` equals `sessionId`.
+ * Empty or whitespace-only input returns undefined: in-flight rows carry
+ * `sessionId: ''` until init() resolves and must never match (same guard as
+ * SessionManager.getSession('')).
+ */
+export function findSessionEntryBySessionId(
+  sessionId: string,
+  registryPath = REGISTRY_PATH,
+): SessionRegistryEntry | undefined {
+  const wanted = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (wanted === '') return undefined;
+  const registry = readSessionRegistry(registryPath);
+  for (const row of Object.values(registry)) {
+    if (typeof row.sessionId === 'string' && row.sessionId !== '' && row.sessionId === wanted) {
+      return row;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * PD-41-A tombstone writer: turn the row for `projectDir` into an exit
+ * tombstone (`status: 'exited'` + `exit`) - but only when the row's pid equals
+ * `expectedPid`, so a newer driver's row is never clobbered. Idempotent: the
+ * first death record wins (a row that already has `exit` is left untouched and
+ * the call returns true). Returns false (no write) for a missing row or a pid
+ * mismatch. `exit.reason` must come only from code/signal or a fixed
+ * reconcile phrase - never stderr, prompt text or agent output.
+ */
+export function recordSessionExit(
+  projectDir: string,
+  exit: SessionExitRecord,
+  expectedPid: number,
+  registryPath = REGISTRY_PATH,
+): boolean {
+  const registry = readSessionRegistry(registryPath);
+  const key = keyFor(projectDir);
+  const legacyKey = legacyKeyFor(projectDir);
+  const heldKey = registry[key] ? key : legacyKey !== key && registry[legacyKey] ? legacyKey : undefined;
+  if (heldKey === undefined) return false;
+  const row = registry[heldKey];
+  if (row.pid !== expectedPid) return false;
+  if (isTombstoneEntry(row)) return true;
+
+  registry[key] = { ...row, projectDir: key, status: 'exited', exit };
+  if (heldKey !== key) delete registry[heldKey];
+  writeSessionRegistry(registry, registryPath);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Pid liveness + start-time guard against pid reuse
 // ---------------------------------------------------------------------------
@@ -262,6 +355,24 @@ export function isOrphanEntryAlive(
   }
 
   return true;
+}
+
+/**
+ * Is the MCP server that spawned this driver (`ownerPid`) still alive?
+ * Returns null when the row carries no usable ownerPid. Signal 0 only.
+ *
+ * ADVISORY: it distinguishes a peer-owned driver from a true orphan for
+ * reporting. A recycled ownerPid can read as alive, so the result must never
+ * authorise or forbid a signal.
+ */
+export function isRegistryOwnerAlive(
+  entry: Pick<SessionRegistryEntry, 'ownerPid'>,
+  options: SessionLivenessOptions = {},
+): boolean | null {
+  if (!isSafePid(entry.ownerPid)) return null;
+  if (entry.ownerPid === process.pid) return true;
+  const sendSignal = options.kill ?? ((pid: number, signal?: NodeJS.Signals | 0) => process.kill(pid, signal));
+  return isPidAlive(entry.ownerPid, sendSignal);
 }
 
 /**
