@@ -609,6 +609,8 @@ describe("RpcClient construction", () => {
 				false,
 				"shutdown() timeout fallback must kill the whole group, leaving no orphaned grandchild",
 			);
+			// SIGKILL delivery to the group leader can lag the grandchild's death by a few ms.
+			await waitFor(() => !alive(agentPid));
 			assert.equal(alive(agentPid), false, "shutdown() timeout fallback must kill the agent process");
 		} finally {
 			// Belt-and-braces: reap the whole group first so no descendant leaks if
