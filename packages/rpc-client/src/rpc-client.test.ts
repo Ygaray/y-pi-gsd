@@ -456,28 +456,36 @@ describe("RpcClient construction", () => {
 			}
 		};
 
+		// Poll `pred` every `intervalMs` until it holds or `timeoutMs` elapses.
+		const waitFor = async (pred: () => boolean, timeoutMs = 2000, intervalMs = 20): Promise<boolean> => {
+			const deadline = Date.now() + timeoutMs;
+			while (!pred()) {
+				if (Date.now() >= deadline) return false;
+				await new Promise((r) => setTimeout(r, intervalMs));
+			}
+			return true;
+		};
+
 		const client = new RpcClient({ cliPath: scriptPath, detached: true });
 		let gcPid = 0;
 		let agentPid = 0;
 		try {
 			await client.start();
 			agentPid = (client as any).process.pid as number;
-			for (let i = 0; i < 100 && !(gcPid > 0); i++) {
+			await waitFor(() => {
 				try {
 					gcPid = Number(readFileSync(pidFile, "utf8"));
 				} catch {
 					gcPid = 0;
 				}
-				if (!(gcPid > 0)) await new Promise((r) => setTimeout(r, 20));
-			}
+				return gcPid > 0;
+			});
 			assert.ok(gcPid > 0, "grandchild pid must be written by the agent");
 			assert.equal(alive(gcPid), true, "grandchild must be running before stop()");
 
 			await client.stop();
 
-			for (let i = 0; i < 100 && alive(gcPid); i++) {
-				await new Promise((r) => setTimeout(r, 20));
-			}
+			await waitFor(() => !alive(gcPid));
 			assert.equal(
 				alive(gcPid),
 				false,
