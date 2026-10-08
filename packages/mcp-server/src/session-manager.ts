@@ -1061,7 +1061,17 @@ export class SessionManager {
 
     const livenessOptions = this.getSessionLivenessOptions();
     if (!isOrphanEntryAlive(entry, livenessOptions)) {
-      this.tombstoneDeadEntry(entry);
+      // WR-01 (41-REVIEW.md): the tombstone write is best-effort on a read path.
+      // A failed write (read-only ~/.gsd, EACCES) must not hide the finding
+      // that the driver is dead - report it from the in-hand row instead.
+      try {
+        this.tombstoneDeadEntry(entry);
+      } catch (err) {
+        process.stderr.write(
+          `[gsd-mcp-server] failed to tombstone dead driver row for ${entry.projectDir} (pid=${entry.pid}): ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        return { outcome: 'dead-reconciled', entry };
+      }
       return {
         outcome: 'dead-reconciled',
         entry: getSessionEntry(entry.projectDir, registryPath) ?? entry,

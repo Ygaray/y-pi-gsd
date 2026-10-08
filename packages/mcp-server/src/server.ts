@@ -22,6 +22,7 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type { SessionManager } from './session-manager.js';
 import { projectRecentEvents } from './session-manager.js';
+import type { DriverReconcileResult } from './session-manager.js';
 import type { ManagedSession } from './types.js';
 import { isRemoteConfigured, tryRemoteQuestions } from './remote-questions.js';
 import type { RemoteToolResult } from './remote-questions.js';
@@ -333,7 +334,19 @@ async function buildUntrackedSessionPayload(
   sessionId: string | undefined,
   projectDir: string | undefined,
 ): Promise<Record<string, unknown> | null> {
-  const driver = sessionManager.reconcileRegisteredDriver({ projectDir, sessionId });
+  // WR-01 (41-REVIEW.md): the registry reconcile is now the first step of the
+  // read-only status tools, and the DB fallback below is documented as
+  // never-throwing. A registry fault (read-only ~/.gsd, EACCES on rename, ...)
+  // must degrade to "no driver info", not turn a working DB fallback into an
+  // error.
+  let driver: DriverReconcileResult = { outcome: 'no-entry' };
+  try {
+    driver = sessionManager.reconcileRegisteredDriver({ projectDir, sessionId });
+  } catch (err) {
+    process.stderr.write(
+      `[gsd-mcp-server] driver registry reconcile failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
   const db = projectDir ? await reconcileResultFromDb(sessionId, projectDir) : null;
   if (driver.outcome === 'no-entry' || !driver.entry) {
     return db;

@@ -16,7 +16,7 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -1051,5 +1051,53 @@ describe('Phase 41 driver registry lifecycle - WR-06 teardown consistency', () =
     release();
     await restart;
     assert.equal(getSessionEntry(projectDir, sm.registryPath)?.status, 'running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WR-01 (41-REVIEW.md): read-path reconcile is failure-isolated
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - WR-01 reconcile failure isolation', () => {
+  it('WR-01 a throwing registry reconcile degrades to the pre-existing not-found result', async () => {
+    class ThrowingManager extends TestableSessionManager {
+      override reconcileRegisteredDriver(): never {
+        throw new Error('EACCES: registry boom');
+      }
+    }
+    const sm = new ThrowingManager(join(tmp, 'session-instances.json'));
+    await withBridgeDisabled(async () => {
+      for (const tool of ['gsd_status', 'gsd_result']) {
+        const out = await callTool(sm, tool, { sessionId: 'stale-z', projectDir: join(tmp, 'nowhere') });
+        assert.equal(out.isError, true, tool);
+        assert.match(out.text, /Session not found/, `${tool} must fall through, not surface the registry fault`);
+        assert.doesNotMatch(out.text, /registry boom/);
+      }
+    });
+  });
+
+  it('WR-01 a failed tombstone write still reports the dead driver', { skip: process.getuid?.() === 0 }, async () => {
+    const sm = createManager();
+    const deadDir = join(tmp, 'proj-wr01-dead');
+    mkdirSync(deadDir);
+    registerSessionEntry(
+      {
+        sessionId: 'wr01-dead',
+        projectDir: deadDir,
+        pid: 42030,
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: 999999,
+      },
+      sm.registryPath,
+    );
+    chmodSync(tmp, 0o500); // the temp-file write for the tombstone now fails
+    try {
+      const result = sm.reconcileRegisteredDriver({ projectDir: deadDir });
+      assert.equal(result.outcome, 'dead-reconciled');
+      assert.equal(result.entry?.pid, 42030);
+    } finally {
+      chmodSync(tmp, 0o700);
+    }
   });
 });
