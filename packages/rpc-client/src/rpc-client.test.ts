@@ -424,8 +424,11 @@ describe("RpcClient construction", () => {
 	// Phase 40 SC3 lock: the driver's per-unit grandchildren share its process
 	// group, so signalProcess() must signal the negative pid (whole group) for
 	// them to die with it. A non-group kill would leave the grandchild orphaned.
-	it("stop() on a detached client tears down the whole process group (no orphaned grandchild)", async () => {
-		if (process.platform !== "linux") return; // /proc-style group semantics; host is Linux
+	// Reads /proc/<pid>/stat for zombie-aware liveness, so it is Linux-only;
+	// report SKIPPED (not a vacuous PASS) elsewhere.
+	it("stop() on a detached client tears down the whole process group (no orphaned grandchild)", {
+		skip: process.platform !== "linux" && "requires /proc (Linux only)",
+	}, async () => {
 		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
 		const scriptPath = join(dir, "agent.js");
 		const pidFile = join(dir, "grandchild.pid");
