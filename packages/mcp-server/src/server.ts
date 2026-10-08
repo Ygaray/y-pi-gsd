@@ -400,12 +400,17 @@ async function buildUntrackedSessionPayload(
     note =
       'The registered driver for this projectDir is no longer running; its registry row was reconciled to an exit record (see driver.exit). Reconciled from the session registry - this is not a live session.';
   } else {
-    note = 'Reconciled from the session registry.';
+    // 'tracked': this process holds an in-memory session for the row's dir, so
+    // it is NOT untracked - the caller's sessionId just does not name it (IN-01).
+    note = `This MCP-server process tracks a session for this projectDir (sessionId: ${entry.sessionId || 'not yet assigned'}), but the supplied sessionId does not match it. Poll with that sessionId or with projectDir. Reconciled from the session registry.`;
   }
   return {
-    sessionId: sessionId || entry.sessionId || null,
+    // IN-01 (41-REVIEW.md): report the row's own sessionId (the data belongs to
+    // the row at projectDir) and echo the caller's possibly-stale id separately.
+    sessionId: entry.sessionId || null,
+    requestedSessionId: sessionId || null,
     projectDir: validatedDir ?? entry.projectDir,
-    status: 'untracked',
+    status: driver.outcome === 'tracked' ? 'tracked' : 'untracked',
     reconciledFromDb: false,
     note,
     driver: driverPayload,

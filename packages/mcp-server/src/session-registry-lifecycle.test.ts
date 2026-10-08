@@ -1164,3 +1164,58 @@ describe('Phase 41 driver registry lifecycle - WR-07 allowed-root validation on 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// IN-01 (41-REVIEW.md): payload honesty
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - IN-01 reconciled payload honesty', () => {
+  it('IN-01 reports the row\'s sessionId and the caller\'s id separately; a tracked row is not "untracked"', async () => {
+    const sm = createManager();
+    const dirA = join(tmp, 'proj-in01-a');
+    const dirB = join(tmp, 'proj-in01-b');
+    mkdirSync(dirA);
+    mkdirSync(dirB);
+    await sm.startSession(dirA, { cliPath: '/usr/bin/gsd' });
+    const clientA = sm.lastClient!;
+    await sm.startSession(dirB, { cliPath: '/usr/bin/gsd' });
+    // The registry row for A carries an id this process's session does not.
+    registerSessionEntry(
+      {
+        sessionId: 'registry-id-a',
+        projectDir: dirA,
+        pid: clientA.pid!,
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: process.pid,
+      },
+      sm.registryPath,
+    );
+
+    await withBridgeDisabled(async () => {
+      const out = await callTool(sm, 'gsd_status', { sessionId: 'registry-id-a' });
+      assert.equal(out.isError, false, out.text);
+      const payload = JSON.parse(out.text);
+      assert.equal(payload.driver.outcome, 'tracked');
+      assert.equal(payload.status, 'tracked');
+      assert.equal(payload.sessionId, 'registry-id-a');
+      assert.equal(payload.requestedSessionId, 'registry-id-a');
+      assert.match(payload.note, /tracks a session for this projectDir/);
+    });
+  });
+
+  it('IN-01 a stale caller sessionId is not echoed as the row\'s id', async () => {
+    const sm = createManager();
+    const dir = join(tmp, 'proj-in01-stale');
+    mkdirSync(dir);
+    liveRow(sm, dir, 42050, 'real-row-id');
+
+    await withBridgeDisabled(async () => {
+      const out = await callTool(sm, 'gsd_status', { sessionId: 'stale-caller-id', projectDir: dir });
+      const payload = JSON.parse(out.text);
+      assert.equal(payload.sessionId, 'real-row-id');
+      assert.equal(payload.requestedSessionId, 'stale-caller-id');
+      assert.equal(payload.status, 'untracked');
+    });
+  });
+});
