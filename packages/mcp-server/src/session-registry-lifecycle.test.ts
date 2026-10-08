@@ -31,6 +31,7 @@ import {
 import type { OrphanReconcileResult } from './orphan-reconcile.js';
 import type { RpcClient } from '@opengsd/rpc-client';
 import type { ManagedSession } from './types.js';
+import { createMcpServer } from './server.js';
 
 // ---------------------------------------------------------------------------
 // Mock RpcClient
@@ -139,8 +140,16 @@ class TestableSessionManager extends SessionManager {
   nextPromptError: Error | null = null;
   nextPidUndefined = false;
 
-  /** Ordered log of `create:<pid>` / `stopped:<pid>` events. */
+  /** Ordered log of `create:<pid>` / `stopped:<pid>` / `settle:<pid>` / `<signal>:<pid>` events. */
   order: string[] = [];
+
+  /** D-02: legacy auto.lock last-resort seam. */
+  lockFallbackCalls: string[] = [];
+  lockFallbackResult = false;
+  /** D-02: when set, invokeOrphanReconcile awaits it first. */
+  reconcileGate: Promise<void> | null = null;
+  /** D-02: when set, the fake kill throws an Error with this errno code on SIGTERM. */
+  killErrorOnSigterm: string | null = null;
 
   constructor(registryPath: string) {
     super();
@@ -178,6 +187,12 @@ class TestableSessionManager extends SessionManager {
     return {
       kill: (pid, signal) => {
         this.killedPids.push({ pid, signal });
+        if (signal !== 0 && signal !== undefined) this.order.push(`${signal}:${pid}`);
+        if (signal === 'SIGTERM' && this.killErrorOnSigterm) {
+          const err = new Error(`kill ${this.killErrorOnSigterm}`) as NodeJS.ErrnoException;
+          err.code = this.killErrorOnSigterm;
+          throw err;
+        }
         if (signal === 0 || signal === undefined) {
           if (!this.alivePids.has(pid)) {
             const err = new Error('no such process') as NodeJS.ErrnoException;
@@ -202,7 +217,14 @@ class TestableSessionManager extends SessionManager {
     resolvedDir: string,
   ): Promise<OrphanReconcileResult> {
     this.reconcileCalls.push({ pid: entry.pid, resolvedDir });
+    if (this.reconcileGate) await this.reconcileGate;
+    this.order.push(`settle:${entry.pid}`);
     return this.reconcileResults.shift() ?? 'no-attempt';
+  }
+
+  protected override async stopDetachedAutoProcess(projectDir: string): Promise<boolean> {
+    this.lockFallbackCalls.push(projectDir);
+    return this.lockFallbackResult;
   }
 
   async reapOrphanForTest(resolvedDir: string): Promise<OrphanReapOutcome> {
@@ -418,5 +440,72 @@ describe('Phase 41 driver registry lifecycle - SC3 duplicate drivers', () => {
     const row = getSessionEntry(projectDir, sm.registryPath);
     assert.equal(row?.pid, sm.lastClient!.pid);
     assert.equal(row?.exit, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-02 registry-first stop (SC2)
+// ---------------------------------------------------------------------------
+
+/** Run `fn` with GSD_WORKFLOW_PROJECT_ROOT unset (validateProjectDir enforces it when set). */
+async function withoutProjectRoot<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.GSD_WORKFLOW_PROJECT_ROOT;
+  delete process.env.GSD_WORKFLOW_PROJECT_ROOT;
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.GSD_WORKFLOW_PROJECT_ROOT;
+    else process.env.GSD_WORKFLOW_PROJECT_ROOT = saved;
+  }
+}
+
+/** Build an mcp server around `sm` and call a registered tool handler. */
+async function callTool(
+  sm: SessionManager,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ isError: boolean; text: string }> {
+  const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+  const result = await (server as any)._registeredTools[name].handler(args);
+  return { isError: result.isError === true, text: result.content[0].text as string };
+}
+
+function liveRow(sm: TestableSessionManager, projectDir: string, pid: number, sessionId: string): void {
+  sm.alivePids.add(pid);
+  registerSessionEntry(
+    {
+      sessionId,
+      projectDir,
+      pid,
+      startTime: new Date().toISOString(),
+      status: 'running',
+      ownerPid: 999999,
+    },
+    sm.registryPath,
+  );
+}
+
+describe('Phase 41 driver registry lifecycle - D-02 registry-first stop (SC2)', () => {
+  it('D-02 cancel stops an untracked registered driver by its registered pid', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-cancel');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 41001, 'reg-sess-1');
+
+    const out = await withoutProjectRoot(() => callTool(sm, 'gsd_cancel_by_project', { projectDir }));
+    assert.equal(out.isError, false, out.text);
+    assert.equal(JSON.parse(out.text).cancelled, true);
+
+    const signals = sm.killedPids.filter((k) => k.signal !== 0 && k.signal !== undefined);
+    assert.ok(signals.length > 0);
+    for (const k of sm.killedPids) {
+      assert.ok(k.pid > 0, `no process-group (negative/zero) pid may be signalled, saw ${k.pid}`);
+      assert.equal(k.pid, 41001, 'only the registered pid may be touched');
+    }
+    assert.ok(signals.some((k) => k.signal === 'SIGTERM'));
+    assert.ok(sm.order.indexOf('settle:41001') >= 0);
+    assert.ok(sm.order.indexOf('settle:41001') < sm.order.indexOf('SIGTERM:41001'), 'settle runs before SIGTERM');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
+    assert.deepEqual(sm.lockFallbackCalls, []);
   });
 });

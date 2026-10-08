@@ -21,10 +21,12 @@ import { MAX_EVENTS, INIT_TIMEOUT_MS } from './types.js';
 import { signalAutoLockPid } from './pid-registry.js';
 import {
   canonicalProjectDir,
+  findSessionEntryBySessionId,
   getSessionEntry,
   isOrphanEntryAlive,
   isTombstoneEntry,
   killOrphanSessionPid,
+  recordSessionExit,
   registerSessionEntry,
   removeSessionEntry,
   type SessionLivenessOptions,
@@ -201,6 +203,32 @@ export type OrphanReapOutcome =
   | 'kill-failed';
 
 /**
+ * Outcome vocabulary for `stopRegisteredDriver` (D-02, Phase 41 / DRIVER-02):
+ * the registry-authorised stop of an untracked registered driver, used by
+ * `cancelSessionByDir()` when no in-memory session holds the worktree.
+ *
+ * - `'no-entry'` - no registry row existed for this dir.
+ * - `'stopped'` - the registered pid's death was confirmed (`'killed'` /
+ *   `'force-killed'`) and its registry row was removed.
+ * - `'dead-reconciled'` - the registered pid was dead or recycled, or the row
+ *   was already an exit tombstone; nothing was signalled and the row is (now)
+ *   an exit tombstone.
+ * - `'kill-failed'` - the kill signal failed for a reason other than
+ *   already-dead (e.g. `EPERM`); the process may still be alive, so the row is
+ *   KEPT unchanged (PD-8 / CR-01) and the cancel must not report success.
+ */
+export type RegisteredDriverStopOutcome = 'no-entry' | 'stopped' | 'dead-reconciled' | 'kill-failed';
+
+/** Result of `SessionManager.stopRegisteredDriver`. */
+export interface RegisteredDriverStopResult {
+  outcome: RegisteredDriverStopOutcome;
+  /** The registry row that was acted on (absent for `'no-entry'`). */
+  entry?: SessionRegistryEntry;
+  /** Underlying kill error (only for `'kill-failed'`). */
+  error?: string;
+}
+
+/**
  * Discriminant for `SessionDeclinedError` (WR-02, 39-REVIEW.md). `startSession()`
  * throws `Error` with the same "Session already active ..." prefix for three
  * semantically different situations, distinguishable before this type only by
@@ -266,7 +294,9 @@ export class SessionManager {
    * Phase 41 (SC3): the reservation is keyed by the canonical (realpath)
    * dir via `startLockKey()` and ALSO covers the awaited `stop()` of an
    * evicted terminal session, so the replacement driver is never created
-   * while the old one is still shutting down.
+   * while the old one is still shutting down. D-02 (Phase 41): the
+   * reservation also covers a registry cancel (`cancelSessionByDir`), so a
+   * start and a cancel can never race on one worktree.
    */
   private startingLocks = new Set<string>();
 
@@ -769,12 +799,23 @@ export class SessionManager {
   }
 
   /**
-   * Cancel a session looked up by project directory.
+   * Cancel a session looked up by project directory (D-02, Phase 41 / DRIVER-02:
+   * the registry is the stop authority). Order:
    *
-   * This is the fallback path for interactive sessions (started via `/gsd auto`
-   * in the terminal) and sessions from a restarted MCP server that have no
-   * registered sessionId. The sessions map is keyed by projectDir, so this
-   * lookup always succeeds for any tracked session regardless of sessionId.
+   * 1. in-memory session -> `_cancelSessionObject()` -> `RpcClient.stop()` (a
+   *    live, self-spawned handle; its process-group teardown is kept per D-03
+   *    so per-unit grandchildren die with the driver);
+   * 2. persisted registry row -> `stopRegisteredDriver()`: settle the Attempt
+   *    (best-effort), kill exactly the registered pid (single pid, recycled-pid
+   *    guarded), remove the row only on confirmed death. Runs under the
+   *    `startingLocks` reservation for the canonical dir, so it cannot race a
+   *    `startSession()` on the same worktree;
+   * 3. legacy `.gsd/auto.lock` -> ONLY when the registry holds no live claim
+   *    (unregistered, terminal-started `/gsd auto` drivers - D-02's carve-out);
+   * 4. otherwise the unchanged `Session not found for projectDir: <dir>` error.
+   *
+   * A failed kill (`'kill-failed'`) throws and keeps the row - a cancel never
+   * reports success for an unconfirmed kill.
    */
   async cancelSessionByDir(projectDir: string): Promise<void> {
     const session = this.getSessionByDir(projectDir);
@@ -782,13 +823,139 @@ export class SessionManager {
       await this._cancelSessionObject(session);
       return;
     }
-    const stopped = await this.stopDetachedAutoProcess(projectDir);
-    if (!stopped) {
-      throw new Error(`Session not found for projectDir: ${projectDir}`);
+
+    const resolvedDir = resolve(projectDir);
+    const lockKey = this.startLockKey(resolvedDir);
+    if (this.startingLocks.has(lockKey)) {
+      throw new Error(
+        `Cannot cancel ${resolvedDir}: a session start or reap for this projectDir is in progress; retry once it settles`,
+      );
     }
+
+    this.startingLocks.add(lockKey);
+    let stop: RegisteredDriverStopResult;
+    try {
+      stop = await this.stopRegisteredDriver(resolvedDir);
+    } finally {
+      this.startingLocks.delete(lockKey);
+    }
+
+    if (stop.outcome === 'stopped') return;
+
+    if (stop.outcome === 'kill-failed') {
+      throw new Error(
+        `Failed to stop registered driver for ${resolvedDir}: pid=${stop.entry?.pid} kill signal failed: ${stop.error}; registry row preserved so the stop can be retried`,
+      );
+    }
+
+    // 'no-entry' / 'dead-reconciled': the registry holds no live claim for this
+    // dir - the legacy lock is the last resort (unregistered drivers only).
+    const stopped = await this.stopDetachedAutoProcess(projectDir);
+    if (stopped) return;
+
+    if (stop.outcome === 'dead-reconciled') {
+      throw new Error(
+        `Session not found for projectDir: ${projectDir} (registered driver pid ${stop.entry?.pid} was no longer running; its registry row was reconciled to an exit record)`,
+      );
+    }
+    throw new Error(`Session not found for projectDir: ${projectDir}`);
   }
 
-  private async stopDetachedAutoProcess(projectDir: string): Promise<boolean> {
+  /**
+   * Registry-authorised stop of an untracked registered driver (D-02). Settles
+   * the DB-side Task Attempt best-effort, then kills EXACTLY the registered pid
+   * and removes the row only after the death is confirmed.
+   *
+   * Single pid by design (orchestrator Q1): no process-group signal. Deferred,
+   * accepted gap: an untracked driver's per-unit grandchildren can survive the
+   * single-pid kill and keep touching the worktree until they exit.
+   *
+   * Q3 divergence from `reapPersistedOrphanSession`: an explicit cancel is user
+   * intent, so it kills even when the settle reports `'settled'` (that method
+   * still spares on `'settled'` for the start-time reap - Phase 39 contract
+   * unchanged). This is deliberate, not a 39-03 regression.
+   */
+  protected async stopRegisteredDriver(resolvedDir: string): Promise<RegisteredDriverStopResult> {
+    const registryPath = this.getSessionRegistryPath();
+    const entry = getSessionEntry(resolvedDir, registryPath);
+    if (!entry) return { outcome: 'no-entry' };
+
+    // A tombstone records a death, never a live claim: no probe, no signal.
+    if (isTombstoneEntry(entry)) return { outcome: 'dead-reconciled', entry };
+
+    const livenessOptions = this.getSessionLivenessOptions();
+    if (!isOrphanEntryAlive(entry, livenessOptions)) {
+      this.tombstoneDeadEntry(entry);
+      return { outcome: 'dead-reconciled', entry };
+    }
+
+    // Best-effort settle: the result never gates the kill (Q3).
+    try {
+      const settle = await this.invokeOrphanReconcile(entry, resolvedDir);
+      process.stderr.write(
+        `[gsd-mcp-server] D-02: cancel of ${resolvedDir} - attempt reconcile for pid=${entry.pid}: ${settle}\n`,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[gsd-mcp-server] D-02: cancel of ${resolvedDir} - attempt reconcile for pid=${entry.pid} failed (continuing with kill): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+
+    const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);
+
+    if (typeof result === 'object') {
+      process.stderr.write(
+        `[gsd-mcp-server] D-02: failed to stop registered driver for ${resolvedDir} - pid=${entry.pid} kill signal failed: ${result.error}; row kept for retry\n`,
+      );
+      return { outcome: 'kill-failed', entry, error: result.error };
+    }
+
+    if (result === 'killed' || result === 'force-killed') {
+      removeSessionEntry(resolvedDir, registryPath);
+      return { outcome: 'stopped', entry };
+    }
+
+    // 'already-dead' / 'invalid' (recycled): nothing was (or may be) signalled.
+    this.tombstoneDeadEntry(entry);
+    return { outcome: 'dead-reconciled', entry };
+  }
+
+  /**
+   * PD-41-A: drop a dead driver's liveness claim by rewriting its row as an
+   * exit tombstone (kept for Phase 42's died-with-reason surface). The reason
+   * is a fixed phrase, never stderr.
+   */
+  private tombstoneDeadEntry(entry: SessionRegistryEntry): void {
+    recordSessionExit(
+      entry.projectDir,
+      {
+        reason: `driver pid ${entry.pid} not running when reconciled; exit status unobserved`,
+        code: null,
+        signal: null,
+        at: new Date().toISOString(),
+      },
+      entry.pid,
+      this.getSessionRegistryPath(),
+    );
+  }
+
+  /**
+   * Look up the registered driver for a sessionId that no in-memory session
+   * holds (e.g. after an MCP-server restart). Empty ids never match.
+   */
+  findRegisteredDriverBySessionId(sessionId: string): SessionRegistryEntry | undefined {
+    return findSessionEntryBySessionId(sessionId, this.getSessionRegistryPath());
+  }
+
+  /**
+   * D-02 DEMOTED last resort: signals the pid named by `.gsd/auto.lock`. Reached
+   * only when the registry holds no live claim for the dir (unregistered
+   * terminal-started `/gsd auto` or pre-registry drivers) - never for a
+   * gsd_execute driver while it is registered. Behaviour locked by the parity
+   * test 'mcp signals a guarded detached auto.lock PID while daemon has no
+   * fallback'.
+   */
+  protected async stopDetachedAutoProcess(projectDir: string): Promise<boolean> {
     const lockPath = join(projectDir, '.gsd', 'auto.lock');
     if (!existsSync(lockPath)) return false;
     try {
