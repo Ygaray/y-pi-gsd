@@ -77,6 +77,32 @@ describe('readSessionRegistry', () => {
     writeFileSync(registryPath, JSON.stringify([1, 2, 3]));
     assert.deepEqual(readSessionRegistry(registryPath), {});
   });
+
+  test('WR-04 drops malformed rows (null, string, shapeless) and keeps well-formed ones', () => {
+    const good = makeEntry();
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        '/x': null,
+        '/y': 'oops',
+        '/z': { sessionId: 's' },
+        '/nopid': { projectDir: '/nopid', startTime: new Date().toISOString() },
+        [good.projectDir]: good,
+      }),
+    );
+    assert.deepEqual(readSessionRegistry(registryPath), { [good.projectDir]: good });
+  });
+
+  test('WR-04 a registry holding a null row no longer breaks register / lookup / remove', () => {
+    writeFileSync(registryPath, JSON.stringify({ '/x': null, '/y': { pid: 'nope' } }));
+    const entry = makeEntry({ sessionId: 'sess-wr04' });
+    assert.doesNotThrow(() => registerSessionEntry(entry, registryPath));
+    assert.equal(findSessionEntryBySessionId('sess-wr04', registryPath)?.pid, entry.pid);
+    assert.equal(findSessionEntryBySessionId('absent', registryPath), undefined);
+    assert.doesNotThrow(() => removeSessionEntry(entry.projectDir, registryPath));
+    // The write self-healed the file: the malformed rows are gone.
+    assert.deepEqual(JSON.parse(readFileSync(registryPath, 'utf8')), {});
+  });
 });
 
 describe('registerSessionEntry / getSessionEntry / removeSessionEntry', () => {

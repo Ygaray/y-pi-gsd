@@ -149,7 +149,7 @@ export function readSessionRegistry(registryPath = REGISTRY_PATH): SessionRegist
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as SessionRegistry;
+      return sanitizeRegistryRows(parsed as Record<string, unknown>, registryPath);
     }
     throw new Error('registry is not a JSON object');
   } catch (err) {
@@ -168,6 +168,47 @@ export function readSessionRegistry(registryPath = REGISTRY_PATH): SessionRegist
     }
     return {};
   }
+}
+
+/**
+ * A well-formed row is an object with an integer `pid` and string
+ * `projectDir` / `startTime`. Everything downstream (`row.pid`, `row.sessionId`,
+ * `resolve(row.projectDir)`, `Date.parse(row.startTime)`) assumes this shape.
+ */
+function isWellFormedRow(row: unknown): row is SessionRegistryEntry {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  const r = row as Record<string, unknown>;
+  return (
+    Number.isInteger(r.pid) &&
+    typeof r.projectDir === 'string' &&
+    r.projectDir !== '' &&
+    typeof r.startTime === 'string'
+  );
+}
+
+/**
+ * WR-04 (41-REVIEW.md): the registry file is untrusted input. A valid-JSON
+ * file whose rows are `null` / strings / shape-less objects must not crash
+ * registration, session-id lookup or reconcile. Malformed rows are dropped
+ * from the in-memory view (and logged); the next registry write persists the
+ * cleaned view, so the file self-heals instead of blocking every start.
+ */
+function sanitizeRegistryRows(parsed: Record<string, unknown>, registryPath: string): SessionRegistry {
+  const clean: SessionRegistry = {};
+  const dropped: string[] = [];
+  for (const [key, row] of Object.entries(parsed)) {
+    if (isWellFormedRow(row)) {
+      clean[key] = row;
+    } else {
+      dropped.push(key);
+    }
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(
+      `[gsd-mcp-server] session registry ${registryPath}: ignoring ${dropped.length} malformed row(s): ${dropped.join(', ')}\n`,
+    );
+  }
+  return clean;
 }
 
 function writeSessionRegistry(registry: SessionRegistry, registryPath = REGISTRY_PATH): void {
