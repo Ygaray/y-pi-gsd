@@ -356,6 +356,30 @@ export class SessionManager {
         timeout(INIT_TIMEOUT_MS, `RpcClient.start() timed out after ${INIT_TIMEOUT_MS}ms`),
       ]);
 
+      // D-01 (Phase 41 / DRIVER-02): register the driver the moment its pid
+      // exists - right after start() resolves, BEFORE the init() handshake and
+      // before any prompt() dispatch - so an MCP-server crash during init()
+      // cannot leave a live, detached, un-reapable driver with no registry
+      // row. Accepted residual: RpcClient.start() spawns synchronously and
+      // then waits 100 ms before resolving, so a server crash inside those
+      // 100 ms can still leave an unregistered child; D-01 registers "after
+      // start() resolves" by decision.
+      const childPid = client.pid;
+      const registeredStartTime = new Date().toISOString();
+      if (typeof childPid === 'number') {
+        registerSessionEntry(
+          {
+            sessionId: '',
+            projectDir: resolvedDir,
+            pid: childPid,
+            startTime: registeredStartTime,
+            status: 'starting',
+            ownerPid: process.pid,
+          },
+          this.getSessionRegistryPath(),
+        );
+      }
+
       // Perform v2 init handshake
       const initResult: RpcInitResult = await Promise.race([
         client.init(),
@@ -365,19 +389,17 @@ export class SessionManager {
       session.sessionId = initResult.sessionId;
       session.status = 'running';
 
-      // INC-2026-09-29-02 fix 3 (Option B): persist this session's child pid
-      // now that it's known, so a subsequent MCP server restart can detect
-      // this driver as a live orphan (rather than launching a duplicate) if
-      // this server instance dies without a clean teardown.
-      const childPid = client.pid;
+      // Upgrade the same registry key in place with the real sessionId and
+      // 'running' status (registerSessionEntry overwrites the key).
       if (typeof childPid === 'number') {
         registerSessionEntry(
           {
             sessionId: session.sessionId,
             projectDir: resolvedDir,
             pid: childPid,
-            startTime: new Date().toISOString(),
-            status: session.status,
+            startTime: registeredStartTime,
+            status: 'running',
+            ownerPid: process.pid,
           },
           this.getSessionRegistryPath(),
         );
@@ -414,6 +436,13 @@ export class SessionManager {
 
       // Attempt cleanup
       try { await client.stop(); } catch { /* swallow cleanup errors */ }
+
+      // Drop the registry row only once the child is confirmed stopped (the
+      // stop above is awaited), mirroring _cancelSessionObject. A registry
+      // I/O error must not mask the original start failure.
+      try {
+        removeSessionEntry(resolvedDir, this.getSessionRegistryPath());
+      } catch { /* swallow registry cleanup errors */ }
 
       // Keep session in map so callers can inspect the error
       throw new Error(`Failed to start session for ${resolvedDir}: ${session.error}`);
