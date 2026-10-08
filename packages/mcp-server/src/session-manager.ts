@@ -366,19 +366,23 @@ export class SessionManager {
       // start() resolves" by decision.
       const childPid = client.pid;
       const registeredStartTime = new Date().toISOString();
-      if (typeof childPid === 'number') {
-        registerSessionEntry(
-          {
-            sessionId: '',
-            projectDir: resolvedDir,
-            pid: childPid,
-            startTime: registeredStartTime,
-            status: 'starting',
-            ownerPid: process.pid,
-          },
-          this.getSessionRegistryPath(),
-        );
+      if (typeof childPid !== 'number') {
+        // Fail closed (SC1: no live driver outside the registry's view): the
+        // catch below stops the client, so nothing is left running or
+        // dispatched to without a registry row.
+        throw new Error('driver pid unavailable after start(); refusing to dispatch an unregistered driver');
       }
+      registerSessionEntry(
+        {
+          sessionId: '',
+          projectDir: resolvedDir,
+          pid: childPid,
+          startTime: registeredStartTime,
+          status: 'starting',
+          ownerPid: process.pid,
+        },
+        this.getSessionRegistryPath(),
+      );
 
       // Perform v2 init handshake
       const initResult: RpcInitResult = await Promise.race([
@@ -391,19 +395,17 @@ export class SessionManager {
 
       // Upgrade the same registry key in place with the real sessionId and
       // 'running' status (registerSessionEntry overwrites the key).
-      if (typeof childPid === 'number') {
-        registerSessionEntry(
-          {
-            sessionId: session.sessionId,
-            projectDir: resolvedDir,
-            pid: childPid,
-            startTime: registeredStartTime,
-            status: 'running',
-            ownerPid: process.pid,
-          },
-          this.getSessionRegistryPath(),
-        );
-      }
+      registerSessionEntry(
+        {
+          sessionId: session.sessionId,
+          projectDir: resolvedDir,
+          pid: childPid,
+          startTime: registeredStartTime,
+          status: 'running',
+          ownerPid: process.pid,
+        },
+        this.getSessionRegistryPath(),
+      );
 
       // Wire event tracking
       const unsubscribeEvents = client.onEvent((event: SdkAgentEvent) => {

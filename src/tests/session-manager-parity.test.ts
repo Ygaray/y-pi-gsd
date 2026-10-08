@@ -38,6 +38,9 @@
  *   (shared core) territory, out of scope for parity tests. MCP cleanup also
  *   retains cancelled sessions for inspection, while daemon cleanup clears its
  *   session map. Both host-specific outcomes are asserted below.
+ * - mcp-only: a persisted session registry (session-persist.ts). The harness
+ *   isolates it to a temp file and fakes RpcClient.pid so the D-01 fail-closed
+ *   registration path runs without touching ~/.gsd or signalling any pid.
  * - startSession signatures differ by host shape: daemon takes an options object,
  *   mcp takes (projectDir, options). The harness below normalizes them.
  *
@@ -62,6 +65,7 @@ import { SessionManager as DaemonSessionManager } from '../../packages/daemon/sr
 import { MAX_EVENTS as DAEMON_MAX_EVENTS, INIT_TIMEOUT_MS as DAEMON_INIT_TIMEOUT_MS } from '../../packages/daemon/src/types.js';
 import { Logger as DaemonLogger } from '../../packages/daemon/src/logger.js';
 import { SessionManager as McpSessionManager } from '../../packages/mcp-server/src/session-manager.js';
+import type { SessionLivenessOptions } from '../../packages/mcp-server/src/session-persist.js';
 import { MAX_EVENTS as MCP_MAX_EVENTS, INIT_TIMEOUT_MS as MCP_INIT_TIMEOUT_MS } from '../../packages/mcp-server/src/types.js';
 
 const require = createRequire(import.meta.url);
@@ -82,10 +86,14 @@ interface ClientRecorder {
   sessionId: string;
   /** Set by gateNextSessionStart: resolved to release a frozen start(). */
   releaseStart?: () => void;
+  /** Fake driver pid, assigned by the patched start() (undefined before start). */
+  fakePid?: number;
 }
 
 const recorders = new WeakMap<object, ClientRecorder>();
 let sessionCounter = 0;
+/** Fake driver pids (pass isSafePid; never signalled - see createMcpHarness). */
+let fakePidCounter = 3000001;
 
 function recorderFor(instance: object): ClientRecorder {
   let rec = recorders.get(instance);
@@ -109,13 +117,24 @@ const ORIGINAL_PROTOTYPE_METHODS = new Map<string, PropertyDescriptor | undefine
 
 function installFakeRpcClient(): void {
   const proto = RpcClient.prototype as unknown as Record<string, unknown>;
-  for (const method of ['start', 'stop', 'init', 'onEvent', 'prompt', 'abort', 'sendUIResponse']) {
+  for (const method of ['start', 'stop', 'init', 'onEvent', 'prompt', 'abort', 'sendUIResponse', 'pid']) {
     ORIGINAL_PROTOTYPE_METHODS.set(method, Object.getOwnPropertyDescriptor(RpcClient.prototype, method));
   }
+
+  // Mirror the real getter's undefined-before-start contract (the mcp copy's
+  // D-01 registration reads client.pid right after start() resolves).
+  Object.defineProperty(RpcClient.prototype, 'pid', {
+    configurable: true,
+    get(this: object) {
+      const rec = recorders.get(this);
+      return rec && rec.started ? rec.fakePid : undefined;
+    },
+  });
 
   proto['start'] = function () {
     const rec = recorderFor(this);
     rec.started = true;
+    rec.fakePid = fakePidCounter++;
     rec.ctorOptions = { ...((this as unknown as { options: Record<string, unknown> }).options ?? {}) };
     const startError = queuedStartError;
     queuedStartError = null;
@@ -315,8 +334,28 @@ async function createDaemonHarness(workDir: string): Promise<Harness> {
 }
 
 async function createMcpHarness(workDir: string): Promise<Harness> {
-  void workDir;
-  const manager = new McpSessionManager();
+  // The mcp copy alone persists a session registry: isolate it to a temp file
+  // and fake liveness (signal 0 -> ESRCH) so no real pid is probed or signalled.
+  class IsolatedMcpSessionManager extends McpSessionManager {
+    protected override getSessionRegistryPath(): string | undefined {
+      return join(workDir, 'mcp-session-instances.json');
+    }
+
+    protected override getSessionLivenessOptions(): SessionLivenessOptions {
+      return {
+        kill: (_pid, signal) => {
+          if (signal === 0 || signal === undefined) {
+            const err = new Error('no such process') as NodeJS.ErrnoException;
+            err.code = 'ESRCH';
+            throw err;
+          }
+        },
+        getProcessStartTime: () => null,
+        waitForExit: () => {},
+      };
+    }
+  }
+  const manager = new IsolatedMcpSessionManager();
   return {
     label: 'mcp-server',
     maxEvents: MCP_MAX_EVENTS,

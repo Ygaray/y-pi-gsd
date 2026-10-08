@@ -130,6 +130,7 @@ class TestableSessionManager extends SessionManager {
   nextInitGate: Promise<void> | null = null;
   nextInitError: Error | null = null;
   nextPromptError: Error | null = null;
+  nextPidUndefined = false;
 
   constructor(registryPath: string) {
     super();
@@ -140,7 +141,12 @@ class TestableSessionManager extends SessionManager {
     this.sessionCounter++;
     const client = new MockRpcClient(options);
     client.initSessionId = `mock-session-${String(this.sessionCounter).padStart(3, '0')}`;
-    client.pid = this.nextPid++;
+    if (this.nextPidUndefined) {
+      client.pid = undefined;
+      this.nextPidUndefined = false;
+    } else {
+      client.pid = this.nextPid++;
+    }
     client.initGate = this.nextInitGate;
     client.initError = this.nextInitError;
     client.promptError = this.nextPromptError;
@@ -272,5 +278,27 @@ describe('Phase 41 driver registry lifecycle - D-01 register-ordering (SC1)', ()
     );
     assert.equal(sm.lastClient!.stopped, true);
     assert.equal(getSessionEntry(promptDir, sm.registryPath), undefined);
+  });
+
+  it('D-01 refuses to dispatch when the driver pid is unavailable after start', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-no-pid');
+    sm.nextPidUndefined = true;
+
+    await assert.rejects(
+      () => sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' }),
+      (err: Error) => {
+        assert.ok(
+          err.message.includes('driver pid unavailable after start(); refusing to dispatch an unregistered driver'),
+          `unexpected message: ${err.message}`,
+        );
+        return true;
+      },
+    );
+
+    const client = sm.lastClient!;
+    assert.equal(client.stopped, true);
+    assert.equal(client.prompted.length, 0);
+    assert.deepEqual(readSessionRegistry(sm.registryPath), {});
   });
 });

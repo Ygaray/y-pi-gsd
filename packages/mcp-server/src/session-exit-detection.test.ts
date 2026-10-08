@@ -12,10 +12,14 @@
  * the actual production wiring added for this incident is under test.
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { SessionManager } from './session-manager.js';
+import type { SessionLivenessOptions } from './session-persist.js';
 import type { RpcClient } from '@opengsd/rpc-client';
 import type { ManagedSession } from './types.js';
 
@@ -35,6 +39,8 @@ class MockRpcClient {
   stopped = false;
   aborted = false;
   prompted: string[] = [];
+  /** Driver pid - D-01 (Phase 41) fails closed when this is not a number. */
+  pid: number | undefined;
 
   private eventListeners: Array<(event: Record<string, unknown>) => void> = [];
   private exitListeners: ExitListener[] = [];
@@ -120,10 +126,38 @@ class TestableSessionManager extends SessionManager {
   private sessionCounter = 0;
   nextInitError: Error | null = null;
   nextStartError: Error | null = null;
+  nextPid = 61000;
+
+  /** Temp registry so the real ~/.gsd/session-instances.json is never touched. */
+  private readonly registryPath: string;
+
+  constructor(registryPath: string) {
+    super();
+    this.registryPath = registryPath;
+  }
+
+  protected override getSessionRegistryPath(): string | undefined {
+    return this.registryPath;
+  }
+
+  protected override getSessionLivenessOptions(): SessionLivenessOptions {
+    return {
+      kill: (_pid, signal) => {
+        if (signal === 0 || signal === undefined) {
+          const err = new Error('no such process') as NodeJS.ErrnoException;
+          err.code = 'ESRCH';
+          throw err;
+        }
+      },
+      getProcessStartTime: () => null,
+      waitForExit: () => {},
+    };
+  }
 
   protected override createClient(options: { cliPath: string; cwd: string; args: string[] }): RpcClient {
     this.sessionCounter++;
     const client = new MockRpcClient(options);
+    client.pid = this.nextPid++;
     client.initSessionId = `mock-session-${String(this.sessionCounter).padStart(3, '0')}`;
     if (this.nextStartError) {
       client.startError = this.nextStartError;
@@ -144,8 +178,8 @@ class TestableSessionManager extends SessionManager {
   }
 }
 
-function createManager(): TestableSessionManager {
-  return new TestableSessionManager();
+function createManager(registryPath: string): TestableSessionManager {
+  return new TestableSessionManager(registryPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,9 +188,15 @@ function createManager(): TestableSessionManager {
 
 describe('SessionManager — unexpected child exit detection (INC-2026-09-29-02)', () => {
   let sm: TestableSessionManager;
+  let tmp: string;
 
   beforeEach(() => {
-    sm = createManager();
+    tmp = mkdtempSync(join(tmpdir(), 'mcp-exit-detect-'));
+    sm = createManager(join(tmp, 'session-instances.json'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
   });
 
   it('marks a running session terminal (error) when the child exits unexpectedly with a nonzero code', async () => {
