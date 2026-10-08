@@ -1101,3 +1101,66 @@ describe('Phase 41 driver registry lifecycle - WR-01 reconcile failure isolation
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// WR-07 (41-REVIEW.md): read tools validate projectDir before touching the registry
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - WR-07 allowed-root validation on read tools', () => {
+  async function withProjectRoot<T>(root: string, fn: () => Promise<T>): Promise<T> {
+    const savedRoot = process.env.GSD_WORKFLOW_PROJECT_ROOT;
+    const savedDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    process.env.GSD_WORKFLOW_PROJECT_ROOT = root;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    try {
+      return await fn();
+    } finally {
+      if (savedRoot === undefined) delete process.env.GSD_WORKFLOW_PROJECT_ROOT;
+      else process.env.GSD_WORKFLOW_PROJECT_ROOT = savedRoot;
+      if (savedDisable === undefined) delete process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+      else process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = savedDisable;
+    }
+  }
+
+  it('WR-07 an out-of-root projectDir is refused and its dead row is NOT rewritten', async () => {
+    const sm = createManager();
+    const allowed = join(tmp, 'allowed');
+    const outside = join(tmp, 'outside');
+    mkdirSync(allowed);
+    mkdirSync(outside);
+    registerSessionEntry(
+      { sessionId: 'out-sess', projectDir: outside, pid: 42040, startTime: new Date().toISOString(), status: 'running' },
+      sm.registryPath,
+    );
+
+    await withProjectRoot(allowed, async () => {
+      for (const tool of ['gsd_status', 'gsd_result']) {
+        const byDir = await callTool(sm, tool, { sessionId: 'stale', projectDir: outside });
+        assert.equal(byDir.isError, true, tool);
+        assert.match(byDir.text, /must stay within the configured workflow project root/);
+
+        const bySession = await callTool(sm, tool, { sessionId: 'out-sess' });
+        assert.equal(bySession.isError, true, tool);
+        assert.match(bySession.text, /must stay within the configured workflow project root/);
+      }
+    });
+
+    const row = getSessionEntry(outside, sm.registryPath);
+    assert.equal(row?.exit, undefined, 'the read must not tombstone a row outside the allowed root');
+    assert.equal(row?.status, 'running');
+  });
+
+  it('WR-07 an in-root projectDir still reconciles', async () => {
+    const sm = createManager();
+    const allowed = join(tmp, 'allowed-ok');
+    const inside = join(allowed, 'proj');
+    mkdirSync(inside, { recursive: true });
+    liveRow(sm, inside, 42041, 'in-sess');
+
+    await withProjectRoot(allowed, async () => {
+      const out = await callTool(sm, 'gsd_status', { sessionId: 'stale', projectDir: inside });
+      assert.equal(out.isError, false, out.text);
+      assert.equal(JSON.parse(out.text).driver.outcome, 'orphan-alive');
+    });
+  });
+});

@@ -347,6 +347,21 @@ async function buildUntrackedSessionPayload(
   sessionId: string | undefined,
   projectDir: string | undefined,
 ): Promise<Record<string, unknown> | null> {
+  // WR-07 (41-REVIEW.md): the reconcile reads AND (for a dead row) rewrites the
+  // shared registry, so its inputs get the same allowed-root validation
+  // gsd_cancel applies - a read must not touch state outside the workflow
+  // project root. A caller-supplied projectDir is validated up front; for a
+  // sessionId-only call the registry row is located first and its (untrusted,
+  // file-sourced) projectDir validated BEFORE anything is reconciled/rewritten.
+  let validatedDir: string | undefined;
+  if (typeof projectDir === 'string' && projectDir.trim() !== '') {
+    validatedDir = validateProjectDir(projectDir.trim());
+  } else if (typeof sessionId === 'string' && sessionId.trim() !== '') {
+    const registered = sessionManager.findRegisteredDriverBySessionId(sessionId);
+    if (registered) validatedDir = validateProjectDir(registered.projectDir);
+  }
+  const callerGaveProjectDir = typeof projectDir === 'string' && projectDir.trim() !== '';
+
   // WR-01 (41-REVIEW.md): the registry reconcile is now the first step of the
   // read-only status tools, and the DB fallback below is documented as
   // never-throwing. A registry fault (read-only ~/.gsd, EACCES on rename, ...)
@@ -354,13 +369,13 @@ async function buildUntrackedSessionPayload(
   // error.
   let driver: DriverReconcileResult = { outcome: 'no-entry' };
   try {
-    driver = sessionManager.reconcileRegisteredDriver({ projectDir, sessionId });
+    driver = sessionManager.reconcileRegisteredDriver({ projectDir: validatedDir, sessionId });
   } catch (err) {
     process.stderr.write(
       `[gsd-mcp-server] driver registry reconcile failed: ${err instanceof Error ? err.message : String(err)}\n`,
     );
   }
-  const db = projectDir ? await reconcileResultFromDb(sessionId, projectDir) : null;
+  const db = callerGaveProjectDir && validatedDir ? await reconcileResultFromDb(sessionId, validatedDir) : null;
   if (driver.outcome === 'no-entry' || !driver.entry) {
     return db;
   }
@@ -389,7 +404,7 @@ async function buildUntrackedSessionPayload(
   }
   return {
     sessionId: sessionId || entry.sessionId || null,
-    projectDir: projectDir ?? entry.projectDir,
+    projectDir: validatedDir ?? entry.projectDir,
     status: 'untracked',
     reconciledFromDb: false,
     note,
