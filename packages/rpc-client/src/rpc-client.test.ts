@@ -420,6 +420,72 @@ describe("RpcClient construction", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	// Phase 40 SC3 lock: the driver's per-unit grandchildren share its process
+	// group, so signalProcess() must signal the negative pid (whole group) for
+	// them to die with it. A non-group kill would leave the grandchild orphaned.
+	it("stop() on a detached client tears down the whole process group (no orphaned grandchild)", async () => {
+		if (process.platform !== "linux") return; // /proc-style group semantics; host is Linux
+		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
+		const scriptPath = join(dir, "agent.js");
+		const pidFile = join(dir, "grandchild.pid");
+		writeFileSync(
+			scriptPath,
+			[
+				'const { spawn } = require("node:child_process");',
+				'const { writeFileSync } = require("node:fs");',
+				'const gc = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });',
+				`writeFileSync(${JSON.stringify(pidFile)}, String(gc.pid));`,
+				"setInterval(() => {}, 1000);",
+				"",
+			].join("\n"),
+		);
+		const alive = (pid: number): boolean => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const client = new RpcClient({ cliPath: scriptPath, detached: true });
+		let gcPid = 0;
+		try {
+			await client.start();
+			for (let i = 0; i < 100 && !(gcPid > 0); i++) {
+				try {
+					gcPid = Number(readFileSync(pidFile, "utf8"));
+				} catch {
+					gcPid = 0;
+				}
+				if (!(gcPid > 0)) await new Promise((r) => setTimeout(r, 20));
+			}
+			assert.ok(gcPid > 0, "grandchild pid must be written by the agent");
+			assert.equal(alive(gcPid), true, "grandchild must be running before stop()");
+
+			await client.stop();
+
+			for (let i = 0; i < 100 && alive(gcPid); i++) {
+				await new Promise((r) => setTimeout(r, 20));
+			}
+			assert.equal(
+				alive(gcPid),
+				false,
+				"stop() must kill the whole group, leaving no orphaned grandchild",
+			);
+		} finally {
+			if (gcPid > 0 && alive(gcPid)) {
+				try {
+					process.kill(gcPid, "SIGKILL");
+				} catch {
+					/* already gone */
+				}
+			}
+			await client.stop();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 // ============================================================================
