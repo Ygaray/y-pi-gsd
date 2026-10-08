@@ -515,6 +515,123 @@ describe("RpcClient construction", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	// Phase 40 SC3 lock (shutdown half): shutdown() sends the RPC, then waits 5 s
+	// for the agent to exit before falling back to signalProcess("SIGKILL"). The
+	// agent below acks the shutdown RPC (otherwise send() would reject after 30 s
+	// and never reach the fallback) but then stays alive, forcing the timeout
+	// path. On a detached client that fallback must kill the whole group.
+	it("shutdown() timeout fallback on a detached client tears down the whole process group (no orphaned grandchild)", {
+		skip: process.platform !== "linux" && "requires /proc (Linux only)",
+		timeout: 15000,
+	}, async () => {
+		const dir = mkdtempSync(join(tmpdir(), "rpc-client-"));
+		const scriptPath = join(dir, "agent.js");
+		const pidFile = join(dir, "grandchild.pid");
+		writeFileSync(
+			scriptPath,
+			[
+				'const { spawn } = require("node:child_process");',
+				'const { writeFileSync, renameSync } = require("node:fs");',
+				'const gc = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });',
+				// Write-then-rename so the reader never observes a partial pid.
+				`writeFileSync(${JSON.stringify(`${pidFile}.tmp`)}, String(gc.pid));`,
+				`renameSync(${JSON.stringify(`${pidFile}.tmp`)}, ${JSON.stringify(pidFile)});`,
+				// Ack the shutdown RPC but deliberately do NOT exit: forces the
+				// client's 5 s timeout -> SIGKILL fallback.
+				'let buf = "";',
+				'process.stdin.on("data", (chunk) => {',
+				"  buf += chunk;",
+				'  let nl;',
+				'  while ((nl = buf.indexOf("\\n")) >= 0) {',
+				"    const line = buf.slice(0, nl);",
+				"    buf = buf.slice(nl + 1);",
+				"    try {",
+				"      const cmd = JSON.parse(line);",
+				'      if (cmd.type === "shutdown") {',
+				'        process.stdout.write(JSON.stringify({ type: "response", id: cmd.id, command: "shutdown", success: true }) + "\\n");',
+				"      }",
+				"    } catch {}",
+				"  }",
+				"});",
+				// Ignore SIGTERM too so nothing but the fallback SIGKILL ends it.
+				'process.on("SIGTERM", () => {});',
+				"setInterval(() => {}, 1000);",
+				"",
+			].join("\n"),
+		);
+		// Zombie-aware liveness (see the stop() test above for rationale).
+		const alive = (pid: number): boolean => {
+			try {
+				const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+				const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+				return state !== "Z" && state !== "X";
+			} catch {
+				return false; // ENOENT: reaped
+			}
+		};
+
+		// Poll `pred` every `intervalMs` until it holds or `timeoutMs` elapses.
+		const waitFor = async (pred: () => boolean, timeoutMs = 2000, intervalMs = 20): Promise<boolean> => {
+			const deadline = Date.now() + timeoutMs;
+			while (!pred()) {
+				if (Date.now() >= deadline) return false;
+				await new Promise((r) => setTimeout(r, intervalMs));
+			}
+			return true;
+		};
+
+		const client = new RpcClient({ cliPath: scriptPath, detached: true });
+		let gcPid = 0;
+		let agentPid = 0;
+		try {
+			await client.start();
+			agentPid = (client as any).process.pid as number;
+			await waitFor(() => {
+				try {
+					const raw = readFileSync(pidFile, "utf8").trim();
+					gcPid = /^\d+$/.test(raw) ? Number(raw) : 0;
+				} catch {
+					gcPid = 0;
+				}
+				return gcPid > 0;
+			});
+			assert.ok(gcPid > 0, "grandchild pid must be written by the agent");
+			assert.equal(alive(gcPid), true, "grandchild must be running before shutdown()");
+			assert.equal(alive(agentPid), true, "agent must be running before shutdown()");
+
+			// Takes ~5 s: the agent never exits, so the timeout fallback fires.
+			await client.shutdown();
+
+			await waitFor(() => !alive(gcPid));
+			assert.equal(
+				alive(gcPid),
+				false,
+				"shutdown() timeout fallback must kill the whole group, leaving no orphaned grandchild",
+			);
+			assert.equal(alive(agentPid), false, "shutdown() timeout fallback must kill the agent process");
+		} finally {
+			// Belt-and-braces: reap the whole group first so no descendant leaks if
+			// the regression this test guards against reappears. No client.stop()
+			// here: the agent is already dead, so stop() would just wait out its
+			// 5 s "exit" timeout on an exit event that has already fired.
+			if (agentPid > 0) {
+				try {
+					process.kill(-agentPid, "SIGKILL");
+				} catch {
+					/* group already gone */
+				}
+			}
+			if (gcPid > 0 && alive(gcPid)) {
+				try {
+					process.kill(gcPid, "SIGKILL");
+				} catch {
+					/* already gone */
+				}
+			}
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 // ============================================================================
