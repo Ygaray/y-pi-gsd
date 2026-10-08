@@ -377,11 +377,7 @@ export class SessionManager {
       // startSession() during the stop is declined 'reap-in-progress'.
       this.startingLocks.add(lockKey);
       try {
-        try {
-          await existing.client.stop();
-        } catch {
-          /* swallow */
-        }
+        await this.stopSessionClient(existing);
         this.sessions.delete(existing.projectDir);
         // INC-2026-09-29-02 fix 3 (Option B): this in-memory session owned the
         // persisted registry row for its dir - drop it now that we're
@@ -435,6 +431,15 @@ export class SessionManager {
 
     // Insert into map early (keyed by dir) so concurrent starts are rejected
     this.sessions.set(resolvedDir, session);
+
+    // CR-01 (41-REVIEW.md): record that the driver child is gone the moment it
+    // exits, whatever the session status. Subscribed before start() so even a
+    // death during init is seen, and deliberately NOT part of
+    // `session.unsubscribe` - it is a one-way flag that must outlive the event
+    // subscription so every later teardown path can skip stop().
+    client.onExit(() => {
+      session.driverExited = true;
+    });
 
     try {
       // Start the process with timeout
@@ -523,8 +528,8 @@ export class SessionManager {
       session.status = 'error';
       session.error = err instanceof Error ? err.message : String(err);
 
-      // Attempt cleanup
-      try { await client.stop(); } catch { /* swallow cleanup errors */ }
+      // Attempt cleanup (skips stop() when the driver already exited)
+      await this.stopSessionClient(session);
 
       // Drop the registry row only once the child is confirmed stopped (the
       // stop above is awaited), mirroring _cancelSessionObject. A registry
@@ -595,6 +600,24 @@ export class SessionManager {
         reapOutcome,
         `Session already active for ${resolvedDir} (a still-alive orphaned driver from a prior MCP server instance holds this worktree; ${detail})`
       );
+    }
+  }
+
+  /**
+   * Stop a session's driver client, never throwing. CR-01 (41-REVIEW.md):
+   * skipped entirely once the driver child has exited - `RpcClient.stop()` on a
+   * dead child still sends `kill(-pid)` to a process group that a recycled pid
+   * may now own, then sits out a 5 s SIGKILL timer for an `exit` event that
+   * never fires again (and, under `startingLocks`, would stall every
+   * concurrent start/cancel for that long). The exited child has nothing left
+   * to reclaim, so skipping is both safe and exact.
+   */
+  private async stopSessionClient(session: ManagedSession): Promise<void> {
+    if (session.driverExited) return;
+    try {
+      await session.client.stop();
+    } catch {
+      /* swallow */
     }
   }
 
@@ -1039,13 +1062,17 @@ export class SessionManager {
    * Internal: perform abort + stop + mark cancelled on a resolved session object.
    */
   private async _cancelSessionObject(session: ManagedSession): Promise<void> {
-    try {
-      await session.client.abort();
-    } catch { /* may already be stopped */ }
+    // CR-01 (41-REVIEW.md): a driver that already exited needs neither an abort
+    // request nor a stop() - stop() would signal its (possibly recycled)
+    // process group and wait out a 5 s timer for an exit event that already
+    // fired.
+    if (!session.driverExited) {
+      try {
+        await session.client.abort();
+      } catch { /* may already be stopped */ }
+    }
 
-    try {
-      await session.client.stop();
-    } catch { /* swallow */ }
+    await this.stopSessionClient(session);
 
     session.status = 'cancelled';
     session.unsubscribe?.();
@@ -1100,9 +1127,7 @@ export class SessionManager {
       // `this.process` is already null, so stopping them again is harmless
       // — simplest to just stop unconditionally rather than track "already
       // stopped" as a separate bit of state.
-      stopPromises.push(
-        session.client.stop().catch(() => { /* swallow */ })
-      );
+      stopPromises.push(this.stopSessionClient(session));
       session.status = 'cancelled';
       // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped
       // (or being stopped, above) - drop its persisted registry row so the
@@ -1155,6 +1180,8 @@ export class SessionManager {
     session: ManagedSession,
     info: { code: number | null; signal: NodeJS.Signals | null; expected: boolean }
   ): void {
+    // The child is gone whatever the cause (CR-01, 41-REVIEW.md).
+    session.driverExited = true;
     if (info.expected) return;
     if (session.status === 'completed' || session.status === 'cancelled' || session.status === 'error') {
       return;
@@ -1228,7 +1255,7 @@ export class SessionManager {
         // and drop the persisted registry row immediately, rather than
         // leaking it until the next same-projectDir launch (the eviction
         // branch in startSession()) or full server shutdown (cleanup()).
-        void session.client.stop().catch(() => { /* swallow */ });
+        void this.stopSessionClient(session);
         removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
       }
       return;

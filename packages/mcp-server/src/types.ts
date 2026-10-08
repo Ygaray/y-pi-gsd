@@ -49,6 +49,15 @@ export interface ManagedSession {
 
   /** Cleanup function to unsubscribe from events */
   unsubscribe?: () => void;
+
+  /**
+   * True once the driver child process has been observed to exit (expected or
+   * not). `RpcClient.stop()` on an already-exited child still signals its
+   * process group - which a recycled pid may now own - and then waits 5 s for
+   * an `exit` event that never fires again, so every teardown path must skip
+   * `client.stop()` / `client.abort()` once this is set (CR-01, 41-REVIEW.md).
+   */
+  driverExited?: boolean;
 }
 
 export type { PendingBlocker };

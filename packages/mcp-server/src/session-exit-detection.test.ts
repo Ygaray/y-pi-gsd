@@ -38,6 +38,9 @@ class MockRpcClient {
    *  way the real RpcClient does. */
   stopped = false;
   aborted = false;
+  /** How many times stop()/abort() were invoked (CR-01: dead drivers must see none). */
+  stopCalls = 0;
+  abortCalls = 0;
   prompted: string[] = [];
   /** Driver pid - D-01 (Phase 41) fails closed when this is not a number. */
   pid: number | undefined;
@@ -63,6 +66,7 @@ class MockRpcClient {
   }
 
   async stop(): Promise<void> {
+    this.stopCalls++;
     this.stopped = true;
   }
 
@@ -92,6 +96,7 @@ class MockRpcClient {
   }
 
   async abort(): Promise<void> {
+    this.abortCalls++;
     this.aborted = true;
   }
 
@@ -324,5 +329,55 @@ describe('SessionManager — unexpected child exit detection (INC-2026-09-29-02)
     assert.equal(kept?.status, 'exited');
     assert.equal(kept?.exit?.code, 1);
     assert.equal(getSessionEntry(liveDir, registryPath), undefined);
+  });
+  // CR-01 (41-REVIEW.md): RpcClient.stop() on an already-exited child signals a
+  // possibly-recycled process group and waits 5 s for an exit event that never
+  // comes again. Every teardown path must skip it for a dead driver.
+  it('CR-01 restarting after an unexpected exit never stop()s the dead driver', async () => {
+    const dir = '/tmp/exit-detect-cr01-evict';
+    await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+    const dead = sm.lastClient!;
+    dead.simulateExit(137, null);
+
+    await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+
+    assert.equal(dead.stopCalls, 0, 'a dead driver must not be stop()ed on eviction');
+    assert.notEqual(sm.lastClient, dead);
+  });
+
+  it('CR-01 cancelling an errored session never abort()s or stop()s the dead driver', async () => {
+    const dir = '/tmp/exit-detect-cr01-cancel';
+    const sessionId = await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+    const dead = sm.lastClient!;
+    dead.simulateExit(1, null);
+
+    await sm.cancelSession(sessionId);
+
+    assert.equal(dead.abortCalls, 0);
+    assert.equal(dead.stopCalls, 0);
+  });
+
+  it('CR-01 cleanup() does not stop() a dead driver but still stops live ones', async () => {
+    await sm.startSession('/tmp/exit-detect-cr01-clean-a', { cliPath: '/usr/bin/gsd' });
+    const dead = sm.lastClient!;
+    await sm.startSession('/tmp/exit-detect-cr01-clean-b', { cliPath: '/usr/bin/gsd' });
+    const live = sm.lastClient!;
+    dead.simulateExit(1, null);
+
+    await sm.cleanup();
+
+    assert.equal(dead.stopCalls, 0);
+    assert.equal(live.stopCalls, 1);
+  });
+
+  it('CR-01 a live driver is still stopped on eviction (paused session)', async () => {
+    const dir = '/tmp/exit-detect-cr01-live';
+    await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+    const first = sm.lastClient!;
+    first.emitEvent({ type: 'extension_ui_request', method: 'notify', message: 'auto-mode paused' });
+
+    await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+
+    assert.equal(first.stopCalls, 1);
   });
 });
