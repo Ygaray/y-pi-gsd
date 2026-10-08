@@ -767,7 +767,9 @@ export class SessionManager {
       return 'settled-alive';
     }
 
-    const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);
+    const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions, {
+      projectDir: entry.projectDir,
+    });
 
     if (typeof result === 'object') {
       // CR-01 (39-REVIEW.md): the kill signal itself failed for a reason
@@ -985,7 +987,9 @@ export class SessionManager {
       );
     }
 
-    const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions);
+    const result = killOrphanSessionPid(entry.pid, entry.startTime, livenessOptions, {
+      projectDir: entry.projectDir,
+    });
 
     if (typeof result === 'object') {
       process.stderr.write(

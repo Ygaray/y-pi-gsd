@@ -170,7 +170,8 @@ function normalizeProcessCwd(value: string): string {
   return value.startsWith('\\\\?\\') ? value.slice(4) : value;
 }
 
-function defaultGetProcessCwd(pid: number): string | null {
+// Exported for reuse by session-persist.ts (WR-03, Phase 41 review).
+export function defaultGetProcessCwd(pid: number): string | null {
   if (process.platform === 'win32') {
     try {
       const out = execFileSync(
@@ -314,6 +315,27 @@ function escapeRegExp(value: string): string {
 
 function normalizeCommandPath(value: string): string {
   return value.replace(/\\/g, '/');
+}
+
+/**
+ * True when a process's `cwd` is the project directory or a descendant of it
+ * (either spelling of the project dir - raw or realpath - is accepted). Used as
+ * corroborating identity evidence for a pid whose start time cannot be verified
+ * (WR-03, Phase 41 review). Descendants count because a driver may legitimately
+ * chdir into a worktree below the project root.
+ */
+export function isProcessCwdWithinProject(cwd: string, projectDir: string): boolean {
+  const cwdKey = resolveComparableProjectPath(normalizeProcessCwd(cwd)).replace(/\/+$/, '');
+  const roots = [resolveComparableProjectPath(projectDir)];
+  try {
+    roots.push(resolveComparableProjectPath(realpathSync(projectDir)));
+  } catch {
+    // projectDir vanished - the raw spelling above still applies
+  }
+  return roots.some((root) => {
+    const rootKey = root.replace(/\/+$/, '');
+    return cwdKey === rootKey || cwdKey.startsWith(`${rootKey}/`);
+  });
 }
 
 function resolveComparableProjectPath(projectDir: string): string {

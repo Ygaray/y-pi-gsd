@@ -377,6 +377,74 @@ describe('isOrphanEntryAlive — pid-liveness with start-time guard', () => {
   });
 });
 
+describe('killOrphanSessionPid — WR-03 identity check when the start time is unverifiable', () => {
+  const projectDir = '/tmp/wr03-project';
+
+  function run(opts: {
+    recorded?: string;
+    actualStart: number | null;
+    cwd: string | null;
+    identity?: boolean;
+  }): { result: ReturnType<typeof killOrphanSessionPid>; signals: Array<NodeJS.Signals | 0 | undefined> } {
+    const signals: Array<NodeJS.Signals | 0 | undefined> = [];
+    let alive = true;
+    const result = killOrphanSessionPid(
+      888,
+      opts.recorded ?? new Date().toISOString(),
+      {
+        kill(_pid, signal) {
+          signals.push(signal);
+          if (signal === 'SIGTERM') alive = false;
+          if (signal === 0 && !alive) {
+            const err = new Error('gone') as NodeJS.ErrnoException;
+            err.code = 'ESRCH';
+            throw err;
+          }
+        },
+        getProcessStartTime: () => opts.actualStart,
+        getProcessCwd: () => opts.cwd,
+        waitForExit() {},
+      },
+      opts.identity === false ? undefined : { projectDir },
+    );
+    return { result, signals };
+  }
+
+  test('a null OS start time with an unreadable cwd refuses to signal and reports an error', () => {
+    const { result, signals } = run({ actualStart: null, cwd: null });
+    assert.equal(typeof result, 'object');
+    assert.match((result as { error: string }).error, /cannot verify/);
+    assert.deepEqual(signals.filter((s) => s !== 0), []);
+  });
+
+  test('a null OS start time with a foreign cwd refuses to signal', () => {
+    const { result, signals } = run({ actualStart: null, cwd: '/somewhere/else' });
+    assert.equal(typeof result, 'object');
+    assert.deepEqual(signals.filter((s) => s !== 0), []);
+  });
+
+  test('an unparsable recorded startTime with a foreign cwd refuses to signal', () => {
+    const { result } = run({ recorded: 'not-a-date', actualStart: 1, cwd: '/somewhere/else' });
+    assert.equal(typeof result, 'object');
+  });
+
+  test('a null OS start time is accepted when the cwd is the project dir or a descendant', () => {
+    assert.equal(run({ actualStart: null, cwd: projectDir }).result, 'killed');
+    assert.equal(run({ actualStart: null, cwd: `${projectDir}/.gsd/worktrees/M001` }).result, 'killed');
+    // A sibling that merely shares the prefix is NOT inside the project.
+    assert.equal(typeof run({ actualStart: null, cwd: `${projectDir}-other` }).result, 'object');
+  });
+
+  test('a verified start time signals regardless of cwd (a driver may chdir out)', () => {
+    assert.equal(run({ actualStart: 1, cwd: '/somewhere/else' }).result, 'killed');
+    assert.equal(run({ actualStart: 1, cwd: null }).result, 'killed');
+  });
+
+  test('callers that pass no identity keep the legacy fail-open behaviour', () => {
+    assert.equal(run({ actualStart: null, cwd: null, identity: false }).result, 'killed');
+  });
+});
+
 describe('killOrphanSessionPid', () => {
   test('returns "invalid" for a non-safe pid', () => {
     assert.equal(killOrphanSessionPid(0, new Date().toISOString()), 'invalid');

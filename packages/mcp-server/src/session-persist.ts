@@ -27,9 +27,11 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import {
+  defaultGetProcessCwd,
   defaultGetProcessStartTime,
   defaultWaitForExit,
   isPidAlive,
+  isProcessCwdWithinProject,
   isSafePid,
 } from './pid-registry.js';
 
@@ -76,6 +78,8 @@ export type SessionRegistry = Record<string, SessionRegistryEntry>;
 export interface SessionLivenessOptions {
   kill?: (pid: number, signal?: NodeJS.Signals | 0) => void;
   getProcessStartTime?: (pid: number) => number | null;
+  /** Process cwd lookup used for the unverified-start-time identity check (WR-03). */
+  getProcessCwd?: (pid: number) => string | null;
   waitForExit?: () => void;
 }
 
@@ -460,6 +464,7 @@ export function killOrphanSessionPid(
   pid: unknown,
   recordedStartTime: string | undefined,
   options: SessionLivenessOptions = {},
+  identity?: { projectDir: string },
 ): KillOrphanSessionResult {
   if (!isSafePid(pid)) return 'invalid';
 
@@ -485,6 +490,28 @@ export function killOrphanSessionPid(
   ) {
     // Recycled pid — refuse to signal a process we never spawned.
     return 'invalid';
+  }
+
+  // WR-03 (41-REVIEW.md): the start-time guard fails OPEN - it is silently
+  // skipped when the OS start time is unavailable (no `ps`, a sandbox, a
+  // transient failure) or the recorded `startTime` is unparsable (the registry
+  // is unvalidated JSON). When the caller supplies the row's projectDir, that
+  // "unverified" state must not authorise a SIGTERM/SIGKILL on whatever owns
+  // the pid: require corroborating identity evidence - the process cwd readable
+  // and rooted in the project dir (a descendant is accepted, as a driver may
+  // chdir into a worktree below it). With a VERIFIED start time the cwd is not
+  // consulted, deliberately: an auto-mode driver can chdir out to an external
+  // worktree and must stay cancellable. A pid recycled within the 60 s skew of
+  // the recorded time still passes the start-time guard (accepted residual).
+  const startTimeVerified = Number.isFinite(recordedMs) && actualStartMs !== null;
+  if (identity && !startTimeVerified) {
+    const getProcessCwd = options.getProcessCwd ?? defaultGetProcessCwd;
+    const cwd = getProcessCwd(pid);
+    if (cwd === null || !isProcessCwdWithinProject(cwd, identity.projectDir)) {
+      return {
+        error: `cannot verify that pid ${pid} is the registered driver for ${identity.projectDir} (start time unverifiable and process cwd ${cwd === null ? 'unreadable' : `${cwd} is outside the project`}); refusing to signal it`,
+      };
+    }
   }
 
   try {

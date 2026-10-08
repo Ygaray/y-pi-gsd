@@ -156,6 +156,9 @@ class TestableSessionManager extends SessionManager {
   reconcileGate: Promise<void> | null = null;
   /** D-02: when set, the fake kill throws an Error with this errno code on SIGTERM. */
   killErrorOnSigterm: string | null = null;
+  /** WR-03: the fake OS start time / cwd of every pid (default: verified start, cwd unknown). */
+  procStartTime: number | null = 1;
+  procCwd: string | null = null;
 
   constructor(registryPath: string) {
     super();
@@ -209,7 +212,10 @@ class TestableSessionManager extends SessionManager {
         }
         this.alivePids.delete(pid);
       },
-      getProcessStartTime: () => null,
+      // A verified (long-ago) start time keeps the WR-03 identity gate out of
+      // the way; getProcessCwd is stubbed so no real lsof/pwdx runs for fake pids.
+      getProcessStartTime: () => this.procStartTime,
+      getProcessCwd: () => this.procCwd,
       waitForExit: () => {},
     };
   }
@@ -1217,5 +1223,43 @@ describe('Phase 41 driver registry lifecycle - IN-01 reconciled payload honesty'
       assert.equal(payload.requestedSessionId, 'stale-caller-id');
       assert.equal(payload.status, 'untracked');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WR-03 (41-REVIEW.md): registry-authorised kill needs verifiable identity
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - WR-03 unverifiable-identity kill', () => {
+  it('WR-03 cancel refuses to signal a pid it cannot identify and keeps the row', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr03');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 43001, 'wr03-sess');
+    sm.procStartTime = null; // no `ps`: start-time guard cannot verify
+    sm.procCwd = null; // and the cwd is unreadable
+
+    await withoutProjectRoot(async () => {
+      await assert.rejects(() => sm.cancelSessionByDir(projectDir), /cannot verify that pid 43001/);
+    });
+
+    assert.deepEqual(nonZeroSignals(sm), [], 'an unidentifiable pid must never be signalled');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, 43001, 'row kept for retry');
+  });
+
+  it('WR-03 cancel proceeds when an unverifiable start time is corroborated by the process cwd', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr03-ok');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 43002, 'wr03-ok-sess');
+    sm.procStartTime = null;
+    sm.procCwd = realpathSync.native(projectDir);
+
+    await withoutProjectRoot(async () => {
+      await sm.cancelSessionByDir(projectDir);
+    });
+
+    assert.ok(sm.killedPids.some((k) => k.pid === 43002 && k.signal === 'SIGTERM'));
+    assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
   });
 });

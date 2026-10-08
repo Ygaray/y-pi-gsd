@@ -171,7 +171,10 @@ class TestableSessionManager extends SessionManager {
         // SIGTERM/SIGKILL "kills" it for subsequent liveness probes.
         this.alivePids.delete(pid);
       },
-      getProcessStartTime: () => null, // unknown — tolerated by the guard
+      // A verified (long-ago) start time keeps the WR-03 identity gate out of
+      // the way; getProcessCwd is stubbed so no real lsof/pwdx runs for fake pids.
+      getProcessStartTime: () => 1,
+      getProcessCwd: () => null,
       waitForExit: () => {},
     };
   }
