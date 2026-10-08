@@ -20,6 +20,7 @@ import type {
 import { MAX_EVENTS, INIT_TIMEOUT_MS } from './types.js';
 import { signalAutoLockPid } from './pid-registry.js';
 import {
+  canonicalProjectDir,
   getSessionEntry,
   isOrphanEntryAlive,
   killOrphanSessionPid,
@@ -263,6 +264,14 @@ export class SessionManager {
   private startingLocks = new Set<string>();
 
   /**
+   * Key for `startingLocks`: the canonical (realpath) worktree dir, so a
+   * symlink alias and its target share one start lock (SC3, Phase 41).
+   */
+  private startLockKey(dir: string): string {
+    return canonicalProjectDir(dir);
+  }
+
+  /**
    * Start a new GSD auto-mode session for the given project directory.
    *
    * Rejects if a session already exists for this projectDir.
@@ -276,7 +285,7 @@ export class SessionManager {
 
     const resolvedDir = resolve(projectDir);
 
-    const existing = this.sessions.get(resolvedDir);
+    const existing = this.getSessionByDir(resolvedDir);
     if (existing) {
       // Only block when a genuinely active session is running. Terminal
       // states (paused, error, completed, cancelled) are evicted so the caller can
@@ -292,13 +301,13 @@ export class SessionManager {
       // otherwise terminal) session keeps its RpcClient alive, so deleting the
       // map entry alone would orphan the child process.
       void existing.client.stop().catch(() => { /* swallow */ });
-      this.sessions.delete(resolvedDir);
+      this.sessions.delete(existing.projectDir);
       // INC-2026-09-29-02 fix 3 (Option B): this in-memory session owned the
-      // persisted registry row for resolvedDir — drop it now that we're
+      // persisted registry row for its dir — drop it now that we're
       // reclaiming its child, so a future restart doesn't mistake it for an
       // orphan.
-      removeSessionEntry(resolvedDir, this.getSessionRegistryPath());
-    } else if (this.startingLocks.has(resolvedDir)) {
+      removeSessionEntry(existing.projectDir, this.getSessionRegistryPath());
+    } else if (this.startingLocks.has(this.startLockKey(resolvedDir))) {
       // A concurrent startSession() call for this same resolvedDir is
       // already inside the awaited reap below — reject it exactly like the
       // in-memory "already active" case above (CR-02 guarantee, preserved
@@ -469,7 +478,8 @@ export class SessionManager {
    */
   private async reapOrDeclineOrphan(resolvedDir: string): Promise<void> {
     let reapOutcome: OrphanReapOutcome = 'no-entry';
-    this.startingLocks.add(resolvedDir);
+    const lockKey = this.startLockKey(resolvedDir);
+    this.startingLocks.add(lockKey);
     try {
       reapOutcome = await this.reapPersistedOrphanSession(resolvedDir);
     } catch (err) {
@@ -484,7 +494,7 @@ export class SessionManager {
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(`Failed to start session for ${resolvedDir}: ${message}`);
     } finally {
-      this.startingLocks.delete(resolvedDir);
+      this.startingLocks.delete(lockKey);
     }
 
     // EXEC-01 (Phase 39, 39-REVIEW.md CR-01's alternative (b)): the
@@ -663,10 +673,20 @@ export class SessionManager {
   }
 
   /**
-   * Look up a session by project directory (direct map lookup).
+   * Look up a session by project directory. Alias-aware (SC3, Phase 41): a
+   * direct hit on the resolved key wins; otherwise the session whose
+   * canonical (realpath) dir equals the canonical form of `projectDir` is
+   * returned, so a symlink alias and its target find the same session.
+   * Linear scan is fine - we expect <10 concurrent sessions.
    */
   getSessionByDir(projectDir: string): ManagedSession | undefined {
-    return this.sessions.get(resolve(projectDir));
+    const direct = this.sessions.get(resolve(projectDir));
+    if (direct) return direct;
+    const canonical = canonicalProjectDir(projectDir);
+    for (const session of this.sessions.values()) {
+      if (canonicalProjectDir(session.projectDir) === canonical) return session;
+    }
+    return undefined;
   }
 
   /**

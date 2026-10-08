@@ -22,7 +22,7 @@
  * start-time guard is the sole defense against a since-recycled pid.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -102,7 +102,29 @@ const REGISTRY_PATH = join(
 // started materially later has been recycled by an unrelated process.
 const STALE_PID_START_SKEW_MS = 60_000;
 
+/**
+ * Canonical form of a worktree path: `realpathSync.native(resolve(dir))`,
+ * falling back to `resolve(dir)` when the path does not exist (or cannot be
+ * resolved). Same shape as the orphan reconcile module's
+ * `normalizeOrphanProjectRoot`, duplicated deliberately so this module stays
+ * a leaf (that module loads workflow-tools at runtime). Canonical so a symlink alias and its target
+ * share ONE registry key, one in-memory session and one start lock (SC3).
+ */
+export function canonicalProjectDir(projectDir: string): string {
+  const resolved = resolve(projectDir);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
 function keyFor(projectDir: string): string {
+  return canonicalProjectDir(projectDir);
+}
+
+/** Pre-Phase-41 rows were keyed by plain `resolve()`; still read/migrated/removed. */
+function legacyKeyFor(projectDir: string): string {
   return resolve(projectDir);
 }
 
@@ -169,27 +191,44 @@ export function registerSessionEntry(
 ): void {
   const registry = readSessionRegistry(registryPath);
   const key = keyFor(entry.projectDir);
+  const legacyKey = legacyKeyFor(entry.projectDir);
   registry[key] = { ...entry, projectDir: key };
+  // Migration on write: a pre-Phase-41 resolve()-keyed row for the same
+  // worktree is superseded by the canonical row.
+  if (legacyKey !== key) delete registry[legacyKey];
   writeSessionRegistry(registry, registryPath);
 }
 
-/** Look up the persisted entry for a projectDir, if any. */
+/**
+ * Look up the persisted entry for a projectDir, if any. Reads the canonical
+ * key first, then the pre-Phase-41 `resolve()` key.
+ */
 export function getSessionEntry(
   projectDir: string,
   registryPath = REGISTRY_PATH,
 ): SessionRegistryEntry | undefined {
   const registry = readSessionRegistry(registryPath);
-  return registry[keyFor(projectDir)];
+  const key = keyFor(projectDir);
+  if (registry[key]) return registry[key];
+  const legacyKey = legacyKeyFor(projectDir);
+  return legacyKey !== key ? registry[legacyKey] : undefined;
 }
 
 /** Remove the persisted entry for a projectDir (no-op if absent). */
 export function removeSessionEntry(projectDir: string, registryPath = REGISTRY_PATH): void {
   const registry = readSessionRegistry(registryPath);
   const key = keyFor(projectDir);
+  const legacyKey = legacyKeyFor(projectDir);
+  let changed = false;
   if (key in registry) {
     delete registry[key];
-    writeSessionRegistry(registry, registryPath);
+    changed = true;
   }
+  if (legacyKey !== key && legacyKey in registry) {
+    delete registry[legacyKey];
+    changed = true;
+  }
+  if (changed) writeSessionRegistry(registry, registryPath);
 }
 
 // ---------------------------------------------------------------------------

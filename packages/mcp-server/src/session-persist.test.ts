@@ -11,8 +11,8 @@
 
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
@@ -123,6 +123,50 @@ describe('registerSessionEntry / getSessionEntry / removeSessionEntry', () => {
     registerSessionEntry(makeEntry(), registryPath);
     const leftovers = readdirSync(tmp).filter((f) => f.includes('.tmp-'));
     assert.deepEqual(leftovers, []);
+  });
+});
+
+describe('Phase 41 canonical registry key (SC3)', () => {
+  function makeAlias(): { real: string; link: string } {
+    const real = join(tmp, 'real-worktree');
+    const link = join(tmp, 'link-worktree');
+    mkdirSync(real);
+    symlinkSync(real, link);
+    return { real, link };
+  }
+
+  test('canonical key: a symlink alias and its target share one registry row', () => {
+    const { real, link } = makeAlias();
+    registerSessionEntry(makeEntry({ projectDir: link, pid: 4001 }), registryPath);
+
+    const viaTarget = getSessionEntry(real, registryPath);
+    assert.ok(viaTarget, 'target spelling must find the alias-registered row');
+    assert.equal(viaTarget.pid, 4001);
+
+    const keys = Object.keys(readSessionRegistry(registryPath));
+    assert.deepEqual(keys, [realpathSync.native(real)]);
+    assert.equal(viaTarget.projectDir, keys[0]);
+  });
+
+  test('legacy resolve-keyed row is still found, migrated on register, and removed', () => {
+    const { real, link } = makeAlias();
+    const legacyKey = resolve(link);
+    const legacy = makeEntry({ projectDir: legacyKey, pid: 4002 });
+
+    // Found: hand-written pre-phase row keyed by resolve(link).
+    writeFileSync(registryPath, JSON.stringify({ [legacyKey]: legacy }));
+    assert.equal(getSessionEntry(link, registryPath)?.pid, 4002);
+    assert.equal(getSessionEntry(real, registryPath), undefined, 'target spelling has a different legacy key');
+
+    // Migrated: registering replaces the legacy key with the canonical one.
+    registerSessionEntry(makeEntry({ projectDir: link, pid: 4003 }), registryPath);
+    assert.deepEqual(Object.keys(readSessionRegistry(registryPath)), [realpathSync.native(real)]);
+    assert.equal(getSessionEntry(real, registryPath)?.pid, 4003);
+
+    // Removed: a re-written legacy row is deleted by removeSessionEntry.
+    writeFileSync(registryPath, JSON.stringify({ [legacyKey]: legacy }));
+    removeSessionEntry(link, registryPath);
+    assert.deepEqual(readSessionRegistry(registryPath), {});
   });
 });
 

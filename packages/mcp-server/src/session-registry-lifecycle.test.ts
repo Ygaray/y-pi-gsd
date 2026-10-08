@@ -16,11 +16,11 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { SessionManager, type OrphanReapOutcome } from './session-manager.js';
+import { SessionDeclinedError, SessionManager, type OrphanReapOutcome } from './session-manager.js';
 import {
   getSessionEntry,
   readSessionRegistry,
@@ -299,6 +299,40 @@ describe('Phase 41 driver registry lifecycle - D-01 register-ordering (SC1)', ()
     const client = sm.lastClient!;
     assert.equal(client.stopped, true);
     assert.equal(client.prompted.length, 0);
+    assert.deepEqual(readSessionRegistry(sm.registryPath), {});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SC3 duplicate drivers
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - SC3 duplicate drivers', () => {
+  it('SC3 a symlink alias of a worktree maps to one registry row and one driver', async () => {
+    const sm = createManager();
+    const real = join(tmp, 'real-worktree');
+    const link = join(tmp, 'link-worktree');
+    mkdirSync(real);
+    symlinkSync(real, link);
+
+    await sm.startSession(link, { cliPath: '/usr/bin/gsd' });
+
+    await assert.rejects(
+      () => sm.startSession(real, { cliPath: '/usr/bin/gsd' }),
+      (err: unknown) => {
+        assert.ok(err instanceof SessionDeclinedError);
+        assert.equal(err.reason, 'active');
+        return true;
+      },
+    );
+    assert.equal(sm.allClients.length, 1, 'no second client may be created');
+
+    assert.deepEqual(Object.keys(readSessionRegistry(sm.registryPath)), [realpathSync.native(real)]);
+    const pid = sm.lastClient!.pid;
+    assert.equal(getSessionEntry(link, sm.registryPath)?.pid, pid);
+    assert.equal(getSessionEntry(real, sm.registryPath)?.pid, pid);
+
+    await sm.cancelSessionByDir(real);
     assert.deepEqual(readSessionRegistry(sm.registryPath), {});
   });
 });
