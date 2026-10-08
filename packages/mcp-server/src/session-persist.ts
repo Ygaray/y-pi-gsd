@@ -132,6 +132,27 @@ function legacyKeyFor(projectDir: string): string {
   return resolve(projectDir);
 }
 
+/**
+ * Every registry key that denotes the same worktree as `projectDir`: the
+ * canonical key, the pre-Phase-41 `resolve()` key, and (IN-02, 41-REVIEW.md)
+ * any other stored key whose own canonical form equals the canonical key - a
+ * legacy row written under a symlink alias A is otherwise invisible when the
+ * worktree is queried through its real target B (both of B's keys are B), so a
+ * second driver could be started beside the orphan. Returned in lookup
+ * priority order (canonical first), without duplicates.
+ */
+function keysForSameDir(registry: SessionRegistry, projectDir: string): string[] {
+  const key = keyFor(projectDir);
+  const keys = [key];
+  const legacyKey = legacyKeyFor(projectDir);
+  if (legacyKey !== key) keys.push(legacyKey);
+  for (const stored of Object.keys(registry)) {
+    if (keys.includes(stored)) continue;
+    if (canonicalProjectDir(stored) === key) keys.push(stored);
+  }
+  return keys.filter((k) => k in registry || k === key);
+}
+
 // ---------------------------------------------------------------------------
 // Read / write (tolerant reads, atomic writes)
 // ---------------------------------------------------------------------------
@@ -260,12 +281,12 @@ export function registerSessionEntry(
 ): void {
   const registry = readSessionRegistry(registryPath);
   const key = keyFor(entry.projectDir);
-  const legacyKey = legacyKeyFor(entry.projectDir);
+  const sameDirKeys = keysForSameDir(registry, entry.projectDir);
 
   if (!isTombstoneEntry(entry)) {
     const dropped: string[] = [];
     for (const [otherKey, row] of Object.entries(registry)) {
-      if (otherKey === key || otherKey === legacyKey) continue;
+      if (sameDirKeys.includes(otherKey)) continue;
       if (isTombstoneEntry(row)) continue;
       if (row.pid === entry.pid) {
         delete registry[otherKey];
@@ -280,9 +301,9 @@ export function registerSessionEntry(
   }
 
   registry[key] = { ...entry, projectDir: key };
-  // Migration on write: a pre-Phase-41 resolve()-keyed row for the same
-  // worktree is superseded by the canonical row.
-  if (legacyKey !== key) delete registry[legacyKey];
+  // Migration on write: a pre-Phase-41 resolve()-keyed (or symlink-alias-keyed,
+  // IN-02) row for the same worktree is superseded by the canonical row.
+  for (const k of sameDirKeys) if (k !== key) delete registry[k];
   writeSessionRegistry(registry, registryPath);
 }
 
@@ -295,25 +316,19 @@ export function getSessionEntry(
   registryPath = REGISTRY_PATH,
 ): SessionRegistryEntry | undefined {
   const registry = readSessionRegistry(registryPath);
-  const key = keyFor(projectDir);
-  if (registry[key]) return registry[key];
-  const legacyKey = legacyKeyFor(projectDir);
-  return legacyKey !== key ? registry[legacyKey] : undefined;
+  const held = keysForSameDir(registry, projectDir).find((k) => registry[k]);
+  return held === undefined ? undefined : registry[held];
 }
 
 /** Remove the persisted entry for a projectDir (no-op if absent). */
 export function removeSessionEntry(projectDir: string, registryPath = REGISTRY_PATH): void {
   const registry = readSessionRegistry(registryPath);
-  const key = keyFor(projectDir);
-  const legacyKey = legacyKeyFor(projectDir);
   let changed = false;
-  if (key in registry) {
-    delete registry[key];
-    changed = true;
-  }
-  if (legacyKey !== key && legacyKey in registry) {
-    delete registry[legacyKey];
-    changed = true;
+  for (const k of keysForSameDir(registry, projectDir)) {
+    if (k in registry) {
+      delete registry[k];
+      changed = true;
+    }
   }
   if (changed) writeSessionRegistry(registry, registryPath);
 }
@@ -338,10 +353,8 @@ export function removeSessionEntryIfPid(
   options: { keepTombstone?: boolean } = {},
 ): boolean {
   const registry = readSessionRegistry(registryPath);
-  const key = keyFor(projectDir);
-  const legacyKey = legacyKeyFor(projectDir);
   let changed = false;
-  for (const k of legacyKey !== key ? [key, legacyKey] : [key]) {
+  for (const k of keysForSameDir(registry, projectDir)) {
     if (registry[k] && registry[k].pid === expectedPid) {
       if (options.keepTombstone && isTombstoneEntry(registry[k])) continue;
       delete registry[k];
@@ -390,8 +403,7 @@ export function recordSessionExit(
 ): boolean {
   const registry = readSessionRegistry(registryPath);
   const key = keyFor(projectDir);
-  const legacyKey = legacyKeyFor(projectDir);
-  const heldKey = registry[key] ? key : legacyKey !== key && registry[legacyKey] ? legacyKey : undefined;
+  const heldKey = keysForSameDir(registry, projectDir).find((k) => registry[k]);
   if (heldKey === undefined) return false;
   const row = registry[heldKey];
   if (row.pid !== expectedPid) return false;

@@ -197,7 +197,9 @@ describe('Phase 41 canonical registry key (SC3)', () => {
     // Found: hand-written pre-phase row keyed by resolve(link).
     writeFileSync(registryPath, JSON.stringify({ [legacyKey]: legacy }));
     assert.equal(getSessionEntry(link, registryPath)?.pid, 4002);
-    assert.equal(getSessionEntry(real, registryPath), undefined, 'target spelling has a different legacy key');
+    // IN-02 (41-REVIEW.md): the target spelling now finds the alias-keyed legacy
+    // row too, so a second driver cannot be started beside the orphan.
+    assert.equal(getSessionEntry(real, registryPath)?.pid, 4002, 'target spelling finds the alias-keyed legacy row');
 
     // Migrated: registering replaces the legacy key with the canonical one.
     registerSessionEntry(makeEntry({ projectDir: link, pid: 4003 }), registryPath);
@@ -208,6 +210,41 @@ describe('Phase 41 canonical registry key (SC3)', () => {
     writeFileSync(registryPath, JSON.stringify({ [legacyKey]: legacy }));
     removeSessionEntry(link, registryPath);
     assert.deepEqual(readSessionRegistry(registryPath), {});
+  });
+});
+
+describe('IN-02 legacy alias-keyed rows are reachable through the canonical path', () => {
+  function makeAliasRegistry(): { real: string; link: string; legacy: SessionRegistryEntry } {
+    const real = join(tmp, 'real-in02');
+    const link = join(tmp, 'link-in02');
+    mkdirSync(real);
+    symlinkSync(real, link);
+    const legacy = makeEntry({ projectDir: link, pid: 4100 });
+    writeFileSync(registryPath, JSON.stringify({ [link]: legacy }));
+    return { real, link, legacy };
+  }
+
+  test('removeSessionEntry / removeSessionEntryIfPid / recordSessionExit reach the alias-keyed row via the target', () => {
+    const { real, link } = makeAliasRegistry();
+    assert.equal(removeSessionEntryIfPid(real, 9999, registryPath), false);
+    assert.equal(getSessionEntry(link, registryPath)?.pid, 4100);
+
+    const exit: SessionExitRecord = { reason: 'driver exited code=1', code: 1, signal: null, at: new Date().toISOString() };
+    assert.equal(recordSessionExit(real, exit, 4100, registryPath), true);
+    const tombstoned = getSessionEntry(real, registryPath);
+    assert.equal(tombstoned?.status, 'exited');
+    assert.deepEqual(Object.keys(readSessionRegistry(registryPath)), [realpathSync.native(real)]);
+
+    writeFileSync(registryPath, JSON.stringify({ [link]: makeEntry({ projectDir: link, pid: 4100 }) }));
+    removeSessionEntry(real, registryPath);
+    assert.deepEqual(readSessionRegistry(registryPath), {});
+  });
+
+  test('registering through the target supersedes the alias-keyed row instead of leaving a duplicate', () => {
+    const { real } = makeAliasRegistry();
+    registerSessionEntry(makeEntry({ projectDir: real, pid: 4101 }), registryPath);
+    assert.deepEqual(Object.keys(readSessionRegistry(registryPath)), [realpathSync.native(real)]);
+    assert.equal(getSessionEntry(real, registryPath)?.pid, 4101);
   });
 });
 
