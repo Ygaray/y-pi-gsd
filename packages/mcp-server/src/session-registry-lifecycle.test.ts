@@ -17,7 +17,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { SessionDeclinedError, SessionManager, type OrphanReapOutcome } from './session-manager.js';
@@ -243,11 +243,6 @@ class TestableSessionManager extends SessionManager {
     return this.reapPersistedOrphanSession(resolvedDir);
   }
 }
-
-// Referenced so the copied harness keeps the helpers later Phase 41 plans use.
-void registerSessionEntry;
-void readSessionRegistry;
-void resolve;
 
 let tmp: string;
 
