@@ -321,11 +321,17 @@ export function removeSessionEntry(projectDir: string, registryPath = REGISTRY_P
  * live row that a peer wrote in the meantime; binding the delete to the pid the
  * caller actually spawned/knew (mirroring `recordSessionExit`) closes that.
  * Returns true when a row was removed, false when absent or held by another pid.
+ *
+ * `keepTombstone` (WR-06): leave an exit tombstone in place. A tombstone is the
+ * durable death record (consumed by Phase 42's died-with-reason surface), so a
+ * teardown of the in-memory session must not erase it; the next
+ * `registerSessionEntry` / reap for the worktree replaces it.
  */
 export function removeSessionEntryIfPid(
   projectDir: string,
   expectedPid: number,
   registryPath = REGISTRY_PATH,
+  options: { keepTombstone?: boolean } = {},
 ): boolean {
   const registry = readSessionRegistry(registryPath);
   const key = keyFor(projectDir);
@@ -333,6 +339,7 @@ export function removeSessionEntryIfPid(
   let changed = false;
   for (const k of legacyKey !== key ? [key, legacyKey] : [key]) {
     if (registry[k] && registry[k].pid === expectedPid) {
+      if (options.keepTombstone && isTombstoneEntry(registry[k])) continue;
       delete registry[k];
       changed = true;
     }

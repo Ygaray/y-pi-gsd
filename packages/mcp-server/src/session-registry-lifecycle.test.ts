@@ -92,8 +92,14 @@ class MockRpcClient {
     };
   }
 
-  onExit(_listener: (info: { code: number | null; signal: NodeJS.Signals | null; expected: boolean }) => void): () => void {
-    return () => {};
+  exitListeners: Array<(info: { code: number | null; signal: NodeJS.Signals | null; expected: boolean }) => void> = [];
+
+  onExit(listener: (info: { code: number | null; signal: NodeJS.Signals | null; expected: boolean }) => void): () => void {
+    this.exitListeners.push(listener);
+    return () => {
+      const idx = this.exitListeners.indexOf(listener);
+      if (idx >= 0) this.exitListeners.splice(idx, 1);
+    };
   }
 
   emitEvent(event: Record<string, unknown>): void {
@@ -974,5 +980,76 @@ describe('Phase 41 driver registry lifecycle - WR-02 pid-bound row ownership', (
     await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
 
     assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, sm.lastClient!.pid);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WR-06 (41-REVIEW.md): consistent tombstone / stop-before-drop teardown
+// ---------------------------------------------------------------------------
+
+describe('Phase 41 driver registry lifecycle - WR-06 teardown consistency', () => {
+  it('WR-06 natural completion keeps the row until the child stop is confirmed', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr06-complete');
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const client = sm.lastClient!;
+
+    let openGate!: () => void;
+    client.stopGate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    client.emitEvent({ type: 'extension_ui_request', method: 'notify', message: 'auto-mode complete' });
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(client.stopped, false, 'stop is still pending');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.pid, client.pid, 'row must outlive the pending stop');
+
+    openGate();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(client.stopped, true);
+    assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
+  });
+
+  it('WR-06 gsd_cancel of an errored session keeps the exit tombstone and the error status', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr06-cancel');
+    const sessionId = await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const session = sm.getInternalSession(projectDir)!;
+    const client = sm.lastClient!;
+    // Drive the real unexpected-exit path: a tombstone + 'error' status.
+    (client as unknown as { exitListeners: Array<(i: unknown) => void> }).exitListeners.forEach((l) =>
+      l({ code: 9, signal: null, expected: false }),
+    );
+    assert.equal(session.status, 'error');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.status, 'exited');
+
+    await sm.cancelSession(sessionId);
+
+    assert.equal(session.status, 'error', 'the death status must not be rewritten to cancelled');
+    const row = getSessionEntry(projectDir, sm.registryPath);
+    assert.equal(row?.status, 'exited');
+    assert.equal(row?.exit?.code, 9);
+  });
+
+  it('WR-06 evicting a dead session keeps the tombstone until the replacement registers', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-wr06-evict');
+    await sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    const client = sm.lastClient!;
+    (client as unknown as { exitListeners: Array<(i: unknown) => void> }).exitListeners.forEach((l) =>
+      l({ code: 2, signal: null, expected: false }),
+    );
+
+    let release!: () => void;
+    sm.nextInitGate = new Promise<void>((r) => {
+      release = r;
+    });
+    const restart = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    await new Promise((r) => setImmediate(r));
+    // The replacement is registered ('starting') by now, superseding the tombstone.
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.status, 'starting');
+    release();
+    await restart;
+    assert.equal(getSessionEntry(projectDir, sm.registryPath)?.status, 'running');
   });
 });

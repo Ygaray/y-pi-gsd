@@ -627,13 +627,16 @@ export class SessionManager {
   /**
    * Drop the registry row this session's driver owns, bound to the pid captured
    * at registration so a newer/peer driver's row for the same worktree is never
-   * deleted (WR-02, 41-REVIEW.md). No-op when the session never registered a
-   * driver pid.
+   * deleted (WR-02, 41-REVIEW.md). An exit tombstone is KEPT (WR-06): it is the
+   * death record Phase 42 surfaces, and the next registration/reap for the
+   * worktree replaces it. No-op when the session never registered a driver pid.
+   * Every session-owned, dir-keyed removal funnels through here so tombstone
+   * handling cannot drift between teardown paths.
    */
   private releaseRegistryRow(session: ManagedSession): void {
     const pid = session.driverPid ?? session.client.pid;
     if (typeof pid !== 'number') return;
-    removeSessionEntryIfPid(session.projectDir, pid, this.getSessionRegistryPath());
+    removeSessionEntryIfPid(session.projectDir, pid, this.getSessionRegistryPath(), { keepTombstone: true });
   }
 
   /**
@@ -1107,7 +1110,12 @@ export class SessionManager {
 
     await this.stopSessionClient(session);
 
-    session.status = 'cancelled';
+    // WR-06 (41-REVIEW.md): an 'error' status that records the driver's death
+    // is the one in-memory trace of why it died - do not overwrite it with
+    // 'cancelled' (the exit tombstone is likewise kept by releaseRegistryRow).
+    if (!(session.driverExited && session.status === 'error')) {
+      session.status = 'cancelled';
+    }
     session.unsubscribe?.();
     // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped now
     // — drop its persisted registry row so a future restart doesn't treat it
@@ -1165,11 +1173,9 @@ export class SessionManager {
       // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped
       // (or being stopped, above) - drop its persisted registry row so the
       // registry doesn't accumulate stale entries across restarts. A tombstone
-      // records a driver that already died and is kept for Phase 42.
-      const registryPath = this.getSessionRegistryPath();
-      if (!isTombstoneEntry(getSessionEntry(session.projectDir, registryPath))) {
-        this.releaseRegistryRow(session);
-      }
+      // records a driver that already died and is kept for Phase 42
+      // (releaseRegistryRow skips it).
+      this.releaseRegistryRow(session);
     }
 
     await Promise.allSettled(stopPromises);
@@ -1285,11 +1291,20 @@ export class SessionManager {
         // CR-01 (34-REVIEW.md): natural completion never otherwise stops
         // the underlying headless child — the RPC agent is long-lived and
         // does not exit on its own after 'auto-mode complete'. Reclaim it
-        // and drop the persisted registry row immediately, rather than
-        // leaking it until the next same-projectDir launch (the eviction
-        // branch in startSession()) or full server shutdown (cleanup()).
-        void this.stopSessionClient(session);
-        this.releaseRegistryRow(session);
+        // and drop the persisted registry row, rather than leaking it until
+        // the next same-projectDir launch (the eviction branch in
+        // startSession()) or full server shutdown (cleanup()). WR-06
+        // (41-REVIEW.md): the row is dropped only once the child is confirmed
+        // stopped (stopSessionClient never rejects), mirroring the
+        // startSession() catch path - otherwise a peer server's start would
+        // see 'no-entry' during the up-to-5 s stop and spawn a second driver.
+        void this.stopSessionClient(session).then(() => {
+          try {
+            this.releaseRegistryRow(session);
+          } catch {
+            /* a registry I/O error must not surface as an unhandled rejection */
+          }
+        });
       }
       return;
     }

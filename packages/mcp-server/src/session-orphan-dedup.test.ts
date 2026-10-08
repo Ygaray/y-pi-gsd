@@ -884,10 +884,13 @@ describe('SessionManager.cleanup() — completed session must not be orphaned-an
     const session = sm.getInternalSession(projectDir)!;
     assert.equal(session.status, 'completed');
     assert.equal(client.stopped, true, 'natural completion must stop the child immediately, not leak it until shutdown');
+    // WR-06 (41-REVIEW.md): the row is dropped once the awaited stop resolves
+    // (not synchronously beside the un-awaited stop) - drain the microtasks.
+    await new Promise((r) => setImmediate(r));
     assert.equal(
       getSessionEntry(projectDir, sm.registryPath),
       undefined,
-      'registry row must be dropped immediately once the child is actually stopped',
+      'registry row must be dropped as soon as the child is actually stopped',
     );
   });
 
