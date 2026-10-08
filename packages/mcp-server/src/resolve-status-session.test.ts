@@ -71,7 +71,10 @@ describe('resolveStatusSession (INC-2026-09-29-02)', () => {
     assert.equal(result.session, tracked);
   });
 
-  it('recovers via getOnlySession when sessionId is stale and projectDir does not match, but exactly one session is tracked', () => {
+  it('does NOT fall back to the sole tracked session when the supplied projectDir does not match it', () => {
+    // Behaviour deliberately changed in Phase 41 (Pitfall 3): the old fallback
+    // returned ANOTHER project's session for a stale sessionId + non-matching
+    // projectDir, which hid the driver-registry reconcile for the requested dir.
     const sm = new FakeSessionManager();
     const dir = '/tmp/resolve-status-session-only-mismatched-dir';
     const tracked = makeSession({ sessionId: 'real-session-def', projectDir: resolve(dir) });
@@ -82,8 +85,9 @@ describe('resolveStatusSession (INC-2026-09-29-02)', () => {
       projectDir: '/tmp/some-other-project-dir',
     });
 
-    assert.equal(result.error, undefined);
-    assert.equal(result.session, tracked);
+    assert.equal(result.session, undefined);
+    assert.match(result.error ?? '', /Session not found: stale-session-id/);
+    assert.ok((result.error ?? '').includes('/tmp/some-other-project-dir'), result.error);
   });
 
   it('does NOT recover a session for a different project when multiple sessions are tracked (safety)', () => {

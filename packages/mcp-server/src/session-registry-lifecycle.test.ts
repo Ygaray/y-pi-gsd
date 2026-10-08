@@ -849,4 +849,42 @@ describe('Phase 41 driver registry lifecycle - D-04 reconnect reconcile (SC4)', 
 
     assert.deepEqual(nonZeroSignals(sm), [], 'status/result polls must never signal');
   });
+
+  it('D-04 a stale sessionId for an untracked dir is reconciled for that dir, not the sole tracked session', async () => {
+    const sm = createManager();
+    const dirA = join(tmp, 'proj-stale-a');
+    const dirB = join(tmp, 'proj-stale-b');
+    mkdirSync(dirA);
+    mkdirSync(dirB);
+    const aSessionId = await sm.startSession(dirA, { cliPath: '/usr/bin/gsd' });
+    liveRow(sm, dirB, 42020, 'reg-sess-b');
+
+    await withBridgeDisabled(async () => {
+      const out = await callTool(sm, 'gsd_status', { sessionId: 'stale-y', projectDir: dirB });
+      assert.equal(out.isError, false, out.text);
+      const payload = JSON.parse(out.text);
+      assert.equal(payload.driver.outcome, 'orphan-alive');
+      assert.equal(payload.driver.pid, 42020);
+      assert.notEqual(payload.sessionId, aSessionId);
+      assert.equal(payload.projectDir, dirB);
+    });
+    assert.deepEqual(nonZeroSignals(sm), []);
+  });
+
+  it('D-04 a registry-known sessionId alone is reconciled through gsd_result', async () => {
+    const sm = createManager();
+    const dirC = join(tmp, 'proj-sess-only');
+    mkdirSync(dirC);
+    liveRow(sm, dirC, 42021, 'reg-sess-9');
+
+    await withBridgeDisabled(async () => {
+      const out = await callTool(sm, 'gsd_result', { sessionId: 'reg-sess-9' });
+      assert.equal(out.isError, false, out.text);
+      const payload = JSON.parse(out.text);
+      assert.equal(payload.driver.outcome, 'orphan-alive');
+      assert.equal(payload.projectDir, getSessionEntry(dirC, sm.registryPath)?.projectDir);
+      assert.equal(payload.sessionId, 'reg-sess-9');
+    });
+    assert.deepEqual(nonZeroSignals(sm), []);
+  });
 });

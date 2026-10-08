@@ -232,6 +232,13 @@ export function resolveStatusSession(
     if (projectDir) {
       const byDir = sessionManager.getSessionByDir(projectDir);
       if (byDir) return { session: byDir };
+      // Phase 41 Pitfall 3: the caller named a projectDir that no tracked
+      // session matches. The sole tracked session may belong to a DIFFERENT
+      // project, and returning it masked the driver-registry reconcile for the
+      // requested dir - so do not fall through to getOnlySession().
+      return {
+        error: `Session not found: ${sessionId} (sessionId is stale and no session is tracked for projectDir ${projectDir})`,
+      };
     }
     const only = sessionManager.getOnlySession();
     if (only) return { session: only };
