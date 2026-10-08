@@ -1105,9 +1105,13 @@ export class SessionManager {
       );
       session.status = 'cancelled';
       // INC-2026-09-29-02 fix 3 (Option B): the child is genuinely stopped
-      // (or being stopped, above) — drop its persisted registry row so the
-      // registry doesn't accumulate stale entries across restarts.
-      removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
+      // (or being stopped, above) - drop its persisted registry row so the
+      // registry doesn't accumulate stale entries across restarts. A tombstone
+      // records a driver that already died and is kept for Phase 42.
+      const registryPath = this.getSessionRegistryPath();
+      if (!isTombstoneEntry(getSessionEntry(session.projectDir, registryPath))) {
+        removeSessionEntry(session.projectDir, registryPath);
+      }
     }
 
     await Promise.allSettled(stopPromises);
@@ -1160,11 +1164,23 @@ export class SessionManager {
     session.status = 'error';
     session.error = `Agent process exited unexpectedly (${reason})`;
     session.pendingBlocker = null;
-    // INC-2026-09-29-02 fix 3 (Option B): the child is gone — drop its
-    // persisted registry row so a future restart doesn't treat a dead pid as
-    // a live orphan (isOrphanEntryAlive would already reject a dead pid, but
-    // dropping it here keeps the registry from accumulating stale rows).
-    removeSessionEntry(session.projectDir, this.getSessionRegistryPath());
+    // Phase 42 D-03 / PD-41-A: the death reason now survives an MCP-server
+    // restart as an exit tombstone. Binding to the driver's pid means a newer
+    // driver's row is never clobbered; a tombstone is never probed or signalled
+    // and is replaced by the next startSession() for the worktree.
+    const pid = session.client.pid;
+    if (typeof pid === 'number') {
+      try {
+        recordSessionExit(
+          session.projectDir,
+          { reason: session.error, code: info.code, signal: info.signal, at: new Date().toISOString() },
+          pid,
+          this.getSessionRegistryPath(),
+        );
+      } catch {
+        /* an exit listener must never throw */
+      }
+    }
   }
 
   private handleEvent(session: ManagedSession, event: SdkAgentEvent): void {

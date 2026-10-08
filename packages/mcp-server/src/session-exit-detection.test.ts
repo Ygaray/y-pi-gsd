@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { SessionManager } from './session-manager.js';
-import type { SessionLivenessOptions } from './session-persist.js';
+import { getSessionEntry, type SessionLivenessOptions } from './session-persist.js';
 import type { RpcClient } from '@opengsd/rpc-client';
 import type { ManagedSession } from './types.js';
 
@@ -262,5 +262,67 @@ describe('SessionManager — unexpected child exit detection (INC-2026-09-29-02)
     sm.lastClient!.simulateExit(0, null);
     assert.equal(session.status, 'completed');
     assert.equal(session.error, undefined);
+  });
+
+  it('records an exit tombstone in the registry when the child exits unexpectedly', async () => {
+    const registryPath = join(tmp, 'session-instances.json');
+    const dir = '/tmp/exit-detect-tomb-1';
+    await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+    const pid = sm.lastClient!.pid;
+    assert.equal(getSessionEntry(dir, registryPath)?.status, 'running');
+
+    sm.lastClient!.simulateExit(143, null);
+
+    const row = getSessionEntry(dir, registryPath);
+    assert.equal(row?.status, 'exited');
+    assert.equal(row?.pid, pid);
+    assert.equal(row?.exit?.code, 143);
+    assert.equal(row?.exit?.signal, null);
+    assert.match(row?.exit?.reason ?? '', /exited unexpectedly \(code 143\)/);
+    assert.ok(Number.isFinite(Date.parse(row?.exit?.at ?? '')), 'exit.at is an ISO timestamp');
+  });
+
+  it('records the signal in the exit tombstone when the child is killed by a signal', async () => {
+    const registryPath = join(tmp, 'session-instances.json');
+    const dir = '/tmp/exit-detect-tomb-2';
+    await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+
+    sm.lastClient!.simulateExit(null, 'SIGKILL');
+
+    const row = getSessionEntry(dir, registryPath);
+    assert.equal(row?.status, 'exited');
+    assert.equal(row?.exit?.signal, 'SIGKILL');
+    assert.equal(row?.exit?.code, null);
+    assert.match(row?.exit?.reason ?? '', /signal SIGKILL/);
+  });
+
+  it('an expected exit after cancel leaves no registry row', async () => {
+    const registryPath = join(tmp, 'session-instances.json');
+    const dir = '/tmp/exit-detect-tomb-3';
+    const sessionId = await sm.startSession(dir, { cliPath: '/usr/bin/gsd' });
+
+    await sm.cancelSession(sessionId);
+    sm.lastClient!.simulateExit(0, null);
+
+    assert.equal(getSessionEntry(dir, registryPath), undefined);
+  });
+
+  it('cleanup() keeps an exit tombstone but removes rows of drivers it stops', async () => {
+    const registryPath = join(tmp, 'session-instances.json');
+    const deadDir = '/tmp/exit-detect-tomb-4a';
+    const liveDir = '/tmp/exit-detect-tomb-4b';
+    await sm.startSession(deadDir, { cliPath: '/usr/bin/gsd' });
+    const deadClient = sm.lastClient!;
+    await sm.startSession(liveDir, { cliPath: '/usr/bin/gsd' });
+    deadClient.simulateExit(1, null);
+    assert.equal(getSessionEntry(deadDir, registryPath)?.status, 'exited');
+    assert.equal(getSessionEntry(liveDir, registryPath)?.status, 'running');
+
+    await sm.cleanup();
+
+    const kept = getSessionEntry(deadDir, registryPath);
+    assert.equal(kept?.status, 'exited');
+    assert.equal(kept?.exit?.code, 1);
+    assert.equal(getSessionEntry(liveDir, registryPath), undefined);
   });
 });
