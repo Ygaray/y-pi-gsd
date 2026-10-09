@@ -444,6 +444,16 @@ export async function handleDriversCommand(text: string, ctx: DriversCommandCont
 		return;
 	}
 
+	if (sub === "dismiss" && tokens.length === 2) {
+		const n = ctx.driverLiveness.dismissDied();
+		// Dismissal is in-memory for this TUI session only; the monitor does not request a render itself.
+		ctx.showStatus(
+			n > 0 ? `Dismissed ${n} died driver${n === 1 ? "" : "s"}. They stay in /drivers for 24h.` : "No died drivers to dismiss.",
+		);
+		ctx.requestRender();
+		return;
+	}
+
 	if (sub === "stop" && tokens.length === 3 && /^\d+$/.test(tokens[2])) {
 		await startStop(Number(tokens[2]), ctx);
 		return;

@@ -4,10 +4,11 @@
 
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stripAnsi from "strip-ansi";
+import { visibleWidth } from "@gsd/pi-tui";
 import type { Component } from "@gsd/pi-tui";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 import type { SessionRegistry, SessionRegistryEntry } from "@opengsd/contracts";
@@ -16,6 +17,7 @@ import { DriverLivenessMonitor } from "./components/gsd-driver-liveness-monitor.
 import type { DriverControlPort } from "./driver-control.js";
 import { handleDriversCommand, runDriverStop, type DriversCommandContext } from "./drivers-command.js";
 import type { DriverStopResult } from "./driver-control.js";
+import { DRIVERS_USAGE } from "./drivers-command.js";
 
 initTheme("dark", false);
 
@@ -462,5 +464,138 @@ describe("handleDriversCommand stop", () => {
 		]);
 		assert.equal(h.selectors.length, 0);
 		assert.deepEqual(h.warnings, []);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Dismiss, usage and edge states
+// ---------------------------------------------------------------------------
+
+describe("handleDriversCommand dismiss, usage and edge states", () => {
+	it("/drivers dismiss hides died drivers for this session", async () => {
+		const h = makeHarness();
+		const base = makeTempDir();
+		writeRegistry(h.registryPath, [
+			tombstone(mkdir(base, "alpha"), 4100, 3 * MIN, "first reason"),
+			tombstone(mkdir(base, "beta"), 4101, 5 * MIN, "second reason"),
+		]);
+		await h.monitor.refresh();
+
+		await handleDriversCommand("/drivers dismiss", h.ctx);
+		assert.deepEqual(h.statuses, ["Dismissed 2 died drivers. They stay in /drivers for 24h."]);
+		assert.equal(h.renders, 1);
+
+		await handleDriversCommand("/drivers dismiss", h.ctx);
+		assert.equal(h.statuses[1], "No died drivers to dismiss.");
+		assert.equal(h.renders, 2);
+
+		await handleDriversCommand("/drivers", h.ctx);
+		const text = plain(h.blocks[0]).join("\n");
+		assert.ok(text.includes("(dismissed) first reason"), text);
+		assert.ok(text.includes("(dismissed) second reason"), text);
+	});
+
+	it("bad usage, stop before listing and a non-stoppable index warn", async () => {
+		const h = makeHarness();
+		assert.equal(DRIVERS_USAGE, "Usage: /drivers [list] | /drivers stop <n> | /drivers dismiss");
+		await handleDriversCommand("/drivers frob", h.ctx);
+		await handleDriversCommand("/drivers stop x", h.ctx);
+		await handleDriversCommand("/drivers stop", h.ctx);
+		await handleDriversCommand("/drivers list extra", h.ctx);
+		assert.deepEqual(h.warnings, [DRIVERS_USAGE, DRIVERS_USAGE, DRIVERS_USAGE, DRIVERS_USAGE]);
+
+		h.warnings.length = 0;
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		assert.deepEqual(h.warnings, ["Run /drivers first, then /drivers stop <n>."]);
+
+		h.warnings.length = 0;
+		writeRegistry(h.registryPath, [tombstone(mkdir(makeTempDir(), "alpha"), 4100, MIN)]);
+		await handleDriversCommand("/drivers", h.ctx);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		assert.deepEqual(h.warnings, ["No stoppable driver #1 in the last listing. Run /drivers to refresh."]);
+
+		// The target is only ever an index into the listing: a typed pid is not a driver.
+		h.warnings.length = 0;
+		await handleDriversCommand("/drivers stop 4100", h.ctx);
+		assert.deepEqual(h.warnings, ["No stoppable driver #4100 in the last listing. Run /drivers to refresh."]);
+		assert.equal(h.stopCalls.length, 0);
+		assert.equal(h.selectors.length, 0);
+	});
+
+	it("empty and unreadable registries use the documented copy", async () => {
+		const h = makeHarness();
+		writeRegistry(h.registryPath, []);
+		await handleDriversCommand("/drivers", h.ctx);
+		assert.deepEqual(plain(h.blocks[0]), ["Drivers \u00b7 this machine (0)", "  No drivers registered. Nothing to stop."]);
+
+		const corrupt = "{ this is not json";
+		writeFileSync(h.registryPath, corrupt);
+		const dir = join(h.registryPath, "..");
+		const before = readdirSync(dir).sort();
+		await handleDriversCommand("/drivers", h.ctx);
+		const lines = plain(h.blocks[1]);
+		assert.equal(lines[0], "Drivers \u00b7 this machine");
+		assert.equal(
+			lines[1],
+			"  Registry unreadable (missing permissions, corrupt, or over the 256 KiB cap). Nothing was changed.",
+		);
+		assert.ok(lines[2].includes("session-instances.json"), lines[2]);
+		assert.equal(readFileSync(h.registryPath, "utf8"), corrupt, "file is byte-identical");
+		assert.deepEqual(readdirSync(dir).sort(), before, "no sibling file appears");
+	});
+
+	it("listing caps at 20 rows and never hides died or stale rows", async () => {
+		const h = makeHarness();
+		const base = makeTempDir();
+		const rows: SessionRegistryEntry[] = [];
+		const alive = [4999];
+		for (let i = 0; i < 3; i++) rows.push(tombstone(mkdir(base, `died${i}`), 4000 + i, (i + 1) * MIN));
+		for (let i = 0; i < 2; i++) {
+			rows.push(liveRow(mkdir(base, `stale${i}`), 4100 + i, 30 * MIN, { ownerPid: 4777 }));
+			alive.push(4100 + i);
+		}
+		for (let i = 0; i < 25; i++) {
+			rows.push(liveRow(mkdir(base, `run${String(i).padStart(2, "0")}`), 4200 + i, (60 + i) * MIN));
+			alive.push(4200 + i);
+		}
+		for (const pid of alive) h.probes.alive.add(pid);
+		writeRegistry(h.registryPath, rows);
+
+		await handleDriversCommand("/drivers", h.ctx);
+		const lines = plain(h.blocks[0]);
+		const joined = lines.join("\n");
+		for (let i = 0; i < 3; i++) assert.ok(joined.includes(`died${i}`), `died${i}`);
+		for (let i = 0; i < 2; i++) assert.ok(joined.includes(`stale${i}`), `stale${i}`);
+		assert.equal(lines.filter((l) => l.includes("\u25cf running") && /\brun\d\d$/.test(l)).length, 15);
+		assert.ok(lines.includes("  \u2026 and 10 more running"), joined);
+
+		// Hidden running rows are not numbered, so they cannot be stopped by index.
+		await handleDriversCommand("/drivers stop 18", h.ctx);
+		assert.deepEqual(h.warnings, ["No stoppable driver #18 in the last listing. Run /drivers to refresh."]);
+	});
+
+	it("hostile reasons and paths are sanitized in the listing", async () => {
+		const h = makeHarness();
+		const base = makeTempDir();
+		const hostile = "bad\u0007reason\u009bX\u001b[31mred";
+		const hostileDir = mkdir(base, "proj\u0007\u001b[31m-\u009bname");
+		writeRegistry(h.registryPath, [
+			tombstone(hostileDir, 4100, 2 * MIN, hostile),
+			liveRow(mkdir(base, "ok-driver-with-a-rather-long-project-name"), 4242, 20 * MIN, { sessionId: "s\u0007\u009b\u001b[31mid-padding" }),
+		]);
+		h.probes.alive.add(4242);
+
+		await handleDriversCommand("/drivers", h.ctx);
+
+		for (const width of [120, 60]) {
+			const rendered = h.blocks[0].render(width);
+			const raw = rendered.join("\n");
+			assert.ok(!raw.includes("\u0007"), "no BEL");
+			assert.ok(!raw.includes("\u009b"), "no C1 CSI");
+			assert.ok(!stripAnsi(raw).includes("\u001b"), "no ESC after stripping the theme's own codes");
+			for (const line of rendered) {
+				assert.ok(visibleWidth(line) <= width, `width ${width}: ${stripAnsi(line)}`);
+			}
+		}
 	});
 });
