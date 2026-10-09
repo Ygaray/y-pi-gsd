@@ -1173,7 +1173,7 @@ export function registerHooks(
 
   registerPlanMilestoneSchemaRecovery(pi);
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     const basePath = contextBasePath(ctx);
     const preserveCloseoutSurface = isAutoCompletionStopInProgress();
     initSessionNotifications(ctx);
@@ -1256,6 +1256,14 @@ export function registerHooks(
         await installWelcomeHeader(ctx);
       }
     }
+    // HANDOFF-01 D-07: the waiting-handoff notice is startup-only and fire-and-forget (a slow
+    // CLI must never delay startup); session_start also fires per auto unit, so it self-gates.
+    const handoffNoticeInput = {
+      reason: (event as { reason?: string } | undefined)?.reason,
+      autoActive: isAutoActive(),
+      autoPaused: isAutoPaused(),
+    };
+    void import("../handoff-notice.js").then((m) => m.showStartupNotice(handoffNoticeInput, ctx, basePath)).catch(() => { /* fail-open: never break startup */ });
     await loadToolApiKeysForSession();
     if (isAutoActive() || preserveCloseoutSurface) {
       ctx.ui.setWidget("gsd-health", undefined);
