@@ -286,7 +286,7 @@ async function startStop(n: number, ctx: DriversCommandContext): Promise<void> {
 	// Re-read before confirming: the listing may be stale and a pid can be recycled (T-42-02).
 	const fresh = await ctx.driverLiveness.listAll();
 	if (fresh.kind === "unreadable") {
-		ctx.showWarning(rowChangedWarning(n));
+		ctx.showWarning("Could not re-read the driver registry; nothing was stopped. Run /drivers to retry.");
 		return;
 	}
 	const current = fresh.drivers.find((d) => d.canonicalDir === target.canonicalDir);

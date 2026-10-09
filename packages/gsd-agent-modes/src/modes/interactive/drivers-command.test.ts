@@ -256,6 +256,12 @@ describe("handleDriversCommand stop", () => {
 		await handleDriversCommand("/drivers stop 1", h.ctx);
 		assert.deepEqual(h.warnings, ["Driver #1 is no longer registered. Nothing was stopped. Run /drivers to refresh."]);
 
+		// An unreadable registry is reported as such, not as a changed row.
+		h.warnings.length = 0;
+		writeFileSync(h.registryPath, "{ not json");
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		assert.deepEqual(h.warnings, ["Could not re-read the driver registry; nothing was stopped. Run /drivers to retry."]);
+
 		assert.equal(h.stopCalls.length, 0);
 		assert.equal(h.selectors.length, 0);
 	});
