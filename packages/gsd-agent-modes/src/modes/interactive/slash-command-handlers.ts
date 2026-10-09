@@ -40,6 +40,8 @@ import { DynamicBorder } from "./components/dynamic-border.js";
 import { appKey, editorKey, formatKeyForDisplay } from "./components/keybinding-hints.js";
 import { SelectSubmenu, THINKING_DESCRIPTIONS } from "./components/settings-selector.js";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
+import type { DriverControlPort } from "./driver-control.js";
+import { type DriverLivenessCommandPort, handleDriversCommand } from "./drivers-command.js";
 
 import type { TUI } from "@gsd/pi-tui";
 
@@ -73,6 +75,14 @@ export interface SlashCommandContext {
 	// Accessors
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
+
+	// Phase 42 /drivers: the liveness monitor, the optional stop port, and non-blocking transcript output
+	readonly driverLiveness: DriverLivenessCommandPort;
+	readonly driverControl?: DriverControlPort;
+	/** Append a component as its own chat block (Spacer(1) + component). */
+	appendChatBlock(component: Component): void;
+	/** Non-blocking error-toned transcript alert; never touches lastBlockingError. */
+	showDriverAlert(headline: string, details?: readonly string[]): void;
 
 	// Footer
 	invalidateFooter(): void;
@@ -237,6 +247,10 @@ export async function dispatchSlashCommand(
 	}
 	if (text === "/tui" || text.startsWith("/tui ")) {
 		handleTuiCommand(text, ctx);
+		return true;
+	}
+	if (text === "/drivers" || text.startsWith("/drivers ")) {
+		await handleDriversCommand(text, ctx);
 		return true;
 	}
 

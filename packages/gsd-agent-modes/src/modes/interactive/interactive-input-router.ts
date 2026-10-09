@@ -26,6 +26,14 @@ export function getSlashCommandContext(host: InteractiveModeDelegateHost): Slash
 			defaultEditor: host.defaultEditor,
 			sessionManager: host.sessionManager,
 			settingsManager: host.settingsManager,
+			driverLiveness: host.driverLivenessMonitor,
+			driverControl: host.getDriverControl(),
+			appendChatBlock: (component) => {
+				host.chatContainer.addChild(new Spacer(1));
+				host.chatContainer.addChild(component);
+				host.ui.requestRender();
+			},
+			showDriverAlert: (headline, details) => host.showDriverAlert(headline, details),
 			invalidateFooter: () => host.footer.invalidate(),
 			showStatus: (msg) => host.showStatus(msg),
 			showError: (msg) => host.showError(msg),

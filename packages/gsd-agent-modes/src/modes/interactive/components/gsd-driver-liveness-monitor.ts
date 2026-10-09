@@ -34,7 +34,7 @@ export type DriverWidgetSnapshot =
 	| { kind: "summary"; summary: DriverSummary; nowMs: number };
 
 export type DriverListing =
-	| { kind: "ok"; path: string; drivers: ClassifiedDriver[] }
+	| { kind: "ok"; path: string; drivers: ClassifiedDriver[]; /** Clock reading the listing was classified at (ages in /drivers use it). */ nowMs?: number }
 	| { kind: "unreadable"; path: string; why: string };
 
 /** Plain, already-sanitised chat alert text. The host styles and appends it; it never goes through showError. */
@@ -294,6 +294,6 @@ export class DriverLivenessMonitor {
 			if (a.liveness.kind === "died") return diedAt(b) - diedAt(a);
 			return since(b) - since(a);
 		});
-		return { kind: "ok", path, drivers };
+		return { kind: "ok", path, drivers, nowMs };
 	}
 }
