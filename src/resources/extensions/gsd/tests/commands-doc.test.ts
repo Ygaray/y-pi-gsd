@@ -18,6 +18,8 @@ import {
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 
+import { makeTempRepo } from "./test-utils.ts";
+
 // GSD_HOME must point at a temp dir before any project module loads (T-44-09).
 const savedGsdHome = process.env.GSD_HOME;
 const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-doc-home-"));
@@ -27,6 +29,9 @@ type Mods = {
   doc: typeof import("../commands-doc.ts");
   ops: typeof import("../commands/handlers/ops.ts");
   context: typeof import("../commands/context.ts");
+  dispatcher: typeof import("../commands/dispatcher.ts");
+  catalog: typeof import("../commands/catalog.ts");
+  core: typeof import("../commands/handlers/core.ts");
 };
 let mods: Mods;
 
@@ -35,6 +40,9 @@ before(async () => {
     doc: await import("../commands-doc.ts"),
     ops: await import("../commands/handlers/ops.ts"),
     context: await import("../commands/context.ts"),
+    dispatcher: await import("../commands/dispatcher.ts"),
+    catalog: await import("../commands/catalog.ts"),
+    core: await import("../commands/handlers/core.ts"),
   };
 });
 
@@ -604,5 +612,81 @@ test("DOCS-01 input: no argv element after the verb can be read as an option", (
       if (el === "--keep" || el === "--json") continue;
       assert.ok(el.startsWith("/") || /^[A-Za-z0-9]/.test(el), `option-like argv element: ${el}`);
     }
+  }
+});
+
+// ─── 44-02 Task 1: registration + dispatcher tracer ─────────────────────────
+
+test("DOCS-01 dispatcher tracer: /gsd doc through handleGSDCommand publishes once and never reaches the natural-language router", async () => {
+  // No .gsd dir: the workspace-git preflight's ensureDbOpen creates no database.
+  const base = makeTempRepo("gsd-doc-dispatch-");
+  tempDirs.add(base);
+  mkdirSync(join(base, ".planning"), { recursive: true });
+  writeFileSync(join(base, ".planning", "notes.md"), "# notes\n");
+  const slug = basename(base);
+  const real = realpathSync(join(base, ".planning", "notes.md"));
+  const url = `https://h.ts.net/Doc/${slug}/notes.html`;
+  const stub = makeStub({
+    stdout: envelope({
+      name: `doc:${slug}/notes`,
+      url,
+      source: real,
+      expires_at: "2026-10-16T08:00:00+00:00",
+      pinned: false,
+      state: "up",
+    }),
+  });
+  const notifications: Note[] = [];
+  const sent: unknown[] = [];
+  const ctx = {
+    cwd: base,
+    ui: {
+      notify: (message: string, level: string) => {
+        notifications.push({ message, level });
+      },
+      setWidget: () => {},
+      setStatus: () => {},
+      custom: async () => {},
+    },
+  };
+  const pi = { sendMessage: (m: unknown) => sent.push(m) };
+
+  await withPath(`${stub}${delimiter}${pathWithoutRealYahirTn()}`, () =>
+    mods.dispatcher.handleGSDCommand("doc .planning/notes.md", ctx as any, pi as any),
+  );
+
+  assert.equal(sent.length, 0, "must not fall through to the natural-language router");
+  assert.equal(notifications.length, 1, JSON.stringify(notifications));
+  assert.equal(notifications[0].level, "success");
+  assert.ok(notifications[0].message.split("\n")[0].includes(url), notifications[0].message);
+  assert.deepEqual(readInvocations(stub), [["doc", slug, real, "--json"]]);
+});
+
+test("DOCS-01 registration: doc is in the description, the top-level catalog, showHelp full and top-level completion", () => {
+  const { GSD_COMMAND_DESCRIPTION, TOP_LEVEL_SUBCOMMANDS, getGsdArgumentCompletions } = mods.catalog;
+  assert.match(GSD_COMMAND_DESCRIPTION, /\|doc(\||$)/);
+  assert.equal(TOP_LEVEL_SUBCOMMANDS.filter((c) => c.cmd === "doc").length, 1);
+
+  const lines: string[] = [];
+  const helpCtx = {
+    ui: {
+      notify(message: string) {
+        lines.push(...message.split("\n"));
+      },
+      custom: async () => {},
+    },
+  };
+  mods.core.showHelp(helpCtx as any, "full");
+  assert.ok(lines.some((l) => /^\s+\/gsd\s+doc\b/.test(l)), "showHelp full lacks a /gsd doc line");
+
+  assert.ok(getGsdArgumentCompletions("do").some((i) => i.value === "doc"));
+});
+
+test("DOCS-01 registration: the doc arm is exact-match", async () => {
+  for (const input of ["docs", "docx notes.md"]) {
+    const ctx = makeCtx(process.cwd());
+    const handled = await mods.ops.handleOpsCommand(input, ctx as any, mockPi as any);
+    assert.equal(handled, false, input);
+    assert.equal(ctx.notifications.length, 0, input);
   }
 });
