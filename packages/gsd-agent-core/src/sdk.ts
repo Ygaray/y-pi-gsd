@@ -5,7 +5,7 @@ import { getAgentDir } from "@gsd/pi-coding-agent/config.js";
 import { resolvePath } from "@gsd/pi-coding-agent/utils/paths.js";
 import { AgentSession } from "./agent-session.js";
 import { parseAnthropicRateLimitHeaders, type RateLimitWindow } from "./rate-limit-headers.js";
-import type { RateLimitStatusRef } from "./rate-limit-status-ref.js";
+import { type RateLimitStatusRef, writePrimaryRateLimitWindows } from "./rate-limit-status-ref.js";
 import { createUsageDashboardPoller, type UsageDashboardOptions } from "./usage-dashboard-poller.js";
 import { formatNoModelsAvailableMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import { AuthStorage } from "@gsd/pi-coding-agent/core/auth-storage.js";
@@ -399,19 +399,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					model.provider === "claude-code"
 						? (window, windowKey) => {
 								// Mirrors onResponse's WR-01 per-window merge below exactly: the
-								// previous reading is only eligible to fill the sibling window's
-								// gap when it came from the *same* provider (CR-03) -- a provider
-								// switch must never let a stale window leak through the merge.
-								const previous =
-									rateLimitStatusRef.provider === model.provider ? rateLimitStatusRef.current : undefined;
-								rateLimitStatusRef.current = {
-									session: windowKey === "session" ? window : (previous?.session ?? null),
-									weekly: windowKey === "weekly" ? window : (previous?.weekly ?? null),
-								};
-								rateLimitStatusRef.provider = model.provider;
-								// Tracer interim (replaced by writePrimaryRateLimitWindows): drop dashboard
-								// provenance so an SDK value is never mistaken for a dashboard one.
-								rateLimitStatusRef.meta = undefined;
+								// helper keeps the previous reading only when it came from the *same*
+								// provider (CR-03) -- a provider switch must never let a stale window
+								// leak through the merge -- and stamps D-02 provenance for this window.
+								writePrimaryRateLimitWindows(
+									rateLimitStatusRef,
+									model.provider,
+									{ [windowKey]: window },
+									"sdk",
+									Date.now(),
+								);
 							}
 						: undefined,
 			};
@@ -433,18 +430,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (parsedRateLimitStatus) {
 				// WR-01: a `null` field on `parsedRateLimitStatus` only means "this response's headers
 				// didn't carry that window" (e.g. a weekly figure resent less often than every turn) —
-				// it must not blank out a still-valid previously-known value for that window. Merge
-				// per-window instead of replacing the whole struct. The previous reading is only
-				// eligible to fill a gap when it came from the *same* provider (CR-03) — a provider
-				// switch must never let a stale window leak through the merge.
-				const previous = rateLimitStatusRef.provider === model.provider ? rateLimitStatusRef.current : undefined;
-				rateLimitStatusRef.current = {
-					session: parsedRateLimitStatus.session ?? previous?.session ?? null,
-					weekly: parsedRateLimitStatus.weekly ?? previous?.weekly ?? null,
-				};
-				rateLimitStatusRef.provider = model.provider;
-				// Tracer interim (replaced by writePrimaryRateLimitWindows): see onRateLimitEvent.
-				rateLimitStatusRef.meta = undefined;
+				// it must not blank out a still-valid previously-known value for that window. The
+				// helper merges per-window and only lets the previous reading fill a gap when it came
+				// from the *same* provider (CR-03) — a provider switch must never let a stale window
+				// leak through the merge. It also stamps D-02 provenance for the windows written.
+				writePrimaryRateLimitWindows(
+					rateLimitStatusRef,
+					model.provider,
+					{ session: parsedRateLimitStatus.session, weekly: parsedRateLimitStatus.weekly },
+					"headers",
+					Date.now(),
+				);
 			}
 
 			// A-28-02 / T-28-08: a one-shot, prefix-allowlisted capture of the real

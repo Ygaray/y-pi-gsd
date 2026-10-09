@@ -105,3 +105,12 @@ export {
 	type WebExtensionUiFields,
 } from "./extension-ui-snapshot.js";
 export { type RateLimitStatus, type RateLimitWindow } from "./rate-limit-headers.js";
+export {
+	SDK_FRESH_MS,
+	type RateLimitFallbackProducer,
+	type RateLimitSource,
+	type RateLimitStatusRef,
+	type RateLimitWindowKey,
+	type RateLimitWindowMeta,
+} from "./rate-limit-status-ref.js";
+export { type UsageDashboardOptions } from "./usage-dashboard-poller.js";
