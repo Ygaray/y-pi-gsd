@@ -39,6 +39,7 @@ import type {
 import type { BashExecutionMessage, CustomMessage } from "@gsd/pi-coding-agent/core/messages.js";
 import type { ModelRegistry } from "@gsd/pi-coding-agent/core/model-registry.js";
 import type { RateLimitStatus } from "./rate-limit-headers.js";
+import type { RateLimitFallbackProducer, RateLimitStatusRef } from "./rate-limit-status-ref.js";
 import type { PromptTemplate } from "@gsd/pi-coding-agent/core/prompt-templates.js";
 import type { ResourceLoader } from "@gsd/pi-coding-agent/core/resource-loader.js";
 import type { BranchSummaryEntry, SessionManager } from "@gsd/pi-coding-agent/core/session-manager.js";
@@ -127,7 +128,10 @@ export class AgentSession implements AgentSessionHost {
 	_baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	_cwd: string;
 	_extensionRunnerRef: { current?: ExtensionRunner } | undefined;
-	_rateLimitStatusRef: { current?: RateLimitStatus; provider?: string } | undefined;
+	_rateLimitStatusRef: RateLimitStatusRef | undefined;
+	_rateLimitFallbackProducer: RateLimitFallbackProducer | undefined;
+	_rateLimitChangeListeners = new Set<() => void>();
+	_rateLimitDisposed = false;
 	_initialActiveToolNames: string[] | undefined;
 	_allowedToolNames: Set<string> | undefined;
 	_baseToolsOverride: Record<string, AgentTool> | undefined;
@@ -171,6 +175,7 @@ export class AgentSession implements AgentSessionHost {
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._rateLimitStatusRef = config.rateLimitStatusRef;
+		this._rateLimitFallbackProducer = config.rateLimitFallbackProducer;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
@@ -420,7 +425,45 @@ export class AgentSession implements AgentSessionHost {
 	}
 
 	dispose(): void {
+		this._rateLimitDisposed = true;
+		this._rateLimitChangeListeners.clear();
+		this._rateLimitFallbackProducer?.stop();
 		this._events.dispose();
+	}
+
+	/**
+	 * Subscribes to visible changes the rate-limit fallback producer makes to
+	 * `getRateLimitStatus()`. SDK and header writes already render inside a turn and never notify.
+	 *
+	 * Subscribing is what activates the fallback producer (D-01): a session nobody observes (print,
+	 * RPC, headless, nested driver sessions) never spawns `claude` and never polls. The producer
+	 * stops again when the last listener unsubscribes or the session is disposed.
+	 */
+	onRateLimitStatusChange(listener: () => void): () => void {
+		if (this._rateLimitDisposed) return () => {};
+		this._rateLimitChangeListeners.add(listener);
+		if (this._rateLimitChangeListeners.size === 1) {
+			this._rateLimitFallbackProducer?.start(() => this._notifyRateLimitStatusChange());
+		}
+		let unsubscribed = false;
+		return () => {
+			if (unsubscribed) return;
+			unsubscribed = true;
+			this._rateLimitChangeListeners.delete(listener);
+			if (this._rateLimitChangeListeners.size === 0 && !this._rateLimitDisposed) {
+				this._rateLimitFallbackProducer?.stop();
+			}
+		};
+	}
+
+	_notifyRateLimitStatusChange(): void {
+		for (const listener of [...this._rateLimitChangeListeners]) {
+			try {
+				listener();
+			} catch {
+				// One throwing listener must never block the others or the producer.
+			}
+		}
 	}
 
 	getAllTools(): ToolInfo[] {

@@ -23,7 +23,7 @@ import type { SettingsManager } from "@gsd/pi-coding-agent/core/settings-manager
 import type { SourceInfo } from "@gsd/pi-coding-agent/core/source-info.js";
 import type { SessionStartEvent } from "@gsd/pi-coding-agent/core/extensions/index.js";
 import type { CompactionResult } from "../compaction/index.js";
-import type { RateLimitStatus } from "../rate-limit-headers.js";
+import type { RateLimitFallbackProducer, RateLimitStatusRef } from "../rate-limit-status-ref.js";
 
 // Skill Block Parsing
 // ============================================================================
@@ -155,9 +155,15 @@ export interface AgentSessionConfig {
 	/**
 	 * Mutable ref populated by sdk.ts's onResponse handler with the latest parsed rate-limit status.
 	 * `provider` records which model's provider produced `current`, so a consumer can detect a
-	 * stale reading left over from a since-switched-away-from provider (CR-03).
+	 * stale reading left over from a since-switched-away-from provider (CR-03). It also carries
+	 * per-window provenance `meta` (D-02) so a fresh SDK reading always beats a dashboard value.
 	 */
-	rateLimitStatusRef?: { current?: RateLimitStatus; provider?: string };
+	rateLimitStatusRef?: RateLimitStatusRef;
+	/**
+	 * D-01: the claude-code dashboard producer. AgentSession starts it on the first
+	 * `onRateLimitStatusChange` listener, stops it on the last unsubscribe and on dispose.
+	 */
+	rateLimitFallbackProducer?: RateLimitFallbackProducer;
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 }

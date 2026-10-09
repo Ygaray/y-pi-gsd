@@ -4,7 +4,9 @@ import { clampThinkingLevel, type Message, type Model, type SimpleStreamOptions,
 import { getAgentDir } from "@gsd/pi-coding-agent/config.js";
 import { resolvePath } from "@gsd/pi-coding-agent/utils/paths.js";
 import { AgentSession } from "./agent-session.js";
-import { parseAnthropicRateLimitHeaders, type RateLimitStatus, type RateLimitWindow } from "./rate-limit-headers.js";
+import { parseAnthropicRateLimitHeaders, type RateLimitWindow } from "./rate-limit-headers.js";
+import type { RateLimitStatusRef } from "./rate-limit-status-ref.js";
+import { createUsageDashboardPoller, type UsageDashboardOptions } from "./usage-dashboard-poller.js";
 import { formatNoModelsAvailableMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import { AuthStorage } from "@gsd/pi-coding-agent/core/auth-storage.js";
 import { DEFAULT_THINKING_LEVEL } from "@gsd/pi-coding-agent/core/defaults.js";
@@ -87,6 +89,13 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * Claude-code live-usage producer (UsageDashboard fallback for the footer rate-limit meters).
+	 * `false` disables it; an object injects seams such as fetchImpl / execFileImpl / now / baseUrl /
+	 * intervalMs. Default: enabled, active only on the claude-code provider and only while something
+	 * observes the session through `AgentSession.onRateLimitStatusChange()`.
+	 */
+	usageDashboard?: UsageDashboardOptions;
 }
 
 /** Result from createAgentSession */
@@ -349,7 +358,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
-	const rateLimitStatusRef: { current?: RateLimitStatus; provider?: string } = {};
+	const rateLimitStatusRef: RateLimitStatusRef = {};
 
 	agent = new Agent({
 		initialState: {
@@ -400,6 +409,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 									weekly: windowKey === "weekly" ? window : (previous?.weekly ?? null),
 								};
 								rateLimitStatusRef.provider = model.provider;
+								// Tracer interim (replaced by writePrimaryRateLimitWindows): drop dashboard
+								// provenance so an SDK value is never mistaken for a dashboard one.
+								rateLimitStatusRef.meta = undefined;
 							}
 						: undefined,
 			};
@@ -431,6 +443,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					weekly: parsedRateLimitStatus.weekly ?? previous?.weekly ?? null,
 				};
 				rateLimitStatusRef.provider = model.provider;
+				// Tracer interim (replaced by writePrimaryRateLimitWindows): see onRateLimitEvent.
+				rateLimitStatusRef.meta = undefined;
 			}
 
 			// A-28-02 / T-28-08: a one-shot, prefix-allowlisted capture of the real
@@ -487,6 +501,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
+	const rateLimitFallbackProducer = createUsageDashboardPoller(options.usageDashboard, {
+		ref: rateLimitStatusRef,
+		getProvider: () => agent.state.model?.provider,
+	});
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -500,6 +519,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		allowedToolNames,
 		extensionRunnerRef,
 		rateLimitStatusRef,
+		rateLimitFallbackProducer,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
