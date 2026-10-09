@@ -13,7 +13,10 @@ const PATTERNS: RegExp[] = [
   /(secret|token|password|passwd|pwd|credential)[ \t]*[:=][ \t]*['"][^\s'"]{8,}['"]/gi,
   /(authorization|bearer)[ \t]*[:=][ \t]*['"][^\s'"]{8,}['"]/gi,
   /Bearer[ \t]+[0-9a-zA-Z._-]{8,}/g, // Authorization: Bearer <token> (unquoted)
-  /-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA|DSA|EC|OPENSSH|PGP)\s+PRIVATE\s+KEY-----/g,
+  // PEM private key: any algorithm prefix, or none (PKCS#8 "BEGIN PRIVATE KEY"), or ENCRYPTED.
+  // A BEGIN block whose END line was truncated is redacted up to the next double quote (the end of
+  // a JSON string, which PEM content never contains) or end-of-text, so JSON stays valid.
+  /-----BEGIN\s+(?:(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED)\s+)?PRIVATE\s+KEY(?:\s+BLOCK)?-----[\s\S]*?(?:-----END\s+(?:(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED)\s+)?PRIVATE\s+KEY(?:\s+BLOCK)?-----|(?=")|$)/g,
   /(mysql|postgres|postgresql|mongodb|redis|amqp|mssql):\/\/[^\s'"]{8,}/gi,
   /gh[pousr]_[0-9a-zA-Z]{36,}/g, // GitHub token
   /glpat-[0-9a-zA-Z-]{20,}/g, // GitLab token

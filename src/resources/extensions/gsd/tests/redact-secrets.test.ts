@@ -54,3 +54,26 @@ test("redacting a JSON string keeps it valid JSON", () => {
   assert.ok(!redacted.includes(FAKE.github));
   assert.equal(parsed.auth, PLACEHOLDER);
 });
+
+test("redacts PKCS#8, encrypted and algorithm-prefixed PEM private keys (WR-03)", () => {
+  const dash = "-----";
+  for (const kind of ["", "ENCRYPTED ", "RSA ", "EC ", "OPENSSH "]) {
+    const pem = `${dash}BEGIN ${kind}PRIVATE KEY${dash}\nMIIEvQIBADANBgkqhkiG9w0B\nabcdef\n${dash}END ${kind}PRIVATE KEY${dash}`;
+    const out = redactSecrets(`before\n${pem}\nafter`);
+    assert.ok(!out.includes("MIIEvQIBADAN"), `key body gone for "${kind}"`);
+    assert.ok(out.startsWith("before\n") && out.endsWith("\nafter"), "surrounding text kept");
+    assert.ok(out.includes(PLACEHOLDER));
+  }
+});
+
+test("redacts a PEM block whose END line was truncated, and keeps JSON valid (WR-03)", () => {
+  const dash = "-----";
+  const truncated = `notes ${dash}BEGIN PRIVATE KEY${dash}\nMIIEvQIBADANBgkqhkiG9w0B\nabc`;
+  const out = redactSecrets(truncated);
+  assert.ok(!out.includes("MIIEvQIBADAN"));
+  assert.ok(out.startsWith("notes "));
+  const json = JSON.stringify({ k: truncated, other: "kept" });
+  const parsed = JSON.parse(redactSecrets(json)) as { k: string; other: string };
+  assert.equal(parsed.other, "kept");
+  assert.ok(!parsed.k.includes("MIIEvQIBADAN"));
+});
