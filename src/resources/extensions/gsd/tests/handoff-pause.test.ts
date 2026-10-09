@@ -6,7 +6,7 @@
 
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -408,6 +408,18 @@ test("HANDOFF-01 pause: .gsd/HANDOFF.md is folded into State when it is a file a
   assert.ok(!(b.calls[0].opts.input ?? "").includes("Notes from .gsd/HANDOFF.md"));
   assert.equal(warnings(ctx).length, 0);
   assert.equal(lifecycle.readHandoffNotes(asDir), null);
+});
+
+test("HANDOFF-01 pause: a .gsd/HANDOFF.md symlink is never read into the handoff body (WR-01)", async () => {
+  const root = openProject();
+  const secret = join(root, "outside-secret.txt");
+  writeFileSync(secret, "TOP-SECRET-CONTENT-DO-NOT-PERSIST\n");
+  symlinkSync(secret, join(root, ".gsd", "HANDOFF.md"));
+  assert.equal(lifecycle.readHandoffNotes(root), null);
+  const { run, calls } = fakeHandoffRunner({ create: runOk(handoffEntry({ id: NEW_ID })) });
+  await pauseWork(root, run);
+  assert.equal(calls.length, 1);
+  assert.ok(!(calls[0].opts.input ?? "").includes("TOP-SECRET-CONTENT-DO-NOT-PERSIST"));
 });
 
 test("HANDOFF-01 pause: pause-work while auto-mode is active states it and does not pause auto", async () => {

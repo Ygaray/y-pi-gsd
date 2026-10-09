@@ -4,7 +4,7 @@
 // throws and never blocks a pause (D-09).
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { sanitizeCliText } from "./commands-doc.js";
@@ -47,14 +47,16 @@ export const HANDOFF_NOT_ON_PATH_WARNING = "pause saved; handoff not registered 
 const HANDOFF_NOTES_FILE_MAX_BYTES = 1024 * 1024;
 
 /**
- * The LLM-written `.gsd/HANDOFF.md`, when present as a regular file of at most 1 MiB. It may
+ * The LLM-written `.gsd/HANDOFF.md`, when present as a regular file of at most 1 MiB. A symlink
+ * is refused (lstat, not stat): a repository could point it at a secret file that would then be
+ * persisted into the shared handoff store. It may
  * predate this pause (the pause-work prompt writes it after registration), so the body labels it
  * with the mtime returned here. Never throws.
  */
 export function readHandoffNotes(basePath: string): HandoffNotes | null {
   try {
     const file = join(gsdRoot(basePath), "HANDOFF.md");
-    const stat = statSync(file);
+    const stat = lstatSync(file); // lstat: a symlink is not isFile()
     if (!stat.isFile() || stat.size > HANDOFF_NOTES_FILE_MAX_BYTES) return null;
     return { text: readFileSync(file, "utf-8"), mtime: stat.mtime.toISOString() };
   } catch {
