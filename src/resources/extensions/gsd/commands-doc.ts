@@ -15,6 +15,8 @@ import { externalProjectsRoot } from "./repo-identity.js";
 export const YAHIR_TN_BIN = "yahir-tn";
 /** yahir-tn spends up to 30 s on yahir-docs plus a 3 s loopback probe (D-08). */
 export const DEFAULT_DOC_TIMEOUT_MS = 45_000;
+/** Extra time after the SIGTERM timeout before escalating to SIGKILL and giving up on the child. */
+export const HARD_DEADLINE_GRACE_MS = 5_000;
 export const YAHIR_TN_INSTALL_HINT =
   "Install it by running the yahir-tn repo's install.sh (for example ~/Projects/yahir-agentic-tools/yahir-tn/install.sh, which links ~/.local/bin/yahir-tn), and make sure ~/.local/bin is on the PATH of the process running y-pi-gsd.";
 export const DOC_USAGE =
@@ -40,12 +42,21 @@ export interface YahirTnRun {
 export type YahirTnRunner = (argv: readonly string[], timeoutMs: number) => Promise<YahirTnRun>;
 
 /**
- * Async, result-returning spawn of yahir-tn. The returned promise never rejects.
+ * Async, result-returning spawn of yahir-tn. The returned promise never rejects and always
+ * settles: SIGTERM at the timeout, then SIGKILL plus a forced result after a grace period.
  * No shell, no working-directory option (a bad cwd would also report ENOENT and be
  * mistaken for "not installed"), no env option (inherits process.env at call time).
  */
-export const runYahirTn: YahirTnRunner = (argv, timeoutMs) =>
+export const runYahirTn: YahirTnRunner = (argv, timeoutMs, graceMs: number = HARD_DEADLINE_GRACE_MS) =>
   new Promise<YahirTnRun>((resolvePromise) => {
+    let settled = false;
+    let hardDeadline: ReturnType<typeof setTimeout> | undefined;
+    const finish = (run: YahirTnRun): void => {
+      if (settled) return;
+      settled = true;
+      if (hardDeadline !== undefined) clearTimeout(hardDeadline);
+      resolvePromise(run);
+    };
     const spawnFailure = (code: string): YahirTnRun => ({
       ok: false,
       exitCode: null,
@@ -59,7 +70,7 @@ export const runYahirTn: YahirTnRunner = (argv, timeoutMs) =>
           const out = String(stdout ?? "");
           const errText = String(stderr ?? "");
           if (!err) {
-            resolvePromise({ ok: true, exitCode: 0, stdout: out, stderr: errText });
+            finish({ ok: true, exitCode: 0, stdout: out, stderr: errText });
             return;
           }
           const e = err as NodeJS.ErrnoException & {
@@ -68,13 +79,13 @@ export const runYahirTn: YahirTnRunner = (argv, timeoutMs) =>
             code?: string | number | null;
           };
           if (e.killed && e.signal === "SIGTERM") {
-            resolvePromise({ ok: false, exitCode: null, stdout: out, stderr: errText, timedOut: true });
+            finish({ ok: false, exitCode: null, stdout: out, stderr: errText, timedOut: true });
           } else if (typeof e.code === "string") {
-            resolvePromise({ ok: false, exitCode: null, stdout: out, stderr: errText, spawnError: e.code });
+            finish({ ok: false, exitCode: null, stdout: out, stderr: errText, spawnError: e.code });
           } else if (typeof e.code === "number") {
-            resolvePromise({ ok: false, exitCode: e.code, stdout: out, stderr: errText });
+            finish({ ok: false, exitCode: e.code, stdout: out, stderr: errText });
           } else {
-            resolvePromise({
+            finish({
               ok: false,
               exitCode: null,
               stdout: out,
@@ -86,11 +97,24 @@ export const runYahirTn: YahirTnRunner = (argv, timeoutMs) =>
       );
       child.on("error", (err) => {
         const code = (err as NodeJS.ErrnoException).code;
-        resolvePromise(spawnFailure(typeof code === "string" ? code : "SPAWN_FAILED"));
+        finish(spawnFailure(typeof code === "string" ? code : "SPAWN_FAILED"));
       });
+      // execFile's timeout sends SIGTERM once. A child that traps or ignores it (or is stuck
+      // in uninterruptible I/O) would leave this promise pending forever, so a hard deadline
+      // escalates to SIGKILL and settles the result independently of the child exiting (WR-05).
+      hardDeadline = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        finish({ ok: false, exitCode: null, stdout: "", stderr: "", timedOut: true });
+      }, timeoutMs + graceMs);
+      hardDeadline.unref?.();
+      if (settled) clearTimeout(hardDeadline);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException | undefined)?.code;
-      resolvePromise(spawnFailure(typeof code === "string" ? code : "SPAWN_FAILED"));
+      finish(spawnFailure(typeof code === "string" ? code : "SPAWN_FAILED"));
     }
   });
 

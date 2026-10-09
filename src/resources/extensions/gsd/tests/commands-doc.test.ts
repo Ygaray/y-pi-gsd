@@ -269,6 +269,23 @@ test("DOCS-01 failure: timeout says the doc may still be published and points at
   assert.match(msg, /yahir-tn ps/);
 });
 
+test("DOCS-01 failure (WR-05): a child that ignores SIGTERM is SIGKILLed and the run still settles", async () => {
+  const dir = tmp("gsd-doc-stub-");
+  writeFileSync(
+    join(dir, "yahir-tn"),
+    ["#!/bin/sh", "trap '' TERM", "while :; do /bin/sleep 1; done"].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  const started = Date.now();
+  const run = await withPath(`${dir}${delimiter}${pathWithoutRealYahirTn()}`, () =>
+    (mods.doc.runYahirTn as (a: readonly string[], t: number, g: number) => Promise<any>)(["doc", "p", "/x.md", "--json"], 200, 300),
+  );
+  assert.ok(Date.now() - started < 4000, "run must settle shortly after the hard deadline");
+  assert.equal(run.ok, false);
+  assert.equal(run.timedOut, true);
+  assert.match(mods.doc.formatRunFailure(run, 200), /did not finish within/);
+});
+
 test("DOCS-01 failure: exit 5 is published-but-not-served with no openable URL", async () => {
   const root = makeProject();
   const slug = basename(root);
