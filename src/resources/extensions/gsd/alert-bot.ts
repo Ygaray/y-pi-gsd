@@ -38,12 +38,13 @@ const SEVERITY: Record<AlertBotEvent, "loud" | "quiet"> = {
 };
 
 /**
- * Resolve `gsd-alert-emit` on PATH, or null. Also null under `node --test` (NODE_TEST_CONTEXT is
- * inherited by every child) or with GSD_ALERT_DISABLE=1, so test runs never reach the live bot.
+ * Resolve `gsd-alert-emit` on PATH, or null. Also null under a test runner (`node --test` sets
+ * NODE_TEST_CONTEXT for every child; vitest sets VITEST) or with GSD_ALERT_DISABLE=1, so test
+ * runs never reach the live bot.
  */
 export function resolveAlertEmitBin(env: NodeJS.ProcessEnv = process.env): string | null {
   try {
-    if (env.NODE_TEST_CONTEXT || env.GSD_ALERT_DISABLE === "1") return null;
+    if (env.NODE_TEST_CONTEXT || env.VITEST || env.GSD_ALERT_DISABLE === "1") return null;
     for (const dir of (env.PATH ?? "").split(delimiter).filter(Boolean)) {
       const candidate = join(dir, BIN_NAME);
       try {
@@ -71,6 +72,9 @@ export function emitAlertBotEvent(fields: AlertBotFields, deps: AlertBotDeps = {
       "--event", fields.event,
       "--severity", SEVERITY[fields.event],
       "--title", fields.title,
+      // The bot dedups per (key, project) for its TTL window, so a blocker re-announced on a
+      // later loop pass doesn't re-page; a different blocker or milestone has a different title.
+      "--dedup-key", `${fields.event}:${fields.title}`,
     ], { detached: true, stdio: "ignore" });
     child.on("error", () => {});
     child.unref();

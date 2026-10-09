@@ -36,6 +36,7 @@ test("resolveAlertEmitBin is null under node --test, GSD_ALERT_DISABLE=1, or whe
   const { dir } = pathWithFakeBin();
   assert.equal(resolveAlertEmitBin({ PATH: dir, NODE_TEST_CONTEXT: "child-v8" }), null);
   assert.equal(resolveAlertEmitBin({ PATH: dir, GSD_ALERT_DISABLE: "1" }), null);
+  assert.equal(resolveAlertEmitBin({ PATH: dir, VITEST: "true" }), null);
   assert.equal(resolveAlertEmitBin({ PATH: mkdtempSync(join(tmpdir(), "empty-")) }), null);
 });
 
@@ -57,6 +58,7 @@ test("emitAlertBotEvent spawns the CLI detached with mapped severity", () => {
   assert.deepEqual(spawns[0].argv, [
     "--source", "y-pi-gsd", "--project", "SecondBrain", "--event", "blocked",
     "--severity", "loud", "--title", "Context 91% — paused",
+    "--dedup-key", "blocked:Context 91% — paused",
   ]);
   assert.equal(unrefs, 1);
 });
@@ -116,48 +118,66 @@ test("alert_bot: false in notification preferences suppresses the emit", (t) => 
   assert.equal(emit.mock.callCount(), 0);
 });
 
-// ─── needs_input at the ask_user_questions bell ─────────────────────────────
+// ─── needs_input: ask_user_questions announces, the gsd extension decides ────
+// ask_user_questions is a separate root extension with its own module instances, so it cannot
+// see gsd's auto-mode state; it emits on the shared bus and this listener applies gsd's state.
 
-import { emitNeedsInputAlert } from "../../ask-user-questions.js";
+import { EventEmitter } from "node:events";
+import { initAlertBotListeners } from "../alert-bot-listeners.js";
+import { QUESTION_CHANNELS } from "../../shared/question-events.js";
 
-const QUESTIONS = [{ id: "q1", header: "Deploy", question: "Ship v8 to prod now?" }];
-
-function needsInputDeps(over: { auto?: boolean; enabled?: boolean } = {}) {
-  const emitted: unknown[] = [];
+function fakeBus() {
+  const ee = new EventEmitter();
   return {
-    emitted,
-    deps: {
-      isAutoActive: async () => over.auto ?? false,
-      alertBotEnabled: async () => over.enabled ?? true,
-      emit: (f: unknown) => { emitted.push(f); },
-      project: "SecondBrain",
-    },
+    emit: (ch: string, data: unknown) => { ee.emit(ch, data); },
+    on: (ch: string, h: (d: unknown) => void) => { ee.on(ch, h); return () => ee.off(ch, h); },
   };
 }
 
-test("needs_input fires while auto-mode is active, titled by the first question", async () => {
-  const { emitted, deps } = needsInputDeps({ auto: true });
-  await emitNeedsInputAlert(QUESTIONS, true, deps);
+const PENDING = { questions: [{ id: "q1", question: "Ship v8 to prod now?" }], hasUI: true };
+
+function listen(over: { auto?: boolean; enabled?: boolean; root?: string } = {}) {
+  const bus = fakeBus();
+  const emitted: unknown[] = [];
+  initAlertBotListeners(bus, {
+    isAutoActive: () => over.auto ?? false,
+    projectRoot: () => over.root ?? "/home/y/Projects/SecondBrain",
+    alertBotEnabled: () => over.enabled ?? true,
+    emit: (f) => { emitted.push(f); },
+  });
+  return { bus, emitted };
+}
+
+test("needs_input fires while auto-mode is active, with the run's project root", () => {
+  const { bus, emitted } = listen({ auto: true });
+  bus.emit(QUESTION_CHANNELS.PENDING, PENDING);
   assert.deepEqual(emitted, [{ event: "needs_input", project: "SecondBrain", title: "Ship v8 to prod now?" }]);
 });
 
-test("needs_input fires headless (no UI) even when auto-mode is not active", async () => {
-  const { emitted, deps } = needsInputDeps({ auto: false });
-  await emitNeedsInputAlert(QUESTIONS, false, deps);
+test("needs_input fires headless (no UI) even when auto-mode is not active", () => {
+  const { bus, emitted } = listen({ auto: false });
+  bus.emit(QUESTION_CHANNELS.PENDING, { ...PENDING, hasUI: false });
   assert.equal(emitted.length, 1);
 });
 
-test("needs_input stays silent in an interactive chat (UI, no auto-mode)", async () => {
-  const { emitted, deps } = needsInputDeps({ auto: false });
-  await emitNeedsInputAlert(QUESTIONS, true, deps);
+test("needs_input stays silent in an interactive chat (UI, no auto-mode)", () => {
+  const { bus, emitted } = listen({ auto: false });
+  bus.emit(QUESTION_CHANNELS.PENDING, PENDING);
   assert.equal(emitted.length, 0);
 });
 
-test("needs_input respects notifications.alert_bot: false and never throws", async () => {
-  const { emitted, deps } = needsInputDeps({ auto: true, enabled: false });
-  await emitNeedsInputAlert(QUESTIONS, true, deps);
+test("needs_input respects notifications.alert_bot: false", () => {
+  const { bus, emitted } = listen({ auto: true, enabled: false });
+  bus.emit(QUESTION_CHANNELS.PENDING, PENDING);
   assert.equal(emitted.length, 0);
-  await assert.doesNotReject(emitNeedsInputAlert(QUESTIONS, true, {
-    ...deps, alertBotEnabled: async () => true, isAutoActive: async () => { throw new Error("boom"); },
-  }));
+});
+
+test("a throwing dependency or malformed payload never escapes the listener", () => {
+  const bus = fakeBus();
+  initAlertBotListeners(bus, {
+    isAutoActive: () => { throw new Error("boom"); },
+    projectRoot: () => "/x", alertBotEnabled: () => true, emit: () => {},
+  });
+  assert.doesNotThrow(() => bus.emit(QUESTION_CHANNELS.PENDING, PENDING));
+  assert.doesNotThrow(() => bus.emit(QUESTION_CHANNELS.PENDING, null));
 });

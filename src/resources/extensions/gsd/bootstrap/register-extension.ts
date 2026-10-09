@@ -26,6 +26,7 @@ import { installManifestFlushOnProcessTeardown } from "../workflow-manifest.js";
 // session hook calling startAuto) would be silently dropped because Node's
 // EventEmitter does not buffer events for late subscribers.
 import { initCmuxEventListeners } from "../../cmux/index.js";
+import { initAlertBotListeners } from "../alert-bot-listeners.js";
 
 export { writeCrashLog } from "./crash-log.js";
 
@@ -236,6 +237,7 @@ export function registerGsdExtension(pi: ExtensionAPI): void {
     // behalf using the shared event channel contract. Registration is
     // synchronous — see the import comment above for the rationale.
     ["cmux-events", () => initCmuxEventListeners(pi.events)],
+    ["alert-bot-events", () => initAlertBotListeners(pi.events)],
     ["hooks", () => registerHooks(pi, ecosystemHandlers)],
     ["ecosystem", () => {
       void import("../ecosystem/loader.js")
