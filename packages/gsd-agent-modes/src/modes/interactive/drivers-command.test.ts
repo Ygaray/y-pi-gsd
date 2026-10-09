@@ -491,7 +491,7 @@ describe("handleDriversCommand dismiss, usage and edge states", () => {
 		await h.monitor.refresh();
 
 		await handleDriversCommand("/drivers dismiss", h.ctx);
-		assert.deepEqual(h.statuses, ["Dismissed 2 died drivers. They stay in /drivers for 24h."]);
+		assert.deepEqual(h.statuses, ["Dismissed 2 died drivers. They stay listed in /drivers until they are cleaned up."]);
 		assert.equal(h.renders, 1);
 
 		await handleDriversCommand("/drivers dismiss", h.ctx);
@@ -502,6 +502,7 @@ describe("handleDriversCommand dismiss, usage and edge states", () => {
 		const text = plain(h.blocks[0]).join("\n");
 		assert.ok(text.includes("(dismissed) first reason"), text);
 		assert.ok(text.includes("(dismissed) second reason"), text);
+		assert.ok(!text.includes("Hide died drivers with /drivers dismiss."), `already-dismissed rows must not re-offer dismiss:\n${text}`);
 	});
 
 	it("bad usage, stop before listing and a non-stoppable index warn", async () => {
