@@ -954,6 +954,46 @@ describe("usage dashboard degradation (D-04)", () => {
 		await settle();
 		assert.deepEqual(ref, {});
 	});
+
+	test("WR-01: every request refuses redirects so the identity-bearing URL never leaves the loopback origin", async () => {
+		const ref: RateLimitStatusRef = {};
+		const seen: string[] = [];
+		const fetcher = fakeFetch(() => okResponse());
+		const fetchImpl: FetchLike = (url, init) => {
+			seen.push(init.redirect);
+			return fetcher.impl(url, init);
+		};
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.deepEqual(seen, ["error"]);
+			assert.equal(ref.current?.session?.usedPercent, 8);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("WR-01: a fetch that rejects because it hit a redirect is a transient failure and writes nothing", async () => {
+		const ref: RateLimitStatusRef = {};
+		const fetchImpl: FetchLike = async () => {
+			throw new TypeError("fetch failed: unexpected redirect");
+		};
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => assert.fail("must not notify"));
+			await poller.refresh();
+			assert.deepEqual(ref, {});
+		} finally {
+			poller.stop();
+		}
+	});
 });
 
 describe("usage dashboard transport safety (T-43-06, T-43-08)", () => {

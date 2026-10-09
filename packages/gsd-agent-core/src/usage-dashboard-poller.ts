@@ -63,7 +63,15 @@ export type ExecFileLike = (
 	options: { timeout: number; env: NodeJS.ProcessEnv; windowsHide: boolean; maxBuffer: number },
 ) => Promise<{ stdout: string | Buffer }>;
 
-export type FetchLike = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
+export type FetchLike = (
+	url: string,
+	init: {
+		headers: Record<string, string>;
+		signal: AbortSignal;
+		/** Always "error": a redirect must never carry the identity-bearing query string to another origin. */
+		redirect: "error";
+	},
+) => Promise<Response>;
 
 export interface UsageDashboardPollerOptions {
 	/** Injected transport (tests). Default: the late-bound global `fetch`. */
@@ -477,6 +485,7 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 			this.debug("request");
 			const res = await this.fetchImpl(url, {
 				headers: { accept: "application/json" },
+				redirect: "error", // a redirect is a failure; it is never followed with the identity attached
 				signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.fetchTimeoutMs)]),
 			});
 			if (gen !== this.generation) return delay;
