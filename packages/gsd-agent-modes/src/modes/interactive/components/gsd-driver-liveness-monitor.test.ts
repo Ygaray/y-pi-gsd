@@ -297,6 +297,30 @@ describe("DriverLivenessMonitor", () => {
 		assert.deepEqual(h.probes.prefetches[h.probes.prefetches.length - 1], [4242], "only live-claim pids are prefetched");
 	});
 
+	it("dispose stops refreshes and suppresses alerts from a refresh already in flight", async () => {
+		const h = makeHarness([]);
+		writeRegistry(h.registryPath, [liveRow(h.root, 4242, 12 * MIN)]);
+		// The pid is dead, so this refresh would raise a death alert; dispose lands while its prefetch is pending.
+		let release: () => void = () => {};
+		h.probes.prefetchStartTimes = (pids) => {
+			h.probes.prefetches.push([...pids]);
+			return new Promise<void>((resolve) => {
+				release = resolve;
+			});
+		};
+		const inFlight = h.monitor.refresh();
+		h.monitor.dispose();
+		release();
+		await inFlight;
+		assert.deepEqual(h.alerts, [], "no alert reaches the sink after dispose");
+
+		const reads = h.probes.prefetches.length;
+		h.clock.now += 10_000;
+		assert.equal(await h.monitor.refresh(), false, "a disposed monitor does no further work");
+		assert.equal(h.probes.prefetches.length, reads);
+		h.monitor.dispose();
+	});
+
 	it("hostile control bytes in a tombstone reason never reach an alert", async () => {
 		const h = makeHarness([]);
 		writeRegistry(h.registryPath, [tombstone(h.root, 4242, 3 * MIN, "boom\x07\x9b\x1b[31mred")]);

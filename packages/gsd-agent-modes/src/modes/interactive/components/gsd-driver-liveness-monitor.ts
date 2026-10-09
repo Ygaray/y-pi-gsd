@@ -113,6 +113,7 @@ export class DriverLivenessMonitor {
 	/** Death identities already announced in this session (dedupe key: canonicalDir|pid|startTime). */
 	private readonly alerted = new Set<string>();
 	private startupDone = false;
+	private disposed = false;
 	private lastDrivers: ClassifiedDriver[] = [];
 	private lastNowMs = 0;
 
@@ -126,6 +127,14 @@ export class DriverLivenessMonitor {
 
 	getSnapshot(): DriverWidgetSnapshot {
 		return this.snapshot;
+	}
+
+	/**
+	 * Stop all further work after TUI teardown: later refreshes become no-ops and no alert is emitted, so a refresh
+	 * already in flight cannot reach the alert sink (and request a render) on a stopped TUI. Idempotent.
+	 */
+	dispose(): void {
+		this.disposed = true;
 	}
 
 	/** Re-read (or reuse a young read of) the registry and recompute the snapshot. Never rejects. */
@@ -153,6 +162,7 @@ export class DriverLivenessMonitor {
 	}
 
 	private async doRefresh(): Promise<boolean> {
+		if (this.disposed) return false;
 		try {
 			const path = this.registryPath();
 			const nowMs = this.now();
@@ -198,6 +208,7 @@ export class DriverLivenessMonitor {
 	}
 
 	private emit(alert: DriverDeathAlert): void {
+		if (this.disposed) return;
 		try {
 			this.onAlert?.(alert);
 		} catch {

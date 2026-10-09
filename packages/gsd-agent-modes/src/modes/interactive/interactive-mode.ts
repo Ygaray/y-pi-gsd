@@ -501,6 +501,7 @@ export class InteractiveMode {
 
 		this.footer.dispose();
 		this.driverLivenessWidget?.dispose();
+		this.driverLivenessMonitor?.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();

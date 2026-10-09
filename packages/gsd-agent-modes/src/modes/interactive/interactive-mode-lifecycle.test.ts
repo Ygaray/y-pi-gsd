@@ -44,6 +44,7 @@ describe("InteractiveMode lifecycle", () => {
 	it("stop disposes the driver liveness widget", () => {
 		const mode = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
 		let disposeCount = 0;
+		let monitorDisposeCount = 0;
 
 		mode.loadingAnimation = undefined;
 		mode.extensionTerminalInputUnsubscribers = new Set();
@@ -60,6 +61,11 @@ describe("InteractiveMode lifecycle", () => {
 				disposeCount++;
 			},
 		};
+		mode.driverLivenessMonitor = {
+			dispose() {
+				monitorDisposeCount++;
+			},
+		};
 		mode.footerDataProvider = { dispose() {} };
 		mode.unsubscribe = undefined;
 		mode.isInitialized = false;
@@ -67,6 +73,7 @@ describe("InteractiveMode lifecycle", () => {
 		mode.stop();
 
 		assert.equal(disposeCount, 1);
+		assert.equal(monitorDisposeCount, 1, "the monitor is disposed so a late refresh cannot alert a stopped TUI");
 	});
 
 	it("getDriverControl returns the injected port and undefined by default", () => {
