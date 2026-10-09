@@ -387,6 +387,25 @@ test("DOCS-01 failure (WR-03): spoofing URLs are rejected and invisible format c
   assert.equal(sanitizeCliText("a\u202eb\u200bc\u2066d\ufeffe\u009bf"), "abcdef");
 });
 
+test("DOCS-01 failure (WR-04): attacker-controlled path text never reaches notify raw", async () => {
+  const root = makeProject();
+  const evil = "\u001b]0;pwned\u0007\u001b[31mmissing.md";
+  for (const args of [`"${evil}"`, `--bad${evil}`, `"${evil}.txt"`]) {
+    const { run, calls } = successRunner();
+    const ctx = await runDoc(root, args, { run });
+    const msg = onlyError(ctx);
+    assert.ok(!msg.includes("\u001b"), `ESC leaked for ${JSON.stringify(args)}`);
+    assert.ok(!msg.includes("\u0007"), `BEL leaked for ${JSON.stringify(args)}`);
+    assert.equal(calls.length, 0);
+  }
+  const ctx = await runDoc(root, ".planning/notes.md", {
+    run: () => Promise.reject(new Error("bad \u001b[31mnews\u001b[0m")),
+  });
+  const msg = onlyError(ctx);
+  assert.match(msg, /bad news/);
+  assert.ok(!msg.includes("\u001b"), "ESC leaked from the catch-all");
+});
+
 test("DOCS-01 failure: a rejecting runner becomes one error notify", async () => {
   const root = makeProject();
   const ctx = await runDoc(root, ".planning/notes.md", { run: () => Promise.reject(new Error("kaboom")) });

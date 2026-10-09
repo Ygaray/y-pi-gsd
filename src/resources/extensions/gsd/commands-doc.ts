@@ -414,22 +414,27 @@ export async function handleDoc(
   ctx: ExtensionCommandContext,
   opts: HandleDocOptions = {},
 ): Promise<void> {
+  // Single notify boundary (WR-04): every message, including ones that interpolate
+  // file names, symlink targets or error text, is sanitized before it reaches the TUI.
+  const say = (message: string, level: "success" | "error"): void => {
+    ctx.ui.notify(sanitizeCliText(message), level);
+  };
   try {
     const parsed = parseDocArgs(args);
     if (!parsed.ok) {
-      ctx.ui.notify(parsed.reason, "error");
+      say(parsed.reason, "error");
       return;
     }
     const root = projectRoot();
     const baseDir = ctx.cwd || process.cwd();
     const checked = checkPublishablePath(parsed.path, baseDir, root);
     if (!checked.ok) {
-      ctx.ui.notify(checked.reason, "error");
+      say(checked.reason, "error");
       return;
     }
     const slug = sanitizeProjectSlug(basename(root));
     if (slug === null) {
-      ctx.ui.notify(
+      say(
         `Cannot derive a yahir-docs project name from "${basename(root)}": it needs letters, digits, ".", "_" or "-", at most 64 characters, not ending in .html`,
         "error",
       );
@@ -439,19 +444,19 @@ export async function handleDoc(
     const timeoutMs = opts.timeoutMs ?? DEFAULT_DOC_TIMEOUT_MS;
     const result = await run(buildYahirTnArgv(slug, checked.realPath, parsed.keep), timeoutMs);
     if (!result.ok) {
-      ctx.ui.notify(formatRunFailure(result, timeoutMs), "error");
+      say(formatRunFailure(result, timeoutMs), "error");
       return;
     }
     const published = parsePublishResult(result.stdout, checked.realPath);
     if (!published.ok) {
-      ctx.ui.notify(
+      say(
         `yahir-tn doc finished but its output cannot be used (${sanitizeCliText(published.reason)}), so no URL is shown. The doc may have been published: check \`yahir-tn ps\`.`,
         "error",
       );
       return;
     }
     const d = published.doc;
-    ctx.ui.notify(
+    say(
       formatPublishSuccess({
         url: sanitizeCliText(d.url),
         source: sanitizeCliText(d.source),
@@ -462,6 +467,6 @@ export async function handleDoc(
       "success",
     );
   } catch (err) {
-    ctx.ui.notify(`/gsd doc failed unexpectedly: ${errMessage(err)}`, "error");
+    say(`/gsd doc failed unexpectedly: ${errMessage(err)}`, "error");
   }
 }
