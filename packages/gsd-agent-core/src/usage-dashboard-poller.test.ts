@@ -693,6 +693,44 @@ describe("usage dashboard identity chain (D-03, RESEARCH Pitfall 8)", () => {
 		assert.equal(parseClaudeConfigIdentity("{not json"), null);
 	});
 
+	test("WR-03: stop() cancels a running claude auth status child, never reads the config file, and a restart resolves afresh", async () => {
+		const signals: AbortSignal[] = [];
+		const exec: ExecFileLike = (_file, _args, options) => {
+			const signal = options.signal;
+			assert.ok(signal, "the child is started with an AbortSignal");
+			signals.push(signal);
+			if (signals.length > 1) return Promise.resolve({ stdout: LOGGED_IN });
+			return new Promise((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" })), {
+					once: true,
+				});
+			});
+		};
+		const reader = fakeConfigReader(CONFIG_JSON);
+		const fetcher = fakeFetch(() => okResponse());
+		const ref: RateLimitStatusRef = {};
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: exec, readClaudeConfigImpl: reader.impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await waitFor(() => signals.length === 1);
+			poller.stop();
+			assert.equal(signals[0].aborted, true);
+			await settle();
+			assert.equal(reader.paths.length, 0, "an aborted lookup does not fall through to .claude.json");
+			assert.equal(fetcher.calls.length, 0);
+
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(signals.length, 2, "the aborted lookup armed no back-off: the restart resolves at once");
+			assert.equal(ref.current?.session?.usedPercent, 8);
+		} finally {
+			poller.stop();
+		}
+	});
+
 	test("without an identity the CLI is not re-run before the back-off", async () => {
 		mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
 		const exec = failingExec(exitError(1, '{"loggedIn": false}'));

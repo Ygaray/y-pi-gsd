@@ -60,7 +60,7 @@ export type ClaudeAuthStatus = { kind: "logged-in"; identity: ClaudeIdentity } |
 export type ExecFileLike = (
 	file: string,
 	args: readonly string[],
-	options: { timeout: number; env: NodeJS.ProcessEnv; windowsHide: boolean; maxBuffer: number },
+	options: { timeout: number; env: NodeJS.ProcessEnv; windowsHide: boolean; maxBuffer: number; signal?: AbortSignal },
 ) => Promise<{ stdout: string | Buffer }>;
 
 export type FetchLike = (
@@ -252,12 +252,14 @@ function outputText(value: unknown): string | undefined {
  * when the CLI exits non-zero: a logged-out CLI exits 1 and still prints JSON). Only when the CLI is
  * missing, times out or prints neither logged-in nor logged-out JSON does it read the `oauthAccount`
  * block of `.claude.json`; an explicit `loggedIn:false` never falls back. Null when unresolved.
+ * An aborted `signal` kills the child and resolves null without reading the config file (WR-03).
  */
 export async function resolveClaudeIdentity(deps: {
 	execFileImpl: ExecFileLike;
 	env: NodeJS.ProcessEnv;
 	platform: NodeJS.Platform;
 	readClaudeConfigImpl?: (path: string) => Promise<string>;
+	signal?: AbortSignal;
 }): Promise<ClaudeIdentity | null> {
 	const { command, args } = buildClaudeAuthStatusInvocation(deps.platform);
 	let stdout: string | undefined;
@@ -267,9 +269,11 @@ export async function resolveClaudeIdentity(deps: {
 			env: deps.env,
 			windowsHide: true,
 			maxBuffer: 64 * 1024,
+			...(deps.signal ? { signal: deps.signal } : {}),
 		});
 		stdout = outputText(result.stdout);
 	} catch (error) {
+		if (deps.signal?.aborted) return null;
 		stdout = outputText((error as { stdout?: unknown } | null)?.stdout);
 	}
 	if (stdout !== undefined) {
@@ -477,14 +481,20 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 			return this.identityRetryAtMs - this.now();
 		}
 		if (!this.identity) {
-			this.identity = await resolveClaudeIdentity({
+			const resolved = await resolveClaudeIdentity({
 				execFileImpl: this.execFileImpl,
 				env: this.env,
 				platform: this.platform,
 				readClaudeConfigImpl: this.readClaudeConfigImpl,
+				signal: controller.signal,
 			});
+			if (gen !== this.generation) {
+				// Stopped while resolving: keep a real identity, but never arm the back-off for an aborted lookup.
+				if (resolved) this.identity = resolved;
+				return delay;
+			}
+			this.identity = resolved;
 			if (!this.identity) this.identityRetryAtMs = this.now() + this.backoffMs;
-			if (gen !== this.generation) return delay;
 			this.debug(this.identity ? "identity: resolved" : "identity: unresolved");
 			if (!this.identity) return this.dropUnvouched();
 		}
