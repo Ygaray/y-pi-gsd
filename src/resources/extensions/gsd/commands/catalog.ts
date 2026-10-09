@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { getModels } from "@gsd/pi-ai";
 
@@ -421,6 +421,64 @@ function filterOptions(
     }));
 }
 
+export const DOC_COMPLETION_LIMIT = 50;
+
+const DOC_KEEP_OPTION: GsdCommandDefinition = {
+  cmd: "--keep",
+  desc: "Pin the doc so it never expires (yahir-tn doc --keep)",
+};
+
+/**
+ * Tab-completion for `/gsd doc <path>`: lists ONE directory level under `baseDir`
+ * (directories, including symlinks to directories such as a symlinked `.gsd`, and
+ * `.md` files), filtered by the typed name prefix. Never throws.
+ *
+ * Paths containing spaces cannot be tab-completed because getGsdArgumentCompletions
+ * splits on whitespace; type them quoted instead.
+ */
+export function getDocPathCompletions(
+  partial: string,
+  baseDir: string = process.cwd(),
+  valuePrefix: string = "doc ",
+): Array<{ value: string; label: string; description: string }> {
+  try {
+    const slash = partial.lastIndexOf("/");
+    const dirPart = slash >= 0 ? partial.slice(0, slash + 1) : "";
+    const namePrefix = slash >= 0 ? partial.slice(slash + 1) : partial;
+    const listDir = resolve(baseDir, dirPart || ".");
+    const results: Array<{ value: string; label: string; description: string }> = [];
+    for (const entry of readdirSync(listDir, { withFileTypes: true })) {
+      const name = entry.name;
+      if (name === "node_modules" || name === ".git") continue;
+      if (!name.startsWith(namePrefix)) continue;
+      let isDir = false;
+      let isFile = false;
+      if (entry.isDirectory()) {
+        isDir = true;
+      } else if (entry.isFile()) {
+        isFile = true;
+      } else if (entry.isSymbolicLink()) {
+        try {
+          const st = statSync(join(listDir, name));
+          isDir = st.isDirectory();
+          isFile = st.isFile();
+        } catch {
+          continue; // dangling symlink
+        }
+      }
+      if (isDir) {
+        results.push({ value: `${valuePrefix}${dirPart}${name}/`, label: `${name}/`, description: "directory" });
+      } else if (isFile && /\.md$/i.test(name)) {
+        results.push({ value: `${valuePrefix}${dirPart}${name}`, label: name, description: "markdown file" });
+      }
+    }
+    results.sort((a, b) => a.label.localeCompare(b.label));
+    return results.slice(0, DOC_COMPLETION_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
 function getExtensionCompletions(prefix: string, action: string) {
   try {
     const extDir = join(gsdHome(), "agent", "extensions");
@@ -588,6 +646,22 @@ export function getGsdArgumentCompletions(prefix: string) {
       label: r.cmd,
       description: r.desc,
     }));
+  }
+
+  // Completion for `/gsd doc <path> [--keep]` — project tree one level at a time (D-02).
+  // Offers nothing besides paths and --keep (no pin/unpin/ls, D-04).
+  if (command === "doc") {
+    if (parts.length === 2) {
+      return subcommand.startsWith("-")
+        ? filterOptions(subcommand, [DOC_KEEP_OPTION], "doc")
+        : getDocPathCompletions(subcommand);
+    }
+    if (parts.length === 3) {
+      return subcommand === "--keep"
+        ? getDocPathCompletions(third, process.cwd(), "doc --keep ")
+        : filterOptions(third, [DOC_KEEP_OPTION], `doc ${subcommand}`);
+    }
+    return [];
   }
 
   const nested = NESTED_COMPLETIONS[command];

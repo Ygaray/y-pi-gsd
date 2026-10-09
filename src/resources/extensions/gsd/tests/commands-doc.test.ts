@@ -690,3 +690,100 @@ test("DOCS-01 registration: the doc arm is exact-match", async () => {
     assert.equal(ctx.notifications.length, 0, input);
   }
 });
+
+// ─── 44-02 Task 2: tab-completion ───────────────────────────────────────────
+
+/** Project with a real .planning/, a symlinked .gsd, noise dirs and files. */
+function makeCompletionProject(): string {
+  const base = tmp("gsd-doc-comp-");
+  const external = tmp("gsd-doc-comp-ext-");
+  writeFileSync(join(external, "state.md"), "# s\n");
+  mkdirSync(join(base, ".planning"));
+  writeFileSync(join(base, ".planning", "notes.md"), "# n\n");
+  symlinkSync(external, join(base, ".gsd"));
+  mkdirSync(join(base, "node_modules"));
+  mkdirSync(join(base, ".git"));
+  mkdirSync(join(base, "sub"));
+  writeFileSync(join(base, "README.md"), "# r\n");
+  writeFileSync(join(base, "notes.txt"), "x\n");
+  return base;
+}
+
+const values = (items: Array<{ value: string }>) => items.map((i) => i.value);
+
+test("DOCS-01 completion: root listing offers dirs (symlinked .gsd included) and .md files, skips noise", () => {
+  const base = makeCompletionProject();
+  const items = mods.catalog.getDocPathCompletions("", base);
+  const v = values(items);
+  for (const want of ["doc .planning/", "doc .gsd/", "doc sub/", "doc README.md"]) {
+    assert.ok(v.includes(want), `${want} missing from ${JSON.stringify(v)}`);
+  }
+  for (const bad of ["doc node_modules/", "doc .git/", "doc notes.txt"]) {
+    assert.ok(!v.includes(bad), `${bad} should be absent`);
+  }
+  for (const i of items) {
+    if (i.value.endsWith("/")) assert.ok(i.label.endsWith("/"), i.label);
+  }
+});
+
+test("DOCS-01 completion: drill-down, prefix filter and symlink target listing", () => {
+  const base = makeCompletionProject();
+  assert.ok(values(mods.catalog.getDocPathCompletions(".planning/", base)).includes("doc .planning/notes.md"));
+  assert.deepEqual(values(mods.catalog.getDocPathCompletions(".planning/no", base)), ["doc .planning/notes.md"]);
+  assert.deepEqual(values(mods.catalog.getDocPathCompletions(".gsd/", base)), ["doc .gsd/state.md"]);
+});
+
+test("DOCS-01 completion: dangling symlinks and missing directories never throw", () => {
+  const base = makeCompletionProject();
+  symlinkSync(join(base, "does-not-exist"), join(base, "gone.md"));
+  const v = values(mods.catalog.getDocPathCompletions("", base));
+  assert.ok(!v.includes("doc gone.md"), "dangling symlink must be skipped");
+  assert.deepEqual(mods.catalog.getDocPathCompletions("nope/", base), []);
+});
+
+test("DOCS-01 completion: results are capped at DOC_COMPLETION_LIMIT and sorted by label", () => {
+  const base = tmp("gsd-doc-comp-cap-");
+  for (let i = 0; i < 60; i++) writeFileSync(join(base, `f${String(i).padStart(2, "0")}.md`), "x\n");
+  const items = mods.catalog.getDocPathCompletions("", base);
+  assert.equal(mods.catalog.DOC_COMPLETION_LIMIT, 50);
+  assert.equal(items.length, mods.catalog.DOC_COMPLETION_LIMIT);
+  const labels = items.map((i) => i.label);
+  assert.deepEqual(labels, [...labels].sort((a, b) => a.localeCompare(b)));
+});
+
+test("DOCS-01 completion: upper-case .MD files are offered", () => {
+  const base = tmp("gsd-doc-comp-case-");
+  writeFileSync(join(base, "NOTES.MD"), "x\n");
+  assert.deepEqual(values(mods.catalog.getDocPathCompletions("", base)), ["doc NOTES.MD"]);
+});
+
+test("DOCS-01 completion: through getGsdArgumentCompletions (cwd-relative, --keep before and after the path)", () => {
+  const base = makeCompletionProject();
+  const savedCwd = process.cwd();
+  process.chdir(base);
+  try {
+    const { getGsdArgumentCompletions } = mods.catalog;
+    assert.ok(values(getGsdArgumentCompletions("doc ")).includes("doc .planning/"));
+    assert.deepEqual(values(getGsdArgumentCompletions("doc -")), ["doc --keep"]);
+    assert.ok(values(getGsdArgumentCompletions("doc .planning/notes.md ")).includes("doc .planning/notes.md --keep"));
+    assert.ok(values(getGsdArgumentCompletions("doc --keep .pl")).includes("doc --keep .planning/"));
+  } finally {
+    process.chdir(savedCwd);
+  }
+});
+
+test("DOCS-01 completion: D-04 boundary - no pin, unpin or ls entries", () => {
+  const base = tmp("gsd-doc-comp-d04-");
+  const savedCwd = process.cwd();
+  process.chdir(base);
+  try {
+    const banned = new Set(["doc pin", "doc unpin", "doc ls"]);
+    for (const prefix of ["doc ", "doc p", "doc u", "doc l"]) {
+      for (const v of values(mods.catalog.getGsdArgumentCompletions(prefix))) {
+        assert.ok(!banned.has(v), `${prefix} offered ${v}`);
+      }
+    }
+  } finally {
+    process.chdir(savedCwd);
+  }
+});
