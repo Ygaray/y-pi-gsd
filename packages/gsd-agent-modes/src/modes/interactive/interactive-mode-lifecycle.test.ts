@@ -69,6 +69,17 @@ describe("InteractiveMode lifecycle", () => {
 		assert.equal(disposeCount, 1);
 	});
 
+	it("getDriverControl returns the injected port and undefined by default", () => {
+		const fake = { stopDriver: async () => ({ outcome: "stopped" }) };
+		const withPort = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
+		withPort.options = { driverControl: fake };
+		assert.equal((withPort as unknown as InteractiveMode).getDriverControl(), fake);
+
+		const without = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
+		without.options = {};
+		assert.equal((without as unknown as InteractiveMode).getDriverControl(), undefined);
+	});
+
 	it("caches markdown theme settings until the code block indent changes", () => {
 		const mode = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
 		let codeBlockIndent = "  ";

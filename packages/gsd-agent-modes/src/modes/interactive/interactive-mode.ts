@@ -26,6 +26,7 @@ import { GsdStatusWidget } from "./components/gsd-status-widget.js";
 import { DriverLivenessMonitor } from "./components/gsd-driver-liveness-monitor.js";
 import { DriverLivenessWidget } from "./components/gsd-driver-liveness-widget.js";
 import { findDriverProjectRoot } from "./components/gsd-driver-registry.js";
+import type { DriverControlPort } from "./driver-control.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
 import { CustomEditor } from "./components/custom-editor.js";
@@ -95,6 +96,8 @@ export interface InteractiveModeOptions {
 	submitPromptsDirectly?: boolean;
 	/** Control what happens when the user requests shutdown from the TUI. */
 	shutdownBehavior?: "exit_process" | "stop_ui" | "ignore";
+	/** Stops a registered y-pi-gsd driver for /drivers stop; bound by the y-pi-gsd CLI entry point only. */
+	driverControl?: DriverControlPort;
 }
 
 export class InteractiveMode {
@@ -425,6 +428,11 @@ export class InteractiveMode {
 
 	showWarning(warningMessage: string): void {
 		uiMessaging.showWarning(this, warningMessage);
+	}
+
+	/** The injected driver stop port, or undefined when this entry point does not bind one. */
+	getDriverControl(): DriverControlPort | undefined {
+		return this.options?.driverControl;
 	}
 
 	/** Driver death / stop-failure / unavailable alert: non-blocking, never touches lastBlockingError (D-02). */
