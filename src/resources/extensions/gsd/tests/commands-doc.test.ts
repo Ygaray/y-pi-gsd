@@ -795,6 +795,25 @@ test("DOCS-01 completion: through getGsdArgumentCompletions (cwd-relative, --kee
   }
 });
 
+test("DOCS-01 completion (WR-02): names that cannot round-trip through parseDocArgs are not offered", () => {
+  const base = tmp("gsd-doc-comp-rt-");
+  writeFileSync(join(base, "ok.md"), "x\n");
+  writeFileSync(join(base, "my notes.md"), "x\n");
+  writeFileSync(join(base, "-x.md"), "x\n");
+  writeFileSync(join(base, "q'uote.md"), "x\n");
+  writeFileSync(join(base, "esc\u001b[31m.md"), "x\n");
+  mkdirSync(join(base, "sp ace"));
+  mkdirSync(join(base, "sub"));
+  writeFileSync(join(base, "sub", "-y.md"), "x\n");
+  assert.deepEqual(values(mods.catalog.getDocPathCompletions("", base)), ["doc ok.md", "doc sub/"]);
+  // Inside a directory the token starts with the dir name, so a leading dash is safe.
+  assert.deepEqual(values(mods.catalog.getDocPathCompletions("sub/", base)), ["doc sub/-y.md"]);
+  for (const v of values(mods.catalog.getDocPathCompletions("", base))) {
+    const parsed = mods.doc.parseDocArgs(v.slice("doc ".length));
+    assert.ok(parsed.ok, v);
+  }
+});
+
 test("DOCS-01 completion: D-04 boundary - no pin, unpin or ls entries", () => {
   const base = tmp("gsd-doc-comp-d04-");
   const savedCwd = process.cwd();

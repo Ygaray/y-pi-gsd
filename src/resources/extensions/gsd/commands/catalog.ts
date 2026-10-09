@@ -433,8 +433,11 @@ const DOC_KEEP_OPTION: GsdCommandDefinition = {
  * (directories, including symlinks to directories such as a symlinked `.gsd`, and
  * `.md` files), filtered by the typed name prefix. Never throws.
  *
- * Paths containing spaces cannot be tab-completed because getGsdArgumentCompletions
- * splits on whitespace; type them quoted instead.
+ * Entries whose completed value would not round-trip through parseDocArgs are not
+ * offered (WR-02): names with whitespace, quotes or control characters (the argument
+ * list splits on whitespace, so a space would become two path tokens; type those
+ * quoted by hand), and a leading "-" at the start of the typed token (it would be
+ * read as an option; `./name` works).
  */
 export function getDocPathCompletions(
   partial: string,
@@ -451,6 +454,9 @@ export function getDocPathCompletions(
       const name = entry.name;
       if (name === "node_modules" || name === ".git") continue;
       if (!name.startsWith(namePrefix)) continue;
+      // eslint-disable-next-line no-control-regex
+      if (/[\s"'\u0000-\u001f\u007f-\u009f]/.test(name)) continue;
+      if (dirPart === "" && name.startsWith("-")) continue;
       let isDir = false;
       let isFile = false;
       if (entry.isDirectory()) {
