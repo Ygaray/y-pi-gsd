@@ -4,11 +4,12 @@
 
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { type Component, padRight, truncateToWidth, visibleWidth } from "@gsd/pi-tui";
+import { type Component, padRight, Text, truncateToWidth, visibleWidth } from "@gsd/pi-tui";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { DRIVER_STATE_STYLE } from "./components/gsd-driver-liveness-widget.js";
 import type { DriverListing } from "./components/gsd-driver-liveness-monitor.js";
 import { formatDriverAge, sanitizeDriverText, type ClassifiedDriver } from "./components/gsd-driver-registry.js";
+import { SelectSubmenu } from "./components/settings-selector.js";
 import type { DriverControlPort } from "./driver-control.js";
 
 export const DRIVERS_USAGE = "Usage: /drivers [list] | /drivers stop <n> | /drivers dismiss";
@@ -224,6 +225,206 @@ function buildListingLines(
 }
 
 // ---------------------------------------------------------------------------
+// Stop
+// ---------------------------------------------------------------------------
+
+function rowChangedWarning(n: number): string {
+	return `Driver #${n} changed since it was listed (pid or state differs). Nothing was stopped. Run /drivers to refresh.`;
+}
+
+function noEntryWarning(n: number): string {
+	return `Driver #${n} is no longer registered. Nothing was stopped. Run /drivers to refresh.`;
+}
+
+function isLiveClaim(d: ClassifiedDriver): boolean {
+	return d.liveness.kind !== "died";
+}
+
+function confirmationDescription(d: ClassifiedDriver): string {
+	const pid = d.row.pid;
+	const project = projectName(d);
+	if (!isLiveClaim(d)) {
+		return `Driver pid ${pid} for ${project} is not running. This only records it as exited; no process is signalled.`;
+	}
+	const supervisor =
+		d.supervisor === "alive" && d.row.ownerPid !== undefined
+			? `Its supervising MCP server (pid ${d.row.ownerPid}) is still running and will report the exit.`
+			: "No supervising MCP server is running.";
+	return `Stops only the driver process (pid ${pid}) for ${project}, ${displayPath(d)}. ${supervisor} Its in-flight sub-processes are not tracked and may finish on their own.`;
+}
+
+async function startStop(n: number, ctx: DriversCommandContext): Promise<void> {
+	const listed = lastListings.get(ctx.driverLiveness);
+	if (listed === undefined) {
+		ctx.showWarning("Run /drivers first, then /drivers stop <n>.");
+		return;
+	}
+	const target = listed.get(n);
+	if (target === undefined) {
+		ctx.showWarning(`No stoppable driver #${n} in the last listing. Run /drivers to refresh.`);
+		return;
+	}
+	if (ctx.driverControl === undefined) {
+		ctx.showDriverAlert("\u2715 Stopping drivers is unavailable in this entry point. Nothing was stopped.", [
+			"  Start y-pi-gsd with the standard y-pi-gsd command to stop drivers.",
+		]);
+		return;
+	}
+
+	// Re-read before confirming: the listing may be stale and a pid can be recycled (T-42-02).
+	const fresh = await ctx.driverLiveness.listAll();
+	if (fresh.kind === "unreadable") {
+		ctx.showWarning(rowChangedWarning(n));
+		return;
+	}
+	const current = fresh.drivers.find((d) => d.canonicalDir === target.canonicalDir);
+	if (current === undefined) {
+		ctx.showWarning(noEntryWarning(n));
+		return;
+	}
+	if (
+		current.row.pid !== target.row.pid ||
+		current.row.startTime !== target.row.startTime ||
+		isTombstone(current)
+	) {
+		ctx.showWarning(rowChangedWarning(n));
+		return;
+	}
+
+	const live = isLiveClaim(current);
+	const pid = current.row.pid;
+	ctx.showSelector((done) => {
+		const selector = new SelectSubmenu(
+			`Stop driver #${n}?`,
+			confirmationDescription(current),
+			[
+				{ value: "cancel", label: "Cancel, keep driver running", description: "Leave it as is" },
+				{
+					value: "stop",
+					label: live ? `Stop driver pid ${pid}` : `Record pid ${pid} as exited`,
+					description: live ? "Registry-first stop of that one pid" : "No process is signalled",
+				},
+			],
+			// Cancel is preselected: Enter alone never stops anything.
+			"cancel",
+			(value) => {
+				done();
+				if (value === "stop") {
+					void runDriverStop({ index: n, driver: current }, ctx);
+				} else {
+					ctx.showStatus("Stop cancelled. Nothing was stopped.");
+				}
+			},
+			() => {
+				done();
+				ctx.showStatus("Stop cancelled. Nothing was stopped.");
+			},
+		);
+		return { component: selector, focus: selector };
+	});
+}
+
+function successBlock(first: string, second?: string): Text {
+	const lines = [first];
+	if (second !== undefined) lines.push(second);
+	return new Text(lines.join("\n"), 1, 0);
+}
+
+/**
+ * Execute a confirmed stop through the injected port and report an honest outcome. Never rejects. A success line
+ * is printed only when the typed outcome is stopped or dead-reconciled AND a fresh re-read shows no live claim
+ * for that pid (T-42-04). The TUI never signals a process and never writes the registry.
+ */
+export async function runDriverStop(
+	target: { index: number; driver: ClassifiedDriver },
+	ctx: DriversCommandContext,
+): Promise<void> {
+	const { index: n, driver } = target;
+	const pid = driver.row.pid;
+	const project = projectName(driver);
+
+	try {
+		const port = ctx.driverControl;
+		if (port === undefined) {
+			ctx.showDriverAlert("\u2715 Stopping drivers is unavailable in this entry point. Nothing was stopped.", [
+				"  Start y-pi-gsd with the standard y-pi-gsd command to stop drivers.",
+			]);
+			return;
+		}
+
+		ctx.showStatus(`Stopping driver #${n} (pid ${pid})\u2026`);
+
+		let result: Awaited<ReturnType<DriverControlPort["stopDriver"]>>;
+		try {
+			result = await port.stopDriver(driver.row.projectDir, { pid, startTime: driver.row.startTime });
+		} catch (error) {
+			const message = sanitizeDriverText(error instanceof Error ? error.message : String(error), MAX_ERROR_CHARS);
+			ctx.showDriverAlert(`\u2715 Stop failed: ${message}`, ["  Nothing is confirmed stopped. Run /drivers to check."]);
+			return;
+		}
+
+		switch (result.outcome) {
+			case "stopped":
+			case "dead-reconciled": {
+				const fresh = await ctx.driverLiveness.listAll();
+				if (fresh.kind === "unreadable") {
+					ctx.showDriverAlert(
+						`\u2715 Stop reported success for driver pid ${pid}, but the registry could not be re-read to confirm.`,
+						["  Run /drivers to re-check."],
+					);
+					return;
+				}
+				const stillClaimed = fresh.drivers.some(
+					(d) => d.canonicalDir === driver.canonicalDir && d.row.exit === undefined && d.row.pid === pid,
+				);
+				if (stillClaimed) {
+					ctx.showDriverAlert(`\u2715 Stop reported success but driver pid ${pid} still looks alive.`, [
+						"  Run /drivers to re-check.",
+					]);
+					return;
+				}
+				if (result.outcome === "stopped") {
+					ctx.appendChatBlock(
+						successBlock(
+							theme.fg("success", `Stopped driver pid ${pid} \u00b7 ${project}`),
+							dim("Its in-flight sub-processes are not tracked and may finish on their own."),
+						),
+					);
+				} else {
+					ctx.appendChatBlock(successBlock(`Driver pid ${pid} was not running; recorded as exited.`));
+				}
+				return;
+			}
+			case "kill-failed": {
+				const error = sanitizeDriverText(result.error ?? "unknown error", MAX_ERROR_CHARS);
+				ctx.showDriverAlert(`\u2715 Could not stop driver pid ${pid}: ${error}`, [
+					"  The registry row was kept so you can retry. Run /drivers, then /drivers stop <n>.",
+				]);
+				return;
+			}
+			case "no-entry":
+				ctx.showWarning(noEntryWarning(n));
+				return;
+			case "row-changed":
+				ctx.showWarning(rowChangedWarning(n));
+				return;
+			case "busy":
+				ctx.showWarning(`A start or stop for ${project} is in progress. Nothing was stopped; retry in a moment.`);
+				return;
+			default:
+				ctx.showDriverAlert(
+					`\u2715 Stop failed: unexpected result ${sanitizeDriverText(String((result as { outcome: unknown }).outcome), 40)}`,
+					["  Nothing is confirmed stopped. Run /drivers to check."],
+				);
+		}
+	} catch (error) {
+		// Last-resort guard (for example a failed re-read): the caller is a fire-and-forget promise.
+		const message = sanitizeDriverText(error instanceof Error ? error.message : String(error), MAX_ERROR_CHARS);
+		ctx.showDriverAlert(`\u2715 Stop failed: ${message}`, ["  Nothing is confirmed stopped. Run /drivers to check."]);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Command
 // ---------------------------------------------------------------------------
 
@@ -240,6 +441,11 @@ export async function handleDriversCommand(text: string, ctx: DriversCommandCont
 
 	if (sub === undefined || (sub === "list" && tokens.length === 2)) {
 		await showListing(ctx);
+		return;
+	}
+
+	if (sub === "stop" && tokens.length === 3 && /^\d+$/.test(tokens[2])) {
+		await startStop(Number(tokens[2]), ctx);
 		return;
 	}
 

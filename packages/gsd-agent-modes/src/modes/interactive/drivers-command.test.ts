@@ -14,7 +14,8 @@ import type { SessionRegistry, SessionRegistryEntry } from "@opengsd/contracts";
 import type { DriverProcessProbes } from "./components/gsd-driver-registry.js";
 import { DriverLivenessMonitor } from "./components/gsd-driver-liveness-monitor.js";
 import type { DriverControlPort } from "./driver-control.js";
-import { handleDriversCommand, type DriversCommandContext } from "./drivers-command.js";
+import { handleDriversCommand, runDriverStop, type DriversCommandContext } from "./drivers-command.js";
+import type { DriverStopResult } from "./driver-control.js";
 
 initTheme("dark", false);
 
@@ -142,6 +143,11 @@ function plain(component: Component, width = 120): string[] {
 	return component.render(width).map((line) => stripAnsi(line));
 }
 
+/** Plain lines of a Text block: its horizontal padding and width fill are layout, not copy. */
+function copy(component: Component, width = 120): string[] {
+	return plain(component, width).map((line) => line.trim());
+}
+
 describe("handleDriversCommand listing", () => {
 	it("OBS-01 /drivers lists every registry row with project, pid, session, state, supervisor and age", async () => {
 		const h = makeHarness({ alive: [4242, 4301, 4999] });
@@ -181,5 +187,280 @@ describe("handleDriversCommand listing", () => {
 		const tail = lines.slice(-2);
 		assert.ok(tail[0].startsWith("● running = process alive and supervised"), tail[0]);
 		assert.equal(tail[1], "Stop one with /drivers stop <n>. Hide died drivers with /drivers dismiss.");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Stop
+// ---------------------------------------------------------------------------
+
+const DOWN = "\x1b[B";
+const ENTER = "\r";
+const ESC = "\x1b";
+
+function press(entry: Harness["selectors"][number], key: string): void {
+	(entry.focus as unknown as { handleInput(data: string): void }).handleInput(key);
+}
+
+function flush(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
+function allText(h: Harness): string {
+	return [
+		...h.statuses,
+		...h.warnings,
+		...h.alerts.flatMap((a) => [a.headline, ...a.details]),
+		...h.blocks.flatMap((b) => plain(b)),
+	].join("\n");
+}
+
+/** One live claim (gamma, pid 4242) whose supervisor is gone, so it lists as stale and stoppable #1. */
+function setupStale(h: Harness): { dir: string; row: SessionRegistryEntry } {
+	const dir = mkdir(makeTempDir(), "gamma");
+	const row = liveRow(dir, 4242, 41 * MIN, { ownerPid: 4777 });
+	writeRegistry(h.registryPath, [row]);
+	h.probes.alive.add(4242);
+	return { dir, row };
+}
+
+describe("handleDriversCommand stop", () => {
+	it("stop refuses without calling the port when the row changed since the listing", async () => {
+		const h = makeHarness();
+		const { dir, row } = setupStale(h);
+		await handleDriversCommand("/drivers", h.ctx);
+
+		writeRegistry(h.registryPath, [{ ...row, pid: 4243 }]);
+		h.probes.alive.add(4243);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		assert.deepEqual(h.warnings, [
+			"Driver #1 changed since it was listed (pid or state differs). Nothing was stopped. Run /drivers to refresh.",
+		]);
+
+		// A tombstone for the same pid is also a change.
+		h.warnings.length = 0;
+		writeRegistry(h.registryPath, [tombstone(dir, 4242, MIN, "boom", { startTime: row.startTime })]);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		assert.equal(h.warnings.length, 1);
+		assert.ok(h.warnings[0].startsWith("Driver #1 changed since it was listed"), h.warnings[0]);
+
+		// A vanished row is no-entry.
+		h.warnings.length = 0;
+		writeRegistry(h.registryPath, []);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		assert.deepEqual(h.warnings, ["Driver #1 is no longer registered. Nothing was stopped. Run /drivers to refresh."]);
+
+		assert.equal(h.stopCalls.length, 0);
+		assert.equal(h.selectors.length, 0);
+	});
+
+	it("stop asks for confirmation with Cancel preselected and cancels by default", async () => {
+		const h = makeHarness();
+		setupStale(h);
+		await handleDriversCommand("/drivers", h.ctx);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+
+		assert.equal(h.selectors.length, 1);
+		const text = plain(h.selectors[0].component, 300).join("\n");
+		for (const part of ["Stop driver #1?", "gamma", "4242", "No supervising MCP server is running.", "Cancel, keep driver running", "Stop driver pid 4242"]) {
+			assert.ok(text.includes(part), `${part} missing from:\n${text}`);
+		}
+
+		press(h.selectors[0], ENTER);
+		assert.equal(h.selectors[0].doneCalls, 1);
+		assert.deepEqual(h.statuses, ["Stop cancelled. Nothing was stopped."]);
+		await flush();
+		assert.equal(h.stopCalls.length, 0);
+
+		// Esc is Cancel too.
+		h.statuses.length = 0;
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+		press(h.selectors[1], ESC);
+		assert.equal(h.selectors[1].doneCalls, 1);
+		assert.deepEqual(h.statuses, ["Stop cancelled. Nothing was stopped."]);
+		await flush();
+		assert.equal(h.stopCalls.length, 0);
+	});
+
+	it("an unreconciled dead row offers to record the exit and signals nothing", async () => {
+		const h = makeHarness();
+		const dir = mkdir(makeTempDir(), "beta");
+		writeRegistry(h.registryPath, [liveRow(dir, 4150, 9 * MIN)]);
+		await handleDriversCommand("/drivers", h.ctx);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+
+		const text = plain(h.selectors[0].component, 300).join("\n");
+		assert.ok(text.includes("Record pid 4150 as exited"), text);
+		assert.ok(text.includes("No process is signalled"), text);
+		assert.ok(text.includes("is not running. This only records it as exited; no process is signalled."), text);
+	});
+
+	it("stop calls the port with the listed pid and start time and reports stopped only after a clean re-read", async () => {
+		const h = makeHarness({
+			port: {
+				async stopDriver(projectDir, expect) {
+					h.stopCalls.push({ projectDir, expect });
+					writeRegistry(h.registryPath, []);
+					return { outcome: "stopped", pid: expect.pid };
+				},
+			},
+		});
+		const { dir, row } = setupStale(h);
+		await handleDriversCommand("/drivers", h.ctx);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+
+		press(h.selectors[0], DOWN);
+		press(h.selectors[0], ENTER);
+		assert.deepEqual(h.statuses, ["Stopping driver #1 (pid 4242)\u2026"]);
+		await flush();
+
+		assert.equal(h.stopCalls.length, 1);
+		assert.equal(h.stopCalls[0].projectDir, row.projectDir);
+		assert.equal(h.stopCalls[0].projectDir, dir);
+		assert.deepEqual(h.stopCalls[0].expect, { pid: 4242, startTime: row.startTime });
+		assert.equal(h.blocks.length, 2, "listing plus one outcome block");
+		const outcome = copy(h.blocks[1]);
+		assert.equal(outcome[0], "Stopped driver pid 4242 \u00b7 gamma");
+		assert.equal(outcome[1], "Its in-flight sub-processes are not tracked and may finish on their own.");
+		assert.deepEqual(h.alerts, []);
+	});
+
+	it("every typed outcome maps to its exact copy", async () => {
+		interface Case {
+			name: string;
+			result: DriverStopResult | Error;
+			mutate?: (h: Harness, dir: string, row: SessionRegistryEntry) => void;
+			warnings?: string[];
+			alert?: { headline: string; details: string[] };
+			block?: string[];
+		}
+		const cases: Case[] = [
+			{
+				name: "dead-reconciled",
+				result: { outcome: "dead-reconciled", pid: 4242 },
+				mutate: (h) => writeRegistry(h.registryPath, []),
+				block: ["Driver pid 4242 was not running; recorded as exited."],
+			},
+			{
+				name: "kill-failed",
+				result: { outcome: "kill-failed", pid: 4242, error: "EPERM: operation not permitted" },
+				alert: {
+					headline: "\u2715 Could not stop driver pid 4242: EPERM: operation not permitted",
+					details: ["  The registry row was kept so you can retry. Run /drivers, then /drivers stop <n>."],
+				},
+			},
+			{
+				name: "no-entry",
+				result: { outcome: "no-entry" },
+				warnings: ["Driver #1 is no longer registered. Nothing was stopped. Run /drivers to refresh."],
+			},
+			{
+				name: "row-changed",
+				result: { outcome: "row-changed" },
+				warnings: ["Driver #1 changed since it was listed (pid or state differs). Nothing was stopped. Run /drivers to refresh."],
+			},
+			{
+				name: "busy",
+				result: { outcome: "busy" },
+				warnings: ["A start or stop for gamma is in progress. Nothing was stopped; retry in a moment."],
+			},
+			{
+				name: "rejected",
+				result: new Error("registry lock exploded\u0007"),
+				alert: {
+					headline: "\u2715 Stop failed: registry lock exploded",
+					details: ["  Nothing is confirmed stopped. Run /drivers to check."],
+				},
+			},
+			{
+				name: "stopped but still claimed",
+				result: { outcome: "stopped", pid: 4242 },
+				alert: {
+					headline: "\u2715 Stop reported success but driver pid 4242 still looks alive.",
+					details: ["  Run /drivers to re-check."],
+				},
+			},
+			{
+				name: "stopped but registry unreadable",
+				result: { outcome: "stopped", pid: 4242 },
+				mutate: (h) => writeFileSync(h.registryPath, "{not json"),
+				alert: {
+					headline: "\u2715 Stop reported success for driver pid 4242, but the registry could not be re-read to confirm.",
+					details: ["  Run /drivers to re-check."],
+				},
+			},
+		];
+
+		for (const c of cases) {
+			const h = makeHarness({
+				port: {
+					async stopDriver() {
+						if (c.result instanceof Error) throw c.result;
+						return c.result;
+					},
+				},
+			});
+			const { dir, row } = setupStale(h);
+			const listing = await h.monitor.listAll();
+			assert.equal(listing.kind, "ok");
+			if (listing.kind !== "ok") continue;
+			const driver = listing.drivers[0];
+
+			// The port mutates the registry as the server would, before the TUI re-reads.
+			const port = h.ctx.driverControl as DriverControlPort;
+			const original = port.stopDriver.bind(port);
+			h.ctx.driverControl = {
+				async stopDriver(projectDir, expect) {
+					const r = await original(projectDir, expect);
+					c.mutate?.(h, dir, row);
+					return r;
+				},
+			};
+			if (c.result instanceof Error) {
+				h.ctx.driverControl = {
+					async stopDriver() {
+						throw c.result;
+					},
+				};
+			}
+
+			await runDriverStop({ index: 1, driver }, h.ctx);
+
+			assert.deepEqual(h.warnings, c.warnings ?? [], c.name);
+			if (c.alert) {
+				assert.equal(h.alerts.length, 1, c.name);
+				assert.equal(h.alerts[0].headline, c.alert.headline, c.name);
+				assert.deepEqual(h.alerts[0].details, c.alert.details, c.name);
+			} else {
+				assert.deepEqual(h.alerts, [], c.name);
+			}
+			if (c.block) {
+				assert.equal(h.blocks.length, 1, c.name);
+				assert.deepEqual(copy(h.blocks[0]), c.block, c.name);
+			} else {
+				assert.equal(h.blocks.length, 0, `${c.name}: no success copy`);
+			}
+			const text = allText(h);
+			assert.ok(!text.includes("Error:"), `${c.name}: ${text}`);
+			assert.ok(!/kill/i.test(text.replace(/kill-failed/g, "")), `${c.name}: ${text}`);
+			assert.ok(!text.includes("\u0007"), c.name);
+			assert.deepEqual(h.statuses, ["Stopping driver #1 (pid 4242)\u2026"], c.name);
+		}
+	});
+
+	it("stop with no port shows the unavailable alert", async () => {
+		const h = makeHarness({ port: "none" });
+		setupStale(h);
+		await handleDriversCommand("/drivers", h.ctx);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+
+		assert.deepEqual(h.alerts, [
+			{
+				headline: "\u2715 Stopping drivers is unavailable in this entry point. Nothing was stopped.",
+				details: ["  Start y-pi-gsd with the standard y-pi-gsd command to stop drivers."],
+			},
+		]);
+		assert.equal(h.selectors.length, 0);
+		assert.deepEqual(h.warnings, []);
 	});
 });
