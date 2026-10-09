@@ -5,7 +5,7 @@
 
 import { execFile } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep, win32 } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
@@ -201,13 +201,18 @@ export function checkPublishablePath(typedPath: string, baseDir: string, root: s
   if (!/\.md$/i.test(basename(realPath))) {
     return { ok: false, reason: `Only .md files can be published (got ${basename(realPath)})` };
   }
-  let realRoot: string;
-  try {
-    realRoot = realpathSync(root);
-  } catch {
-    realRoot = root;
+  // Allowed real roots: the project, plus .gsd and .planning (each may be a symlink to
+  // external state, e.g. ~/.gsd/projects/<hash> via ensureGsdSymlink). A missing or
+  // dangling one is skipped.
+  const allowedRoots: string[] = [];
+  for (const candidate of [root, join(root, ".gsd"), join(root, ".planning")]) {
+    try {
+      allowedRoots.push(realpathSync(candidate));
+    } catch {
+      /* missing or dangling: skip */
+    }
   }
-  if (!isWithin(realRoot, realPath)) {
+  if (!allowedRoots.some((allowed) => isWithin(allowed, realPath))) {
     return {
       ok: false,
       reason: `${abs} resolves to ${realPath}, which is outside this project (${root}). /gsd doc only publishes files inside the project, its .gsd/ or its .planning/.`,
@@ -222,8 +227,16 @@ export function checkPublishablePath(typedPath: string, baseDir: string, root: s
 const PROJECT_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const HTML_SUFFIX_RE = /\.html?$/i;
 
+/**
+ * Coerce a directory name into a yahir-docs project slug (store.py rules): runs of
+ * disallowed characters become "-", leading non-alphanumerics are dropped, the result
+ * is cut to 64 characters, then trailing .html/.htm is stripped. Case is preserved
+ * (URL paths are case-sensitive and existing docs are keyed by original case).
+ */
 export function sanitizeProjectSlug(name: string): string | null {
-  return PROJECT_SLUG_RE.test(name) && !HTML_SUFFIX_RE.test(name) ? name : null;
+  let s = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 64);
+  while (HTML_SUFFIX_RE.test(s)) s = s.replace(HTML_SUFFIX_RE, "");
+  return PROJECT_SLUG_RE.test(s) && !HTML_SUFFIX_RE.test(s) ? s : null;
 }
 
 // ─── Args / argv ────────────────────────────────────────────────────────────
@@ -231,14 +244,31 @@ export function sanitizeProjectSlug(name: string): string | null {
 export type DocArgs = { ok: true; path: string; keep: boolean } | { ok: false; reason: string };
 
 export function parseDocArgs(args: string): DocArgs {
-  const trimmed = args.trim();
-  if (trimmed === "") return { ok: false, reason: DOC_USAGE };
-  for (const token of trimmed.split(/\s+/)) {
-    if (token.startsWith("-")) {
+  const tokens: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(args)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3]);
+  }
+  let keep = false;
+  const paths: string[] = [];
+  for (const token of tokens) {
+    if (token === "--keep") {
+      keep = true;
+    } else if (token.startsWith("-")) {
       return { ok: false, reason: `Unknown option "${token}". ${DOC_USAGE}` };
+    } else {
+      paths.push(token);
     }
   }
-  return { ok: true, path: trimmed, keep: false };
+  if (paths.length === 0) return { ok: false, reason: DOC_USAGE };
+  if (paths.length > 1) {
+    return {
+      ok: false,
+      reason: `Expected exactly one path (quote a path that contains spaces). ${DOC_USAGE}`,
+    };
+  }
+  return { ok: true, path: paths[0], keep };
 }
 
 export function buildYahirTnArgv(slug: string, realPath: string, keep: boolean): string[] {

@@ -12,6 +12,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -413,4 +414,195 @@ test("DOCS-01 failure: a failed call does not affect the next call", async () =>
   const ok = await runDoc(root, ".planning/notes.md", { run: async () => okRun(envelope(GOOD_ROW)) });
   assert.equal(ok.notifications.length, 1);
   assert.equal(ok.notifications[0].level, "success");
+});
+
+// ─── Task 3: input completeness ─────────────────────────────────────────────
+
+
+/** Every argv recorded by Task 3 successes; checked by the argv-shape invariant test. */
+const recordedArgvs: string[][] = [];
+
+/** Injected runner that records argv and returns a valid envelope echoing argv[2] as source. */
+function successRunner(extra: Record<string, unknown> = {}) {
+  const calls: string[][] = [];
+  const run = async (argv: readonly string[]) => {
+    calls.push([...argv]);
+    recordedArgvs.push([...argv]);
+    return okRun(envelope({ ...GOOD_ROW, source: argv[2], ...extra }));
+  };
+  return { run, calls };
+}
+
+test("DOCS-01 input: a .gsd symlinked to external state publishes its real path", async () => {
+  const root = makeProject();
+  const external = tmp("gsd-doc-ext-");
+  writeFileSync(join(external, "STATE.md"), "# state\n");
+  symlinkSync(external, join(root, ".gsd"));
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, ".gsd/STATE.md", { run });
+  assert.equal(ctx.notifications.length, 1);
+  assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+  assert.equal(calls[0][2], realpathSync(join(external, "STATE.md")));
+});
+
+test("DOCS-01 input: a .planning symlinked to an external dir publishes its real path", async () => {
+  const root = tmp("gsd-doc-");
+  mkdirSync(join(root, ".git"));
+  const external = tmp("gsd-doc-ext-");
+  writeFileSync(join(external, "ROADMAP.md"), "# roadmap\n");
+  symlinkSync(external, join(root, ".planning"));
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, ".planning/ROADMAP.md", { run });
+  assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+  assert.equal(calls[0][2], realpathSync(join(external, "ROADMAP.md")));
+});
+
+test("DOCS-01 input: a file symlink escaping the project is rejected and never spawns", async () => {
+  const root = makeProject();
+  const outside = tmp("gsd-doc-out-");
+  writeFileSync(join(outside, "secret.md"), "secret\n");
+  symlinkSync(join(outside, "secret.md"), join(root, "leak.md"));
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, "leak.md", { run });
+  const msg = onlyError(ctx);
+  assert.match(msg, /outside this project/);
+  assert.ok(msg.includes(realpathSync(join(outside, "secret.md"))), msg);
+  assert.equal(calls.length, 0);
+});
+
+test("DOCS-01 input: a directory symlink escaping the project is rejected and never spawns", async () => {
+  const root = makeProject();
+  const outside = tmp("gsd-doc-out-");
+  writeFileSync(join(outside, "x.md"), "x\n");
+  symlinkSync(outside, join(root, "docs"));
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, "docs/x.md", { run });
+  assert.match(onlyError(ctx), /outside this project/);
+  assert.equal(calls.length, 0);
+});
+
+test("DOCS-01 input: an absolute .md path in another directory is rejected and never spawns", async () => {
+  const root = makeProject();
+  const outside = tmp("gsd-doc-out-");
+  writeFileSync(join(outside, "other.md"), "other\n");
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, join(outside, "other.md"), { run });
+  assert.match(onlyError(ctx), /outside this project/);
+  assert.equal(calls.length, 0);
+});
+
+test("DOCS-01 input: directories, non-.md files and missing files are rejected; NOTES.MD is accepted", async () => {
+  const root = makeProject();
+  writeFileSync(join(root, "README.txt"), "txt\n");
+  writeFileSync(join(root, "NOTES.MD"), "# upper\n");
+  for (const [arg, expected] of [
+    [".planning", /directory/],
+    ["README.txt", /Only \.md files/],
+    ["missing.md", /File not found/],
+  ] as Array<[string, RegExp]>) {
+    const { run, calls } = successRunner();
+    const ctx = await runDoc(root, arg, { run });
+    assert.match(onlyError(ctx), expected, arg);
+    assert.equal(calls.length, 0, arg);
+  }
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, "NOTES.MD", { run });
+  assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+  assert.equal(calls.length, 1);
+});
+
+test("DOCS-01 input: relative paths resolve against ctx.cwd", async () => {
+  const root = makeProject();
+  mkdirSync(join(root, "sub"));
+  writeFileSync(join(root, "sub", "note.md"), "# note\n");
+  const { run, calls } = successRunner();
+  const ctx = makeCtx(join(root, "sub"));
+  await mods.context.withCommandCwd(join(root, "sub"), () => mods.doc.handleDoc("note.md", ctx as any, { run }));
+  assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+  assert.equal(calls[0][2], realpathSync(join(root, "sub", "note.md")));
+});
+
+test("DOCS-01 input: --keep passes through before --json, from either side of the path", async () => {
+  const root = makeProject();
+  for (const args of [".planning/notes.md --keep", "--keep .planning/notes.md"]) {
+    const { run, calls } = successRunner();
+    const ctx = await runDoc(root, args, { run });
+    assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+    assert.deepEqual(calls[0].slice(-2), ["--keep", "--json"], args);
+  }
+});
+
+test("DOCS-01 input: a pinned result renders Pinned, no Expires line, and still a pin hint", async () => {
+  const root = makeProject();
+  const stub = makeStub({
+    stdout: envelope({ ...GOOD_ROW, pinned: true, expires_at: null }),
+  });
+  const ctx = await runDocStub(root, stub, ".planning/notes.md --keep");
+  const note = ctx.notifications[0];
+  assert.equal(note.level, "success", note.message);
+  assert.match(note.message, /Pinned/);
+  assert.ok(!note.message.includes("Expires:"), note.message);
+  assert.ok(note.message.includes("yahir-tn pin doc:p/notes"), note.message);
+  const inv = readInvocations(stub);
+  assert.deepEqual(inv[0].slice(-2), ["--keep", "--json"]);
+  recordedArgvs.push(inv[0]);
+});
+
+test("DOCS-01 input: a quoted path with a space is published whole", async () => {
+  const root = makeProject();
+  writeFileSync(join(root, ".planning", "my notes.md"), "# spaced\n");
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, '".planning/my notes.md"', { run });
+  assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+  assert.ok(calls[0][2].endsWith("my notes.md"), calls[0][2]);
+});
+
+test("DOCS-01 input: unknown options, empty args and multiple paths are rejected and never spawn", async () => {
+  const root = makeProject();
+  writeFileSync(join(root, ".planning", "two.md"), "# two\n");
+  for (const [args, expected] of [
+    ["--force", /Unknown option "--force"[\s\S]*Usage: \/gsd doc/],
+    ["", /Usage: \/gsd doc/],
+    [".planning/notes.md .planning/two.md", /exactly one path/],
+  ] as Array<[string, RegExp]>) {
+    const { run, calls } = successRunner();
+    const ctx = await runDoc(root, args, { run });
+    assert.match(onlyError(ctx), expected, JSON.stringify(args));
+    assert.equal(calls.length, 0, JSON.stringify(args));
+  }
+});
+
+test("DOCS-01 input: sanitizeProjectSlug table", () => {
+  const { sanitizeProjectSlug } = mods.doc;
+  const long = "a1".repeat(40);
+  assert.equal(sanitizeProjectSlug("y-pi-gsd"), "y-pi-gsd");
+  assert.equal(sanitizeProjectSlug("My Project"), "My-Project");
+  assert.equal(sanitizeProjectSlug(".hidden"), "hidden");
+  assert.equal(sanitizeProjectSlug("site.html"), "site");
+  assert.equal(sanitizeProjectSlug("a.HTML.htm"), "a");
+  assert.equal(sanitizeProjectSlug(long), long.slice(0, 64));
+  assert.equal(sanitizeProjectSlug("___"), null);
+});
+
+test("DOCS-01 input: an unsanitizable project directory name is a loud error with no spawn", async () => {
+  const parent = tmp("gsd-doc-parent-");
+  const root = join(parent, "___");
+  mkdirSync(join(root, ".git"), { recursive: true });
+  mkdirSync(join(root, ".planning"));
+  writeFileSync(join(root, ".planning", "notes.md"), "# n\n");
+  const { run, calls } = successRunner();
+  const ctx = await runDoc(root, ".planning/notes.md", { run });
+  assert.match(onlyError(ctx), /Cannot derive/);
+  assert.equal(calls.length, 0);
+});
+
+test("DOCS-01 input: no argv element after the verb can be read as an option", () => {
+  assert.ok(recordedArgvs.length >= 5, `expected recorded invocations, got ${recordedArgvs.length}`);
+  for (const argv of recordedArgvs) {
+    assert.equal(argv[0], "doc");
+    for (const el of argv.slice(1)) {
+      if (el === "--keep" || el === "--json") continue;
+      assert.ok(el.startsWith("/") || /^[A-Za-z0-9]/.test(el), `option-like argv element: ${el}`);
+    }
+  }
 });
