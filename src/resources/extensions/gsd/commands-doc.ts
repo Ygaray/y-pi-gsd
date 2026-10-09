@@ -9,7 +9,7 @@ import { basename, isAbsolute, join, relative, resolve, sep, win32 } from "node:
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
-import { projectRoot } from "./commands/context.js";
+import { currentDirectoryRoot, projectRoot } from "./commands/context.js";
 import { externalProjectsRoot } from "./repo-identity.js";
 
 export const YAHIR_TN_BIN = "yahir-tn";
@@ -454,7 +454,9 @@ export async function handleDoc(
       return;
     }
     const root = projectRoot();
-    const baseDir = ctx.cwd || process.cwd();
+    // Same cwd source as projectRoot() when ctx.cwd is empty, so the path base and the
+    // containment root cannot diverge (IN-05).
+    const baseDir = ctx.cwd || currentDirectoryRoot();
     const checked = checkPublishablePath(parsed.path, baseDir, root);
     if (!checked.ok) {
       say(checked.reason, "error");

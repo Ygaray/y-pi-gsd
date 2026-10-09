@@ -591,6 +591,15 @@ test("DOCS-01 input: relative paths resolve against ctx.cwd", async () => {
   assert.equal(calls[0][2], realpathSync(join(root, "sub", "note.md")));
 });
 
+test("DOCS-01 input (IN-05): an empty ctx.cwd falls back to the same cwd source as the project root", async () => {
+  const root = makeProject();
+  const { run, calls } = successRunner();
+  const ctx = makeCtx("");
+  await mods.context.withCommandCwd(root, () => mods.doc.handleDoc(".planning/notes.md", ctx as any, { run }));
+  assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
+  assert.equal(calls[0][2], realpathSync(join(root, ".planning", "notes.md")));
+});
+
 test("DOCS-01 input: --keep passes through before --json, from either side of the path", async () => {
   const root = makeProject();
   for (const args of [".planning/notes.md --keep", "--keep .planning/notes.md"]) {
