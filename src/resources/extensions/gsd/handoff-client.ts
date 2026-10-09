@@ -1,0 +1,341 @@
+// Project/App: gsd-pi
+// File Purpose: y-pi-gsd client for the harness-agnostic yahir-handoff CLI contract
+// (HANDOFF-01). The only place that spawns yahir-handoff: async execFile, argv array, no
+// shell, body on stdin, never throws. Handlers and lifecycle code call the typed ops here.
+
+import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
+
+import { parseCliError, sanitizeCliText } from "./commands-doc.js";
+
+export const YAHIR_HANDOFF_BIN = "yahir-handoff";
+/** Default wall-clock budget for one CLI call (SIGTERM at this point). */
+export const DEFAULT_HANDOFF_TIMEOUT_MS = 8_000;
+/** Extra time after the SIGTERM timeout before escalating to SIGKILL and giving up on the child. */
+export const HANDOFF_HARD_DEADLINE_GRACE_MS = 5_000;
+/** stdout/stderr cap per call (1 MiB). */
+export const HANDOFF_MAX_OUTPUT_BYTES = 1024 * 1024;
+export const Y_PI_GSD_HARNESS = "y-pi-gsd";
+export const Y_PI_GSD_RESUME_CMD = "/gsd resume-work";
+export const HANDOFF_ID_RE = /^ho_[A-Za-z0-9_]{1,40}$/;
+export const HARNESS_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+export const HANDOFF_STATES = ["open", "taken", "done", "dropped", "superseded", "archived"] as const;
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface HandoffRun {
+  /** true only for exit code 0 */
+  ok: boolean;
+  /** numeric process exit code when the child ran to completion */
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  /** set when the child could not be spawned or its output could not be read (ENOENT, EACCES, ...) */
+  spawnError?: string;
+  /** set when our timeout fired and the child was killed */
+  timedOut?: boolean;
+  /** set when the child died from a signal we did not send */
+  signal?: string;
+  /** set when the runner refused to spawn at all (test run without an isolated store) */
+  refused?: string;
+}
+
+export interface HandoffRunOpts {
+  input?: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  graceMs?: number;
+}
+
+export type HandoffRunner = (argv: readonly string[], opts: HandoffRunOpts) => Promise<HandoffRun>;
+
+export type HandoffState = (typeof HANDOFF_STATES)[number];
+
+export interface HandoffEntry {
+  id: string;
+  state: HandoffState;
+  title: string;
+  harness: string;
+  resumeCmd: string | null;
+  createdAt: string | null;
+  takenBy: string | null;
+  closedAt: string | null;
+  body: string | null;
+}
+
+export interface HandoffNotice {
+  project: string | null;
+  handoffs: HandoffEntry[];
+}
+
+export type HandoffFailureKind =
+  | "not-installed"
+  | "cwd-missing"
+  | "timeout"
+  | "busy"
+  | "conflict"
+  | "not-allowed"
+  | "not-found"
+  | "usage"
+  | "interrupted"
+  | "internal"
+  | "unexpected-exit"
+  | "bad-output"
+  | "signal"
+  | "spawn-error"
+  | "invalid-id"
+  | "refused-test-isolation";
+
+export interface HandoffFailure {
+  ok: false;
+  op: string;
+  kind: HandoffFailureKind;
+  code: number | null;
+  message: string;
+  hint: string | null;
+}
+
+export type HandoffResult<T> = { ok: true; value: T } | HandoffFailure;
+
+export interface HandoffCallOpts {
+  cwd: string;
+  sessionId?: string | null;
+  env?: NodeJS.ProcessEnv;
+  run?: HandoffRunner;
+  timeoutMs?: number;
+}
+
+export interface CreateHandoffInput {
+  title: string;
+  body: string;
+  supersedes?: string | null;
+}
+
+// ─── Child environment ──────────────────────────────────────────────────────
+
+/**
+ * Child env for a yahir-handoff call (D-11, D-13 C): the Claude Code session id is always
+ * removed (it would mis-attribute the handoff to an unrelated Claude session) and
+ * YAHIR_HANDOFF_SESSION_ID carries the y-pi-gsd session id when one is known. Store paths
+ * and PATH pass through untouched. Never mutates its input.
+ */
+export function buildChildEnv(base: NodeJS.ProcessEnv, sessionId: string | null | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  delete env.CLAUDE_CODE_SESSION_ID;
+  if (typeof sessionId === "string" && sessionId !== "") env.YAHIR_HANDOFF_SESSION_ID = sessionId;
+  else delete env.YAHIR_HANDOFF_SESSION_ID;
+  return env;
+}
+
+// ─── Runner ─────────────────────────────────────────────────────────────────
+
+/**
+ * Async, result-returning spawn of yahir-handoff. The returned promise never rejects and
+ * always settles: SIGTERM at the timeout, then SIGKILL plus a forced result after a grace
+ * period. No shell; cwd is the project directory (checked first so a missing directory is
+ * reported as such, not as "not installed"); the body goes on stdin, which is always ended.
+ */
+export const runYahirHandoff: HandoffRunner = (argv, opts) =>
+  new Promise<HandoffRun>((resolvePromise) => {
+    let settled = false;
+    let hardDeadline: ReturnType<typeof setTimeout> | undefined;
+    const finish = (run: HandoffRun): void => {
+      if (settled) return;
+      settled = true;
+      if (hardDeadline !== undefined) clearTimeout(hardDeadline);
+      resolvePromise(run);
+    };
+    const spawnFailure = (code: string): HandoffRun => ({
+      ok: false,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      spawnError: code,
+    });
+    try {
+      let cwdIsDir = false;
+      try {
+        cwdIsDir = statSync(opts.cwd).isDirectory();
+      } catch {
+        cwdIsDir = false;
+      }
+      if (!cwdIsDir) {
+        finish(spawnFailure("CWD_MISSING"));
+        return;
+      }
+      const spawnOpts = {
+        encoding: "utf-8" as const,
+        timeout: opts.timeoutMs,
+        maxBuffer: HANDOFF_MAX_OUTPUT_BYTES,
+        cwd: opts.cwd,
+        env: opts.env,
+      };
+      const child = execFile(YAHIR_HANDOFF_BIN, [...argv], spawnOpts,
+        (err, stdout, stderr) => {
+          const out = String(stdout ?? "");
+          const errText = String(stderr ?? "");
+          if (!err) {
+            finish({ ok: true, exitCode: 0, stdout: out, stderr: errText });
+            return;
+          }
+          const e = err as NodeJS.ErrnoException & {
+            killed?: boolean;
+            signal?: string | null;
+            code?: string | number | null;
+          };
+          if (e.killed && e.signal === "SIGTERM") {
+            finish({ ok: false, exitCode: null, stdout: out, stderr: errText, timedOut: true });
+          } else if (typeof e.code === "string") {
+            finish({ ok: false, exitCode: null, stdout: out, stderr: errText, spawnError: e.code });
+          } else if (typeof e.code === "number") {
+            finish({ ok: false, exitCode: e.code, stdout: out, stderr: errText });
+          } else {
+            finish({ ok: false, exitCode: null, stdout: out, stderr: errText, signal: e.signal ?? undefined });
+          }
+        },
+      );
+      child.on("error", (err) => {
+        const code = (err as NodeJS.ErrnoException).code;
+        finish(spawnFailure(typeof code === "string" ? code : "SPAWN_FAILED"));
+      });
+      // execFile's timeout sends SIGTERM once. A child that traps or ignores it would leave
+      // this promise pending forever, so a hard deadline escalates to SIGKILL and settles.
+      hardDeadline = setTimeout(
+        () => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+          finish({ ok: false, exitCode: null, stdout: "", stderr: "", timedOut: true });
+        },
+        opts.timeoutMs + (opts.graceMs ?? HANDOFF_HARD_DEADLINE_GRACE_MS),
+      );
+      hardDeadline.unref?.();
+      if (settled) clearTimeout(hardDeadline);
+      // EPIPE when the CLI exits before reading its stdin must not become an uncaught error.
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(opts.input ?? "");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      finish(spawnFailure(typeof code === "string" ? code : "SPAWN_FAILED"));
+    }
+  });
+
+// ─── Parsing ────────────────────────────────────────────────────────────────
+
+export function parseEnvelope(stdout: string): { ok: true; result: unknown } | { ok: false; reason: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { ok: false, reason: "non-JSON output" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, reason: "output is not a JSON object" };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.schema_version !== 1) {
+    return { ok: false, reason: `unsupported schema_version ${String(obj.schema_version)} (expected 1)` };
+  }
+  if (!("result" in obj)) return { ok: false, reason: "envelope has no result" };
+  return { ok: true, result: obj.result };
+}
+
+/** Mirrors yahir-handoff notice.py harness_of: anything missing or malformed counts as claude-code. */
+export function normalizeHarness(value: unknown): string {
+  return typeof value === "string" && HARNESS_SLUG_RE.test(value) ? value : "claude-code";
+}
+
+export function isValidHandoffId(value: unknown): value is string {
+  return typeof value === "string" && HANDOFF_ID_RE.test(value);
+}
+
+function strOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/** Reads only the pinned entry fields; returns null for a malformed entry. */
+export function parseHandoffEntry(value: unknown): HandoffEntry | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!isValidHandoffId(v.id)) return null;
+  if (typeof v.state !== "string" || !(HANDOFF_STATES as readonly string[]).includes(v.state)) return null;
+  if (typeof v.title !== "string") return null;
+  return {
+    id: v.id,
+    state: v.state as HandoffState,
+    title: v.title,
+    harness: normalizeHarness(v.harness),
+    resumeCmd: strOrNull(v.resume_cmd),
+    createdAt: strOrNull(v.created_at),
+    takenBy: strOrNull(v.taken_by),
+    closedAt: strOrNull(v.closed_at),
+    body: strOrNull(v.body),
+  };
+}
+
+// ─── Ops ────────────────────────────────────────────────────────────────────
+
+interface OpOutcome {
+  run: HandoffRun | null;
+  failure: HandoffFailure | null;
+}
+
+/** Tracer form: any non-ok run is a generic internal failure (Task 2 replaces this mapping). */
+async function callOp(op: string, argv: readonly string[], callOpts: HandoffCallOpts, input?: string): Promise<OpOutcome> {
+  const env = buildChildEnv(callOpts.env ?? process.env, callOpts.sessionId);
+  let run: HandoffRun;
+  try {
+    run = await (callOpts.run ?? runYahirHandoff)(argv, {
+      input,
+      cwd: callOpts.cwd,
+      env,
+      timeoutMs: callOpts.timeoutMs ?? DEFAULT_HANDOFF_TIMEOUT_MS,
+    });
+  } catch (err) {
+    return {
+      run: null,
+      failure: {
+        ok: false,
+        op,
+        kind: "internal",
+        code: null,
+        message: err instanceof Error ? err.message : String(err),
+        hint: null,
+      },
+    };
+  }
+  if (!run.ok) {
+    return {
+      run,
+      failure: { ok: false, op, kind: "internal", code: run.exitCode, message: `yahir-handoff ${op} failed`, hint: null },
+    };
+  }
+  return { run, failure: null };
+}
+
+function badOutput(op: string, reason: string): HandoffFailure {
+  return { ok: false, op, kind: "bad-output", code: null, message: reason, hint: null };
+}
+
+export async function createHandoff(input: CreateHandoffInput, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> {
+  const argv = [
+    "create",
+    "--json",
+    "--harness",
+    Y_PI_GSD_HARNESS,
+    "--resume-cmd",
+    Y_PI_GSD_RESUME_CMD,
+    `--title=${input.title}`,
+  ];
+  if (input.supersedes) argv.push(`--supersedes=${input.supersedes}`);
+  const { run, failure } = await callOp("create", argv, callOpts, input.body);
+  if (failure || !run) return failure ?? badOutput("create", "no output");
+  const env = parseEnvelope(run.stdout);
+  if (!env.ok) return badOutput("create", env.reason);
+  const entry = parseHandoffEntry(env.result);
+  if (!entry) return badOutput("create", "result is not a valid handoff entry");
+  return { ok: true, value: entry };
+}
