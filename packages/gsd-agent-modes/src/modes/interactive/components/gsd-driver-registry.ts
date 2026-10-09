@@ -5,7 +5,7 @@
 // (RD-RESEARCH-OPEN 3).
 
 import { execFile as nodeExecFile } from "node:child_process";
-import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -75,9 +75,18 @@ export function validateRegistryRow(raw: unknown): SessionRegistryEntry | null {
 	return row;
 }
 
-function readExactly(path: string, size: number): string {
+type BoundedRead = { kind: "text"; text: string } | { kind: "over" };
+
+/**
+ * Open first and take the size from the DESCRIPTOR (`fstat`), not from the path. mcp-server replaces the
+ * registry with temp-file + rename, so a path-level `stat` followed by an `open` could straddle a rename and
+ * read only the old size of a larger new file, truncating the JSON into a spurious "parse failed".
+ */
+function readBounded(path: string): BoundedRead {
 	const fd = openSync(path, "r");
 	try {
+		const size = fstatSync(fd).size;
+		if (size > MAX_REGISTRY_BYTES) return { kind: "over" };
 		const buffer = Buffer.alloc(size);
 		let offset = 0;
 		while (offset < size) {
@@ -85,7 +94,7 @@ function readExactly(path: string, size: number): string {
 			if (n === 0) break;
 			offset += n;
 		}
-		return buffer.toString("utf8", 0, offset);
+		return { kind: "text", text: buffer.toString("utf8", 0, offset) };
 	} finally {
 		try {
 			closeSync(fd);
@@ -101,19 +110,13 @@ function readExactly(path: string, size: number): string {
  * trusted is `{ kind: "unreadable" }` with a short `why`. Invalid rows are dropped individually.
  */
 export function readDriverRegistry(path: string = driverRegistryPath()): DriverRegistryRead {
-	let size: number;
-	try {
-		size = statSync(path).size;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return { kind: "ok", entries: [] };
-		return { kind: "unreadable", why: "read failed" };
-	}
-	if (size > MAX_REGISTRY_BYTES) return { kind: "unreadable", why: "over size cap" };
-
 	let text: string;
 	try {
-		text = readExactly(path, size);
-	} catch {
+		const read = readBounded(path);
+		if (read.kind === "over") return { kind: "unreadable", why: "over size cap" };
+		text = read.text;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return { kind: "ok", entries: [] };
 		return { kind: "unreadable", why: "read failed" };
 	}
 
