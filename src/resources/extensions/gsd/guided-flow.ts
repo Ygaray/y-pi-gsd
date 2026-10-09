@@ -2078,6 +2078,13 @@ export async function showSmartEntry(
       } catch (e) {
         logWarning("guided", `stale paused-session DB cleanup failed: ${(e as Error).message}`, { file: "guided-flow.ts" });
       }
+      // HANDOFF-01 D-06 / DP-2: drop the handoff registered for the stale pause (fail-open, D-09).
+      try {
+        const { closeStoredHandoff } = await import("./handoff-record.js");
+        await closeStoredHandoff("drop", basePath, { requirePausedSessionLink: true });
+      } catch (e) {
+        logWarning("guided", `handoff drop failed: ${(e as Error).message}`, { file: "guided-flow.ts" });
+      }
     }
   } else if (interrupted.classification === "recoverable") {
     if (interrupted.lock) clearLock(basePath);

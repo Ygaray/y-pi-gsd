@@ -154,3 +154,99 @@ test("HANDOFF-01 close tracer: a read-only doctor run touches neither the record
   assert.equal(rec.readStoredHandoff()?.id, HANDOFF_ID, "record preserved");
   assert.ok(kv.getRuntimeKv("global", "", interrupted.PAUSED_SESSION_KV_KEY), "paused_session preserved");
 });
+
+// ─── Structural / ordering guards (auto.ts, guided-flow.ts, interrupted-session.ts) ───
+
+const gsdDir = join(dirname(fileURLToPath(import.meta.url)), "..");
+const autoSrc = readFileSync(join(gsdDir, "auto.ts"), "utf-8");
+const guidedSrc = readFileSync(join(gsdDir, "guided-flow.ts"), "utf-8");
+const interruptedSrc = readFileSync(join(gsdDir, "interrupted-session.ts"), "utf-8");
+
+const TAG_GONE = "paused-session DB cleanup failed (milestone gone/complete)";
+const TAG_SUPERSEDED = "paused-session DB cleanup failed (milestone superseded)";
+const TAG_STALE = "stale paused-session DB cleanup failed";
+const TAG_RESUME = "paused-session DB cleanup failed (resume activation)";
+
+function indexOrFail(src: string, needle: string, from = 0): number {
+  const i = src.indexOf(needle, from);
+  assert.notEqual(i, -1, `not found: ${needle}`);
+  return i;
+}
+
+/** First non-blank, non-comment statement line following `clearPausedSession("<tag>");`. */
+function statementAfterClear(tag: string): string {
+  const call = `clearPausedSession("${tag}");`;
+  const at = indexOrFail(autoSrc, call);
+  const rest = autoSrc.slice(at + call.length).split("\n").map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("//"));
+  return rest[0] ?? "";
+}
+
+test("HANDOFF-01 close: auto.ts declares closePausedSessionHandoff in startAuto after clearPausedSession, lazy-importing closeStoredHandoff with the link gate", () => {
+  const clearAt = indexOrFail(autoSrc, "const clearPausedSession = ");
+  const helperAt = indexOrFail(autoSrc, "const closePausedSessionHandoff = ", clearAt);
+  const body = autoSrc.slice(helperAt, helperAt + 1600);
+  assert.ok(body.includes('import("./handoff-record.js")'), "lazy import");
+  assert.ok(body.includes("closeStoredHandoff("), "calls closeStoredHandoff");
+  assert.ok(body.includes("requirePausedSessionLink: true"), "link gate");
+});
+
+test("HANDOFF-01 close: the three startAuto discard sites drop the handoff directly after the clear", () => {
+  for (const tag of [TAG_GONE, TAG_SUPERSEDED, TAG_STALE]) {
+    assert.equal(statementAfterClear(tag), 'await closePausedSessionHandoff("drop");', tag);
+  }
+});
+
+test("HANDOFF-01 close: resume activation clears paused_session, then closes done, then resumes orchestration", () => {
+  const clearAt = indexOrFail(autoSrc, `clearPausedSession("${TAG_RESUME}")`);
+  const doneAt = indexOrFail(autoSrc, 'await closePausedSessionHandoff("done")', clearAt);
+  const resumeAt = indexOrFail(autoSrc, "s.orchestration?.resume()", clearAt);
+  assert.ok(clearAt < doneAt, "done comes after the clear");
+  assert.ok(doneAt < resumeAt, "done comes before orchestration resume");
+  assert.equal(statementAfterClear(TAG_RESUME), 'await closePausedSessionHandoff("done");');
+});
+
+test("HANDOFF-01 close: stopAuto step 12 drops the handoff after deleting paused_session", () => {
+  const start = indexOrFail(autoSrc, "Step 12: Remove paused-session metadata");
+  const end = indexOrFail(autoSrc, "Step 13", start);
+  const slice = autoSrc.slice(start, end);
+  const deleteAt = indexOrFail(slice, "deleteRuntimeKv(");
+  const closeAt = indexOrFail(slice, 'closeStoredHandoff("drop"');
+  assert.ok(deleteAt < closeAt, "drop after the delete");
+  assert.ok(slice.includes("requirePausedSessionLink: true"), "link gate");
+});
+
+test("HANDOFF-01 close: guided-flow stale classification drops the handoff after deleting paused_session", () => {
+  const start = indexOrFail(guidedSrc, 'interrupted.classification === "stale"');
+  const end = indexOrFail(guidedSrc, '} else if (interrupted.classification === "recoverable")', start);
+  const slice = guidedSrc.slice(start, end);
+  const deleteAt = indexOrFail(slice, "deleteRuntimeKv(");
+  const closeAt = indexOrFail(slice, 'closeStoredHandoff("drop", basePath, { requirePausedSessionLink: true })');
+  assert.ok(deleteAt < closeAt, "drop after the delete");
+});
+
+test("HANDOFF-01 close: every added close call in auto.ts and guided-flow.ts sits inside a try block with a catch", () => {
+  const sites: Array<[string, string, string]> = [
+    ["auto.ts helper", autoSrc, "const closePausedSessionHandoff = "],
+    ["auto.ts stopAuto", autoSrc, 'closeStoredHandoff("drop"'],
+    ["guided-flow.ts", guidedSrc, 'closeStoredHandoff("drop"'],
+  ];
+  for (const [label, src, anchor] of sites) {
+    const callAt = indexOrFail(src, anchor);
+    // helper: the try wraps the whole body (anchor is the declaration); others: nearest try before the call
+    const before = src.slice(Math.max(0, callAt - 600), callAt + (anchor.startsWith("const") ? 1600 : 0));
+    const callIdx = anchor.startsWith("const")
+      ? before.indexOf("closeStoredHandoff(")
+      : before.length;
+    assert.ok(callIdx > 0, `${label}: call located`);
+    const tryAt = before.lastIndexOf("try {", callIdx);
+    assert.ok(tryAt !== -1 && tryAt < callIdx, `${label}: try { before the call`);
+    const after = src.slice(callAt, callAt + 1800);
+    assert.ok(/catch\b/.test(after), `${label}: catch after the call`);
+  }
+  // every awaited helper call sits in startAuto, never as a bare un-awaited call
+  assert.equal(/(^|[^t ])closePausedSessionHandoff\(/m.test(autoSrc.replace(/await closePausedSessionHandoff\(/g, "")), false);
+});
+
+test("HANDOFF-01 close: interrupted-session.ts legacy pseudo-milestone cleanup deliberately has no handoff close", () => {
+  assert.equal(/handoff/i.test(interruptedSrc), false);
+});

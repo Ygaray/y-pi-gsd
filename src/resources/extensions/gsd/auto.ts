@@ -2110,6 +2110,13 @@ export async function stopAuto(
     } catch (err) { /* non-fatal */
       logWarning("engine", `paused-session DB delete failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
+    // HANDOFF-01 D-06 / DP-2: stop drops the handoff registered for the cleared pause (fail-open, D-09).
+    try {
+      const { closeStoredHandoff } = await import("./handoff-record.js");
+      await closeStoredHandoff("drop", s.basePath || process.cwd(), { requirePausedSessionLink: true });
+    } catch (err) {
+      logWarning("engine", `handoff drop failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
 
     // ── Step 13: Restore original model + thinking (before reset clears IDs) ──
     try {
@@ -2794,6 +2801,23 @@ export async function startAuto(
     }
   };
 
+  // HANDOFF-01 D-06 / DP-2: close the yahir-handoff entry y-pi-gsd registered for the pause
+  // that was just cleared. Fail-open (D-09): lazy import, own try/catch, never rethrows, so a
+  // missing or failing yahir-handoff never changes resume/discard control flow.
+  const closePausedSessionHandoff = async (outcome: "done" | "drop"): Promise<void> => {
+    try {
+      const { closeStoredHandoff } = await import("./handoff-record.js");
+      const rawSessionId = ctx.sessionManager?.getSessionId?.();
+      await closeStoredHandoff(outcome, s.basePath || base || process.cwd(), {
+        requirePausedSessionLink: true,
+        sessionId: typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : null,
+        onWarning: (message) => ctx.ui.notify(message, "warning"),
+      });
+    } catch (err) {
+      logWarning("session", `handoff ${outcome} failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+  };
+
   if (!s.paused) {
     try {
       const meta = freshStartAssessment.pausedSession ?? readPausedSessionMetadata(base);
@@ -2857,6 +2881,7 @@ export async function startAuto(
           });
           if (resumeRoute.route === "discard") {
             clearPausedSession("paused-session DB cleanup failed (milestone gone/complete)");
+            await closePausedSessionHandoff("drop");
             ctx.ui.notify(
               `Paused milestone ${meta.milestoneId} is ${resumeRoute.reason === "missing" ? "missing" : "already complete"}. Starting fresh.`,
               "info",
@@ -2868,6 +2893,7 @@ export async function startAuto(
             // so clear the row and adopt the active milestone (mirroring
             // shouldAdoptActiveMilestone semantics in auto/orchestrator.ts).
             clearPausedSession("paused-session DB cleanup failed (milestone superseded)");
+            await closePausedSessionHandoff("drop");
             s.currentMilestoneId = resumeRoute.activeMilestoneId;
             s.milestoneLeaseToken = null;
             ctx.ui.notify(
@@ -2910,6 +2936,7 @@ export async function startAuto(
           // Stale paused-session metadata that the assessment chose not to
           // resume — clean it up so the next bootstrap starts fresh.
           clearPausedSession("stale paused-session DB cleanup failed");
+          await closePausedSessionHandoff("drop");
         }
       }
     } catch (err) {
@@ -3119,6 +3146,8 @@ export async function startAuto(
       );
     }
     clearPausedSession("paused-session DB cleanup failed (resume activation)");
+    // HANDOFF-01 SC3/D-06: close "done" only after the clear and before orchestration resume
+    await closePausedSessionHandoff("done");
     pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: s.stepMode ? "Step-mode resumed." : "Auto-mode resumed.", level: "progress" });
 
     try {
