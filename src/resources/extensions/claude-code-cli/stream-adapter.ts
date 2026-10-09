@@ -2600,22 +2600,42 @@ export function resolveAlertBotSessionContext(
 	};
 }
 
-/** Write (or clear) the alert-bot context on the workflow MCP server's env for this query. */
+function applyAlertBotEnv(target: Record<string, string | undefined>, context: AlertBotSessionContext): void {
+	delete target[ALERT_BOT_UNATTENDED_ENV];
+	delete target[ALERT_BOT_PROJECT_ENV];
+	delete target[ALERT_BOT_ENABLED_ENV];
+	if (context.unattended) target[ALERT_BOT_UNATTENDED_ENV] = "1";
+	target[ALERT_BOT_PROJECT_ENV] = context.project;
+	if (!context.enabled) target[ALERT_BOT_ENABLED_ENV] = "0";
+}
+
+/**
+ * Write (or clear) the alert-bot context for this query.
+ *
+ * Primary channel is the spawned claude process env (`sdkOptions.env`, merged over process.env):
+ * stdio MCP servers inherit it whether gsd-workflow is declared in the project .mcp.json (the
+ * normal y-pi-gsd case, where it is NOT in `sdkOptions.mcpServers`) or injected via the SDK.
+ * When the server IS injected, its explicit `env` overrides the inherited one, so it is kept in
+ * sync too. Stale values from the parent env are always cleared first.
+ */
 export function injectAlertBotSessionContext(
 	sdkOptions: Record<string, unknown>,
 	workflowServerName: string | undefined,
 	context: AlertBotSessionContext,
 ): void {
+	const childEnv: Record<string, string | undefined> = {
+		...(isRecord(sdkOptions.env) ? sdkOptions.env as NodeJS.ProcessEnv : process.env),
+	};
+	applyAlertBotEnv(childEnv, context);
+	sdkOptions.env = childEnv;
+
 	if (!workflowServerName || !isRecord(sdkOptions.mcpServers)) return;
 	const workflowServer = sdkOptions.mcpServers[workflowServerName];
 	if (!isRecord(workflowServer) || typeof workflowServer.command !== "string") return;
-	const serverEnv = { ...(isStringRecord(workflowServer.env) ? workflowServer.env : {}) };
-	delete serverEnv[ALERT_BOT_UNATTENDED_ENV];
-	delete serverEnv[ALERT_BOT_PROJECT_ENV];
-	delete serverEnv[ALERT_BOT_ENABLED_ENV];
-	if (context.unattended) serverEnv[ALERT_BOT_UNATTENDED_ENV] = "1";
-	serverEnv[ALERT_BOT_PROJECT_ENV] = context.project;
-	if (!context.enabled) serverEnv[ALERT_BOT_ENABLED_ENV] = "0";
+	const serverEnv: Record<string, string | undefined> = {
+		...(isStringRecord(workflowServer.env) ? workflowServer.env : {}),
+	};
+	applyAlertBotEnv(serverEnv, context);
 	sdkOptions.mcpServers = {
 		...sdkOptions.mcpServers,
 		[workflowServerName]: { ...workflowServer, env: serverEnv },
