@@ -3,9 +3,11 @@
 // written by mcp-server) for the interactive TUI. This module never writes, renames, quarantines or
 // signals anything: a corrupt registry reads as "unreadable", never a `.corrupt-*` rename (RD-RESEARCH-OPEN 3).
 
+import { execFile as nodeExecFile } from "node:child_process";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { SessionRegistryEntry } from "@opengsd/contracts";
 
 export const DRIVER_REGISTRY_FILENAME = "session-instances.json";
@@ -167,10 +169,21 @@ function diedUnreconciled(pid: number): DriverLiveness {
 	};
 }
 
+/** A pid whose OS start time is later than the recorded start by more than this has been recycled (mirrors mcp-server). */
+export const PID_START_SKEW_MS = 60_000;
+/** Mirrors mcp-server's INIT_TIMEOUT_MS (not imported - agent-modes must not depend on the MCP server package). */
+export const DRIVER_INIT_TIMEOUT_MS = 30_000;
+/** Extra tolerance on top of the init timeout before a `starting` row is called stale. */
+export const DRIVER_STARTING_GRACE_MS = 15_000;
+
 /**
- * Classify one registry row. A tombstone (`exit` present) is died with its persisted reason and its pid
- * is never probed. A live claim whose pid is dead is died-unreconciled. Task 2 adds the recycle and
- * stale branches.
+ * Classify one registry row (pure; all process facts come from `ctx`).
+ *
+ * H0 only (RD-RESEARCH-OPEN 1): "stale" means the supervising MCP server (`ownerPid`) is gone, or the row is
+ * stuck in `starting` past the init timeout plus grace. A row without `ownerPid` is never stale. Wedged-but-alive
+ * driver detection is out of scope - "running" means the process is alive and supervised, not making progress.
+ * The row's `status` field is never trusted for liveness. A tombstone (`exit` present) is died with its persisted
+ * reason and its pid is never probed.
  */
 export function classifyDriverRow(row: SessionRegistryEntry, ctx: ClassifyContext): DriverLiveness {
 	if (row.exit !== undefined) {
@@ -188,6 +201,122 @@ export function classifyDriverRow(row: SessionRegistryEntry, ctx: ClassifyContex
 	if (!isProbablePid(row.pid) || !ctx.isPidAlive(row.pid)) return diedUnreconciled(row.pid);
 
 	const recordedMs = Date.parse(row.startTime);
+	const startMs = ctx.getStartTimeMs(row.pid);
+	if (Number.isFinite(recordedMs) && startMs !== null && startMs > recordedMs + PID_START_SKEW_MS) {
+		return diedUnreconciled(row.pid);
+	}
+
 	const sinceMs = Number.isFinite(recordedMs) && ctx.nowMs - recordedMs >= 0 ? ctx.nowMs - recordedMs : null;
+
+	if (row.ownerPid !== undefined && isProbablePid(row.ownerPid) && !ctx.isOwnerAlive(row.ownerPid)) {
+		return { kind: "stale", why: "supervisor-gone", sinceMs };
+	}
+
+	if (
+		row.status === "starting" &&
+		Number.isFinite(recordedMs) &&
+		ctx.nowMs - recordedMs > DRIVER_INIT_TIMEOUT_MS + DRIVER_STARTING_GRACE_MS
+	) {
+		return { kind: "stale", why: "starting-timeout", sinceMs: ctx.nowMs - recordedMs };
+	}
+
 	return { kind: "running", sinceMs };
+}
+
+/** A cached OS start time is re-validated after this long. */
+export const START_TIME_REVALIDATE_MS = 30_000;
+/** Hard ceiling on one `ps` probe. */
+export const START_TIME_PROBE_TIMEOUT_MS = 2_000;
+
+export interface DriverProcessProbes {
+	isPidAlive(pid: number): boolean;
+	isOwnerAlive(ownerPid: number): boolean;
+	getStartTimeMs(pid: number): number | null;
+	prefetchStartTimes(pids: readonly number[]): Promise<void>;
+}
+
+export interface ProcessProbeOptions {
+	kill?: (pid: number, signal: 0) => void;
+	execFile?: (
+		file: string,
+		args: readonly string[],
+		opts: { env: NodeJS.ProcessEnv; timeout: number },
+	) => Promise<{ stdout: string }>;
+	now?: () => number;
+}
+
+const execFileAsync = promisify(nodeExecFile);
+
+function defaultExecFile(
+	file: string,
+	args: readonly string[],
+	opts: { env: NodeJS.ProcessEnv; timeout: number },
+): Promise<{ stdout: string }> {
+	return execFileAsync(file, [...args], { env: opts.env, timeout: opts.timeout, encoding: "utf8" });
+}
+
+/**
+ * Real process probes for the TUI timer. Liveness is signal 0 only (EPERM counts as alive). The OS start time
+ * comes from an async, timeout-bounded `ps` probe whose result is cached per pid and re-validated after
+ * START_TIME_REVALIDATE_MS; `getStartTimeMs` only ever reads that cache, so classification never blocks the
+ * event loop. An unavailable start time (null) fails open to signal-0 liveness.
+ */
+export function createProcessProbes(options: ProcessProbeOptions = {}): DriverProcessProbes {
+	const kill = options.kill ?? ((pid: number, signal: 0) => process.kill(pid, signal));
+	const exec = options.execFile ?? defaultExecFile;
+	const now = options.now ?? Date.now;
+	const cache = new Map<number, { ms: number | null; fetchedAt: number }>();
+	const inFlight = new Map<number, Promise<void>>();
+
+	function signalZero(pid: number): boolean {
+		if (!isProbablePid(pid)) return false;
+		try {
+			kill(pid, 0);
+			return true;
+		} catch (error) {
+			return (error as NodeJS.ErrnoException | null)?.code !== "ESRCH";
+		}
+	}
+
+	function fresh(pid: number): { ms: number | null; fetchedAt: number } | undefined {
+		const entry = cache.get(pid);
+		if (entry && now() - entry.fetchedAt < START_TIME_REVALIDATE_MS) return entry;
+		return undefined;
+	}
+
+	async function fetchStartTime(pid: number): Promise<void> {
+		let ms: number | null = null;
+		try {
+			const { stdout } = await exec("ps", ["-p", String(pid), "-o", "lstart="], {
+				env: { ...process.env, LC_ALL: "C" },
+				timeout: START_TIME_PROBE_TIMEOUT_MS,
+			});
+			const parsed = Date.parse(stdout.trim());
+			ms = Number.isFinite(parsed) ? parsed : null;
+		} catch {
+			ms = null;
+		}
+		cache.set(pid, { ms, fetchedAt: now() });
+	}
+
+	return {
+		isPidAlive: signalZero,
+		isOwnerAlive: signalZero,
+		getStartTimeMs(pid) {
+			return fresh(pid)?.ms ?? null;
+		},
+		async prefetchStartTimes(pids) {
+			const pending: Promise<void>[] = [];
+			for (const pid of pids) {
+				if (!isProbablePid(pid) || fresh(pid)) continue;
+				let promise = inFlight.get(pid);
+				if (!promise) {
+					promise = fetchStartTime(pid).finally(() => inFlight.delete(pid));
+					inFlight.set(pid, promise);
+				}
+				pending.push(promise);
+			}
+			await Promise.all(pending);
+		},
+	};
 }
