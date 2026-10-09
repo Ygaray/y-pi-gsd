@@ -20,6 +20,28 @@ export function showError(host: InteractiveModeDelegateHost, errorMessage: strin
 	host.ui.requestRender();
 }
 
+/**
+ * Driver death / stop-failure / unavailable alerts (Phase 42). Unlike showError this never sets
+ * host.lastBlockingError and never adds an "Error:" prefix, so the GSD AUTO status is not flipped to
+ * blocked by a driver death (D-02). Never modal, never a bell or OSC sequence.
+ */
+export function showNonBlockingAlert(
+	host: InteractiveModeDelegateHost,
+	headline: string,
+	details: readonly string[] = [],
+): void {
+	const colon = headline.indexOf(":");
+	const emphasised = colon === -1 ? headline : headline.slice(0, colon + 1);
+	const rest = colon === -1 ? "" : headline.slice(colon + 1);
+	const lines = [theme.fg("error", theme.bold(emphasised) + rest)];
+	for (const detail of details) {
+		lines.push(theme.fg("dim", detail));
+	}
+	host.chatContainer.addChild(new Spacer(1));
+	host.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
+	host.ui.requestRender();
+}
+
 export function clearBlockingError(host: InteractiveModeDelegateHost): void {
 	host.lastBlockingError = undefined;
 	renderBlockingErrorBanner(host.blockingErrorContainer, undefined);

@@ -217,7 +217,7 @@ export class InteractiveMode {
 		// re-parents its children on every call. The timer starts after init (requestRender is gated on it).
 		this.driverLivenessMonitor = new DriverLivenessMonitor({
 			projectRoot: findDriverProjectRoot(process.cwd()),
-			onAlert: () => {}, // Task 2 routes alerts to showDriverAlert
+			onAlert: (alert) => this.showDriverAlert(alert.headline, alert.details),
 		});
 		this.driverLivenessWidget = new DriverLivenessWidget(this.driverLivenessMonitor);
 		this.statusContainer = new Container();
@@ -425,6 +425,11 @@ export class InteractiveMode {
 
 	showWarning(warningMessage: string): void {
 		uiMessaging.showWarning(this, warningMessage);
+	}
+
+	/** Driver death / stop-failure / unavailable alert: non-blocking, never touches lastBlockingError (D-02). */
+	showDriverAlert(headline: string, details: readonly string[] = []): void {
+		uiMessaging.showNonBlockingAlert(this, headline, details);
 	}
 
 	showSuccess(successMessage: string): void {
