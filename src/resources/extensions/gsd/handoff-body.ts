@@ -191,7 +191,8 @@ export function buildHandoffTitle(input: HandoffBodyInput): string {
   );
   const subject = input.paused?.unitId || (ids.length > 0 ? ids.join("/") : input.projectName);
   const milestoneTitle = input.milestone?.title ? ` — ${input.milestone.title}` : "";
-  return oneLine(`y-pi-gsd paused: ${subject}${milestoneTitle}`, HANDOFF_TITLE_MAX);
+  // The title travels separately from the body (argv, manifest, ls, notice), so it needs its own redaction.
+  return oneLine(redactSecrets(sanitizeCliText(`y-pi-gsd paused: ${subject}${milestoneTitle}`)), HANDOFF_TITLE_MAX);
 }
 
 // ─── Assembly ───────────────────────────────────────────────────────────────

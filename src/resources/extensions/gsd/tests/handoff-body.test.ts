@@ -138,6 +138,17 @@ test("HANDOFF-01 body: every input combination yields the five canonical section
   for (const [label, inp] of Object.entries(combos)) assertValid(buildHandoffBody(inp).body, label);
 });
 
+test("HANDOFF-01 body: a secret-shaped value in the title inputs is redacted from the title and the body (WR-02)", () => {
+  const secret = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
+  const input = { ...FULL(), milestone: { id: "M001", title: `Rotate ${secret}` } };
+  const title = buildHandoffTitle(input);
+  assert.ok(!title.includes(secret));
+  assert.ok(title.includes("«redacted»"));
+  const built = buildHandoffBody(input);
+  assert.ok(!built.title.includes(secret));
+  assert.ok(!built.body.includes(secret));
+});
+
 test("HANDOFF-01 body: full state with a paused session names the unit, the resume commands and a bounded title", () => {
   const { title, body } = buildHandoffBody(FULL());
   const state = parseSections(body).text["State"];
