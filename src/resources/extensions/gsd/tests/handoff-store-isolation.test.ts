@@ -74,3 +74,11 @@ test("HANDOFF-01 isolation: a non-test run through resolve-ts.mjs is not redirec
   assert.ok(asTest.root?.includes("gsd-test-yahir-handoff-"), `test-named entry is isolated: ${String(asTest.root)}`);
   assert.ok(asTest.state?.includes("gsd-test-yahir-handoff-"), `test-named entry is isolated: ${String(asTest.state)}`);
 });
+
+test("HANDOFF-01 isolation: the compiled-test preload isolates the store too", () => {
+  const plain = probe(DIST_TEST_RESOLVE, "probe.mjs");
+  assert.deepEqual(plain, { root: null, state: null });
+  const asTest = probe(DIST_TEST_RESOLVE, "probe.test.mjs");
+  assert.ok(asTest.root?.includes("gsd-test-yahir-handoff-"), `isolated: ${String(asTest.root)}`);
+  assert.ok(asTest.state?.includes("gsd-test-yahir-handoff-"), `isolated: ${String(asTest.state)}`);
+});

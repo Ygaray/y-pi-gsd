@@ -9,7 +9,7 @@
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { builtinModules, createRequire, registerHooks } from 'node:module';
 import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -23,6 +23,29 @@ mkdirSync(join(gitTemplateDir, 'hooks'), { recursive: true });
 mkdirSync(join(gitTemplateDir, 'info'), { recursive: true });
 writeFileSync(join(gitTemplateDir, 'info', 'exclude'), '');
 process.env.GIT_TEMPLATE_DIR = gitTemplateDir;
+
+// HANDOFF-01 store isolation (SC4, D-12, DP-5): a TEST process must never reach the operator's
+// real yahir-handoff store. Same predicate-guarded block as tests/resolve-ts.mjs (that file is
+// also preloaded for real dev use via scripts/dev-cli.js, so the override only applies to test runs).
+const isHandoffTestRun =
+  Boolean(process.env.NODE_TEST_CONTEXT) ||
+  process.execArgv.some((arg) => arg === '--test' || arg.startsWith('--test-')) ||
+  /\.test\.[cm]?[jt]s$/.test(process.argv[1] ?? '');
+if (isHandoffTestRun) {
+  const handoffTestDir = join(tmpdir(), `gsd-test-yahir-handoff-${process.pid}`);
+  mkdirSync(join(handoffTestDir, 'store'), { recursive: true });
+  mkdirSync(join(handoffTestDir, 'state'), { recursive: true });
+  // Unconditional: a test process must never inherit an operator-set store path.
+  process.env.YAHIR_HANDOFF_ROOT = join(handoffTestDir, 'store');
+  process.env.YAHIR_HANDOFF_STATE = join(handoffTestDir, 'state');
+  process.on('exit', () => {
+    try {
+      rmSync(handoffTestDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  });
+}
 
 // dist-test root — everything compiled lands here
 const DIST_TEST = new URL('../dist-test/', import.meta.url).href;

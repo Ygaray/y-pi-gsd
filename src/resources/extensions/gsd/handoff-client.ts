@@ -130,6 +130,14 @@ export function buildChildEnv(base: NodeJS.ProcessEnv, sessionId: string | null 
 
 // ─── Runner ─────────────────────────────────────────────────────────────────
 
+/** True inside a node:test process (parent or isolated child). */
+export function isTestProcess(): boolean {
+  return (
+    Boolean(process.env.NODE_TEST_CONTEXT) ||
+    process.execArgv.some((arg) => arg === "--test" || arg.startsWith("--test-"))
+  );
+}
+
 /**
  * Async, result-returning spawn of yahir-handoff. The returned promise never rejects and
  * always settles: SIGTERM at the timeout, then SIGKILL plus a forced result after a grace
@@ -154,6 +162,17 @@ export const runYahirHandoff: HandoffRunner = (argv, opts) =>
       spawnError: code,
     });
     try {
+      // Runtime belt (DP-5, T-45-02): under node:test never spawn without an isolated store.
+      if (isTestProcess() && (!opts.env.YAHIR_HANDOFF_ROOT || !opts.env.YAHIR_HANDOFF_STATE)) {
+        finish({
+          ok: false,
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          refused: "test run without an isolated yahir-handoff store (YAHIR_HANDOFF_ROOT/YAHIR_HANDOFF_STATE unset)",
+        });
+        return;
+      }
       let cwdIsDir = false;
       try {
         cwdIsDir = statSync(opts.cwd).isDirectory();
@@ -276,18 +295,102 @@ export function parseHandoffEntry(value: unknown): HandoffEntry | null {
   };
 }
 
-// ─── Ops ────────────────────────────────────────────────────────────────────
+// ─── Failure classification ─────────────────────────────────────────────────
 
-interface OpOutcome {
-  run: HandoffRun | null;
-  failure: HandoffFailure | null;
+const EXIT_KINDS: Record<number, HandoffFailureKind> = {
+  1: "internal",
+  2: "usage",
+  3: "conflict",
+  6: "not-allowed",
+  9: "not-found",
+  11: "busy",
+  130: "interrupted",
+};
+
+function tailChars(text: string, n: number): string {
+  const t = text.trim();
+  return t.length > n ? t.slice(t.length - n) : t;
 }
 
-/** Tracer form: any non-ok run is a generic internal failure (Task 2 replaces this mapping). */
-async function callOp(op: string, argv: readonly string[], callOpts: HandoffCallOpts, input?: string): Promise<OpOutcome> {
-  const env = buildChildEnv(callOpts.env ?? process.env, callOpts.sessionId);
+/**
+ * Map a non-ok run to one typed, sanitized failure (null when the run succeeded). A missing
+ * cwd carries a placeholder message; the caller, which knows the cwd, refines it.
+ */
+export function classifyHandoffRun(op: string, run: HandoffRun): HandoffFailure | null {
+  if (run.ok) return null;
+  const fail = (kind: HandoffFailureKind, message: string, code: number | null = null, hint: string | null = null): HandoffFailure => ({
+    ok: false,
+    op,
+    kind,
+    code,
+    message: sanitizeCliText(message),
+    hint: hint === null ? null : sanitizeCliText(hint),
+  });
+  if (run.refused) return fail("refused-test-isolation", run.refused);
+  if (run.spawnError === "CWD_MISSING") return fail("cwd-missing", "project directory does not exist");
+  if (run.spawnError === "ENOENT") return fail("not-installed", "yahir-handoff not on PATH");
+  if (run.spawnError === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return fail("bad-output", "output exceeded 1 MiB");
+  if (run.spawnError) return fail("spawn-error", run.spawnError);
+  if (run.timedOut) return fail("timeout", `yahir-handoff ${op} timed out`);
+  if (typeof run.exitCode === "number") {
+    const kind = EXIT_KINDS[run.exitCode] ?? "unexpected-exit";
+    const cli = parseCliError(run.stderr);
+    if (cli) return fail(kind, cli.message, run.exitCode, cli.hint);
+    return fail(kind, tailChars(run.stderr, 300) || "(no output)", run.exitCode);
+  }
+  return fail("signal", run.signal ?? "unknown signal");
+}
+
+/** One sanitized line describing a failure, for notify/log text. */
+export function describeHandoffFailure(f: HandoffFailure): string {
+  let text: string;
+  switch (f.kind) {
+    case "not-installed":
+      text = "yahir-handoff not on PATH";
+      break;
+    case "cwd-missing":
+      text = `project directory missing (${f.message})`;
+      break;
+    case "timeout":
+      text = `yahir-handoff ${f.op} timed out`;
+      break;
+    case "refused-test-isolation":
+      text = f.message;
+      break;
+    case "bad-output":
+      text = `yahir-handoff ${f.op} returned unusable output (${f.message})`;
+      break;
+    case "signal":
+    case "spawn-error":
+    case "invalid-id":
+      text = `yahir-handoff ${f.op} failed (${f.kind}): ${f.message}`;
+      break;
+    default:
+      text = `yahir-handoff ${f.op} failed (exit ${String(f.code)}, ${f.kind}): ${f.message}`;
+      if (f.hint) text += ` Hint: ${f.hint}`;
+  }
+  return sanitizeCliText(text);
+}
+
+// ─── Ops ────────────────────────────────────────────────────────────────────
+
+function failure(op: string, kind: HandoffFailureKind, message: string): HandoffFailure {
+  return { ok: false, op, kind, code: null, message: sanitizeCliText(message), hint: null };
+}
+
+/**
+ * Run one op through the (injectable) runner and return the parsed envelope result.
+ * Never throws: a rejecting or throwing runner becomes a spawn-error failure.
+ */
+async function callOp(
+  op: string,
+  argv: readonly string[],
+  callOpts: HandoffCallOpts,
+  input?: string,
+): Promise<{ ok: true; result: unknown } | HandoffFailure> {
   let run: HandoffRun;
   try {
+    const env = buildChildEnv(callOpts.env ?? process.env, callOpts.sessionId);
     run = await (callOpts.run ?? runYahirHandoff)(argv, {
       input,
       cwd: callOpts.cwd,
@@ -295,32 +398,28 @@ async function callOp(op: string, argv: readonly string[], callOpts: HandoffCall
       timeoutMs: callOpts.timeoutMs ?? DEFAULT_HANDOFF_TIMEOUT_MS,
     });
   } catch (err) {
-    return {
-      run: null,
-      failure: {
-        ok: false,
-        op,
-        kind: "internal",
-        code: null,
-        message: err instanceof Error ? err.message : String(err),
-        hint: null,
-      },
-    };
+    return failure(op, "spawn-error", err instanceof Error ? err.message : String(err));
   }
-  if (!run.ok) {
-    return {
-      run,
-      failure: { ok: false, op, kind: "internal", code: run.exitCode, message: `yahir-handoff ${op} failed`, hint: null },
-    };
+  const failed = classifyHandoffRun(op, run);
+  if (failed) {
+    if (failed.kind === "cwd-missing") return { ...failed, message: sanitizeCliText(`project directory ${callOpts.cwd} does not exist`) };
+    return failed;
   }
-  return { run, failure: null };
+  const env = parseEnvelope(run.stdout);
+  if (!env.ok) return failure(op, "bad-output", env.reason);
+  return { ok: true, result: env.result };
 }
 
-function badOutput(op: string, reason: string): HandoffFailure {
-  return { ok: false, op, kind: "bad-output", code: null, message: reason, hint: null };
+async function entryOp(op: string, argv: readonly string[], callOpts: HandoffCallOpts, input?: string): Promise<HandoffResult<HandoffEntry>> {
+  const out = await callOp(op, argv, callOpts, input);
+  if (out.ok === false) return out;
+  const entry = parseHandoffEntry(out.result);
+  if (!entry) return failure(op, "bad-output", "result is not a valid handoff entry");
+  return { ok: true, value: entry };
 }
 
 export async function createHandoff(input: CreateHandoffInput, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> {
+  if (input.supersedes && !isValidHandoffId(input.supersedes)) return failure("create", "invalid-id", "not a handoff id");
   const argv = [
     "create",
     "--json",
@@ -331,11 +430,37 @@ export async function createHandoff(input: CreateHandoffInput, callOpts: Handoff
     `--title=${input.title}`,
   ];
   if (input.supersedes) argv.push(`--supersedes=${input.supersedes}`);
-  const { run, failure } = await callOp("create", argv, callOpts, input.body);
-  if (failure || !run) return failure ?? badOutput("create", "no output");
-  const env = parseEnvelope(run.stdout);
-  if (!env.ok) return badOutput("create", env.reason);
-  const entry = parseHandoffEntry(env.result);
-  if (!entry) return badOutput("create", "result is not a valid handoff entry");
-  return { ok: true, value: entry };
+  return entryOp("create", argv, callOpts, input.body);
+}
+
+/** Id-addressed verbs only ever spawn with an explicit, validated id (D-04, D-14). */
+function idOp(verb: "show" | "take" | "done" | "drop", id: string, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> {
+  if (!isValidHandoffId(id)) return Promise.resolve(failure(verb, "invalid-id", "not a handoff id"));
+  return entryOp(verb, [verb, id, "--json"], callOpts);
+}
+
+export const showHandoff = (id: string, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> => idOp("show", id, callOpts);
+export const takeHandoff = (id: string, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> => idOp("take", id, callOpts);
+export const doneHandoff = (id: string, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> => idOp("done", id, callOpts);
+export const dropHandoff = (id: string, callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffEntry>> => idOp("drop", id, callOpts);
+
+/**
+ * Open handoffs for the startup notice. Reads only result.project and result.handoffs[];
+ * the CLI's human-readable rendering field is deliberately never read (D-07).
+ */
+export async function noticeHandoffs(callOpts: HandoffCallOpts): Promise<HandoffResult<HandoffNotice>> {
+  const out = await callOp("notice", ["notice", "--json"], callOpts);
+  if (out.ok === false) return out;
+  const result = out.result;
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    return failure("notice", "bad-output", "result is not an object");
+  }
+  const r = result as Record<string, unknown>;
+  if (!Array.isArray(r.handoffs)) return failure("notice", "bad-output", "result.handoffs is not an array");
+  const handoffs: HandoffEntry[] = [];
+  for (const raw of r.handoffs) {
+    const entry = parseHandoffEntry(raw);
+    if (entry) handoffs.push(entry);
+  }
+  return { ok: true, value: { project: strOrNull(r.project), handoffs } };
 }
