@@ -640,6 +640,19 @@ test("DOCS-01 input: unknown options, empty args and multiple paths are rejected
   }
 });
 
+test("DOCS-01 input (IN-04): a leading-dash file name gets a ./ hint, and ./-name.md publishes", async () => {
+  const root = makeProject();
+  writeFileSync(join(root, "-notes.md"), "# dash\n");
+  const rejected = successRunner();
+  const ctx = await runDoc(root, "-notes.md", { run: rejected.run });
+  assert.match(onlyError(ctx), /Unknown option "-notes\.md" \(.*\.\/-notes\.md\)/);
+  assert.equal(rejected.calls.length, 0);
+  const ok = successRunner();
+  const ctx2 = await runDoc(root, "./-notes.md", { run: ok.run });
+  assert.equal(ctx2.notifications[0].level, "success", ctx2.notifications[0].message);
+  assert.equal(ok.calls[0][2], realpathSync(join(root, "-notes.md")));
+});
+
 test("DOCS-01 input: sanitizeProjectSlug table", () => {
   const { sanitizeProjectSlug } = mods.doc;
   const long = "a1".repeat(40);

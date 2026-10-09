@@ -301,7 +301,10 @@ export function parseDocArgs(args: string): DocArgs {
     if (token === "--keep") {
       keep = true;
     } else if (token.startsWith("-")) {
-      return { ok: false, reason: `Unknown option "${token}". ${DOC_USAGE}` };
+      const dashHint = token.startsWith("--")
+        ? ""
+        : ` (to publish a file whose name starts with "-", prefix it with ./ as in ./${token})`;
+      return { ok: false, reason: `Unknown option "${token}"${dashHint}. ${DOC_USAGE}` };
     } else {
       paths.push(token);
     }
