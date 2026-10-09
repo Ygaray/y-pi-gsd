@@ -1931,6 +1931,18 @@ export async function stopAuto(
       }
     }
 
+    // ── Step 5b: Drop the stored y-pi-gsd handoff while the DB is still open (HANDOFF-01 D-06 / DP-2) ──
+    // closeStoredHandoff reads the ownership record from runtime_kv, so it must run before
+    // Step 6 closes the workflow database (running it at Step 12 was a silent no-op). The
+    // requirePausedSessionLink gate keys off the record's own registration-time hadPausedSession
+    // flag, not the live paused_session row, so it is independent of Step 12's delete. Fail-open (D-09).
+    try {
+      const { closeStoredHandoff } = await import("./handoff-record.js");
+      await closeStoredHandoff("drop", s.basePath || process.cwd(), { requirePausedSessionLink: true });
+    } catch (err) {
+      logWarning("engine", `handoff drop failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+
     // ── Step 6: DB cleanup ──
     if (isDbAvailable()) {
       try {
@@ -2109,13 +2121,6 @@ export async function stopAuto(
       deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
     } catch (err) { /* non-fatal */
       logWarning("engine", `paused-session DB delete failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-    }
-    // HANDOFF-01 D-06 / DP-2: stop drops the handoff registered for the cleared pause (fail-open, D-09).
-    try {
-      const { closeStoredHandoff } = await import("./handoff-record.js");
-      await closeStoredHandoff("drop", s.basePath || process.cwd(), { requirePausedSessionLink: true });
-    } catch (err) {
-      logWarning("engine", `handoff drop failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
 
     // ── Step 13: Restore original model + thinking (before reset clears IDs) ──

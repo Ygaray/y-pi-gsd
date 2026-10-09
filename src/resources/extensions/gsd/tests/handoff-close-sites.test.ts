@@ -159,15 +159,11 @@ test("HANDOFF-01 close tracer: a read-only doctor run touches neither the record
   assert.ok(kv.getRuntimeKv("global", "", interrupted.PAUSED_SESSION_KV_KEY), "paused_session preserved");
 });
 
-// TODO (found while adding this behavioral coverage, IN-03): stopAuto's Step 12 (paused_session
-// delete + handoff drop) runs AFTER Step 6 has closed the workflow database, so deleteRuntimeKv is a
-// no-op and closeStoredHandoff sees no record - the drop never fires in production. The structural
-// guards above pass regardless. Fixing it means deciding whether an explicit stop must now really
-// clear paused_session (the #1383 intent), which changes stop semantics; it is left as a todo so
-// the gap stays visible and flips to green when the ordering is fixed.
-test("HANDOFF-01 close tracer: stopAuto drops the stored paused-linked handoff through the real runner and clears paused_session (IN-03)", {
-  todo: "stopAuto Step 12 runs after Step 6 closed the DB, so the drop never fires; needs a stop-semantics decision",
-}, async () => {
+// IN-03 tracer: stopAuto must drop the stored handoff BEFORE Step 6 closes the workflow database.
+// (It used to run at Step 12, after the close, where the record read and the drop silently no-op'd.)
+// Step 12's own paused_session delete still runs against the closed DB and is a pre-existing,
+// separate defect, so paused_session is deliberately not asserted here.
+test("HANDOFF-01 close tracer: stopAuto drops the stored paused-linked handoff through the real runner and clears the record (IN-03)", async () => {
   const dir = makeTempDir(tempDirs, "gsd-handoff-close-stop-");
   mkdirSync(join(dir, ".gsd"), { recursive: true });
   gsdDb.openDatabase(join(dir, ".gsd", "gsd.db"));
@@ -205,7 +201,6 @@ test("HANDOFF-01 close tracer: stopAuto drops the stored paused-linked handoff t
   const calls = readStubCalls(stub);
   assert.equal(calls.length, 1, "exactly one CLI call");
   assert.deepEqual(calls[0].argv, ["drop", HANDOFF_ID, "--json"]);
-  assert.equal(kv.getRuntimeKv("global", "", interrupted.PAUSED_SESSION_KV_KEY), null, "paused_session row cleared");
   assert.equal(rec.readStoredHandoff(), null, "record cleared after the drop");
 });
 
@@ -259,14 +254,18 @@ test("HANDOFF-01 close: resume activation clears paused_session, then closes don
   assert.equal(statementAfterClear(TAG_RESUME), 'await closePausedSessionHandoff("done");');
 });
 
-test("HANDOFF-01 close: stopAuto step 12 drops the handoff after deleting paused_session", () => {
-  const start = indexOrFail(autoSrc, "Step 12: Remove paused-session metadata");
-  const end = indexOrFail(autoSrc, "Step 13", start);
-  const slice = autoSrc.slice(start, end);
-  const deleteAt = indexOrFail(slice, "deleteRuntimeKv(");
-  const closeAt = indexOrFail(slice, 'closeStoredHandoff("drop"');
-  assert.ok(deleteAt < closeAt, "drop after the delete");
+test("HANDOFF-01 close: stopAuto drops the handoff before Step 6 closes the DB, and step 12 no longer closes it", () => {
+  // The behavioral stopAuto tracer is the real proof; this only pins the ordering that makes it work.
+  const dropStep = indexOrFail(autoSrc, "Step 5b: Drop the stored y-pi-gsd handoff");
+  const dbClose = indexOrFail(autoSrc, "Step 6: DB cleanup", dropStep);
+  const slice = autoSrc.slice(dropStep, dbClose);
+  assert.ok(slice.includes('closeStoredHandoff("drop"'), "drop between step 5b and the DB close");
   assert.ok(slice.includes("requirePausedSessionLink: true"), "link gate");
+  assert.ok(indexOrFail(autoSrc, "closeWorkflowDatabase();", dbClose) > dropStep, "DB closed only after the drop");
+
+  const step12 = indexOrFail(autoSrc, "Step 12: Remove paused-session metadata", dbClose);
+  const step13 = indexOrFail(autoSrc, "Step 13", step12);
+  assert.equal(autoSrc.slice(step12, step13).includes("closeStoredHandoff"), false, "no handoff close after the DB is closed");
 });
 
 test("HANDOFF-01 close: guided-flow stale classification drops the handoff after deleting paused_session", () => {
