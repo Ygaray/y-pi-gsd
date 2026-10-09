@@ -12,6 +12,8 @@ import type { RateLimitStatusRef } from "./rate-limit-status-ref.ts";
 import { createAgentSession } from "./sdk.ts";
 import {
 	buildClaudeAuthStatusInvocation,
+	identityMatchesLogin,
+	loginCandidates,
 	mapDashboardQuotaPayload,
 	parseClaudeAuthStatus,
 	UsageDashboardPoller,
@@ -41,6 +43,7 @@ function okPayload(overrides: Record<string, unknown> = {}): Record<string, unkn
 		status: "ok",
 		stale: false,
 		age_s: 239,
+		claude_org_uuid: "org-test-uuid",
 		used_pct: 99,
 		resets_at: "2030-01-01T00:00:00+00:00",
 		windows: [
@@ -289,5 +292,167 @@ describe("usage dashboard poller (USAGE-01)", () => {
 		} finally {
 			poller.stop();
 		}
+	});
+});
+
+function loginOf(url: string): string | null {
+	return new URL(url).searchParams.get("login");
+}
+
+describe("usage dashboard login matching (D-03 / SC4)", () => {
+	test("D-03 tracer: a 409 on the orgId login retries with the email login and the fingerprint-checked reading reaches the ref", async () => {
+		const ref: RateLimitStatusRef = {};
+		const exec = fakeExec(LOGGED_IN);
+		const fetcher = fakeFetch((call) => {
+			const login = loginOf(fetcher.calls[call - 1].url);
+			if (login === "org-test-uuid") return new Response(JSON.stringify({ detail: "2 matches" }), { status: 409 });
+			return okResponse(okPayload({ claude_email: "me@example.test", claude_org_uuid: "org-shared" }));
+		});
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: exec.impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			assert.equal(ref.current?.weekly?.usedPercent, 29);
+			assert.equal(fetcher.calls.length, 2);
+			assert.equal(notified, 1);
+
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 3);
+			assert.ok(fetcher.calls[2].url.endsWith("?login=me%40example.test"));
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("a 200 whose identity fields do not match the login sent is rejected as misattributed", async () => {
+		const ref: RateLimitStatusRef = {
+			current: { session: { usedPercent: 5, resetsAtEpochSec: 1 }, weekly: null },
+			provider: "claude-code",
+			meta: { session: { source: "dashboard", observedAtMs: Date.now() } },
+		};
+		const exec = fakeExec(LOGGED_IN);
+		const fetcher = fakeFetch(() =>
+			okResponse(
+				okPayload({
+					claude_org_uuid: "other-org",
+					claude_email: "other@example.test",
+					claude_account_uuid: "other-acct",
+				}),
+			),
+		);
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: exec.impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(ref.current?.session, null);
+			assert.equal(ref.current?.weekly, null);
+			assert.equal(notified, 1);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("a misattributed 200 writes nothing into an empty ref", async () => {
+		const ref: RateLimitStatusRef = {};
+		const fetcher = fakeFetch(() => okResponse(okPayload({ claude_org_uuid: "other-org" })));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => assert.fail("must not notify"));
+			await poller.refresh();
+			assert.deepEqual(ref, {});
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("the fingerprint match is case-insensitive", async () => {
+		const ref: RateLimitStatusRef = {};
+		const fetcher = fakeFetch(() => okResponse(okPayload({ claude_org_uuid: "ORG-TEST-UUID" })));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("every request carries one encoded login parameter and nothing else", async () => {
+		const ref: RateLimitStatusRef = {};
+		const stdout = JSON.stringify({ loggedIn: true, orgId: "org+id/1", email: "a@example.test" });
+		const fetcher = fakeFetch((call) =>
+			call === 1 ? new Response("{}", { status: 409 }) : okResponse(okPayload({ claude_email: "a@example.test" })),
+		);
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(stdout).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 2);
+			assert.ok(fetcher.calls[0].url.endsWith("?login=org%2Bid%2F1"));
+			for (const call of fetcher.calls) {
+				assert.deepEqual([...new URL(call.url).searchParams.keys()], ["login"]);
+				assert.ok(!call.url.includes("account_id"));
+				assert.ok(!call.url.includes("fresh"));
+			}
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("every login key answering 409 writes nothing", async () => {
+		const ref: RateLimitStatusRef = {};
+		const fetcher = fakeFetch(() => new Response(JSON.stringify({ detail: "2 matches" }), { status: 409 }));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => assert.fail("must not notify"));
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 2);
+			assert.deepEqual(ref, {});
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("loginCandidates orders orgId, email, accountUuid and de-duplicates case-insensitively", () => {
+		assert.deepEqual(loginCandidates({ orgId: "O", email: "e@x", accountUuid: "A" }), ["O", "e@x", "A"]);
+		assert.deepEqual(loginCandidates({ orgId: "same", email: "SAME", accountUuid: "Same" }), ["same"]);
+		assert.deepEqual(loginCandidates({ email: "e@x" }), ["e@x"]);
+		assert.deepEqual(loginCandidates({}), []);
+	});
+
+	test("identityMatchesLogin compares claude_org_uuid, claude_email and claude_account_uuid case-insensitively", () => {
+		assert.equal(identityMatchesLogin({ claude_org_uuid: "Org-1" }, "org-1"), true);
+		assert.equal(identityMatchesLogin({ claude_email: "ME@x" }, "me@X"), true);
+		assert.equal(identityMatchesLogin({ claude_account_uuid: "acct" }, "ACCT"), true);
+		assert.equal(identityMatchesLogin({ claude_org_uuid: null, claude_email: 5 }, "org-1"), false);
+		assert.equal(identityMatchesLogin([{ claude_org_uuid: "org-1" }], "org-1"), false);
+		assert.equal(identityMatchesLogin(null, "org-1"), false);
+		assert.equal(identityMatchesLogin("org-1", "org-1"), false);
 	});
 });

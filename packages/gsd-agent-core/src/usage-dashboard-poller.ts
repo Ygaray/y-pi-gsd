@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import type { RateLimitWindow } from "./rate-limit-headers.js";
 import {
 	applyDashboardReading,
+	clearDashboardWindows,
 	DASHBOARD_PROVIDER,
 	type DashboardReading,
 	type RateLimitFallbackProducer,
@@ -135,6 +136,31 @@ export function parseClaudeAuthStatus(stdout: string): ClaudeAuthStatus {
 	return { kind: "logged-in", identity };
 }
 
+/** Login keys to try, in order: orgId, email, accountUuid. Non-empty only, de-duplicated case-insensitively. */
+export function loginCandidates(identity: ClaudeIdentity): string[] {
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const value of [identity.orgId, identity.email, identity.accountUuid]) {
+		if (value === undefined || value.length === 0) continue;
+		const folded = value.toLowerCase();
+		if (seen.has(folded)) continue;
+		seen.add(folded);
+		out.push(value);
+	}
+	return out;
+}
+
+/** Account-fingerprint check (CR-03 pattern): a 200 must name the login that was sent. */
+export function identityMatchesLogin(body: unknown, login: string): boolean {
+	if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+	const payload = body as Record<string, unknown>;
+	const wanted = login.toLowerCase();
+	return ["claude_org_uuid", "claude_email", "claude_account_uuid"].some((field) => {
+		const value = payload[field];
+		return typeof value === "string" && value.toLowerCase() === wanted;
+	});
+}
+
 /** Resolves this session's Claude identity through the CLI. Null when it cannot be established. */
 export async function resolveClaudeIdentity(deps: {
 	execFileImpl: ExecFileLike;
@@ -184,6 +210,8 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 	private onChange: (() => void) | undefined;
 	/** undefined = not resolved yet; null = resolved, no identity. Cached for the poller's life (D-03: once). */
 	private identity: ClaudeIdentity | null | undefined;
+	/** The login key that last produced an accepted 200; tried first on later ticks. */
+	private preferredLogin: string | undefined;
 
 	constructor(
 		core: { ref: RateLimitStatusRef; getProvider: () => string | undefined },
@@ -269,24 +297,46 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 		}
 		const identity = this.identity;
 		if (!identity) return delay;
-		const login = identity.orgId ?? identity.email ?? identity.accountUuid;
-		if (login === undefined) return delay;
+		const candidates = loginCandidates(identity);
+		if (candidates.length === 0) return delay;
+		const preferred = this.preferredLogin?.toLowerCase();
+		const ordered = [
+			...candidates.filter((c) => c.toLowerCase() === preferred),
+			...candidates.filter((c) => c.toLowerCase() !== preferred),
+		];
 
-		const url = `${this.baseUrl}${USAGE_DASHBOARD_QUOTA_PATH}?login=${encodeURIComponent(login)}`;
-		const res = await this.fetchImpl(url, {
-			headers: { accept: "application/json" },
-			signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.fetchTimeoutMs)]),
-		});
-		if (gen !== this.generation) return delay;
-		if (!res.ok) return delay;
-		const body: unknown = await res.json();
-		if (gen !== this.generation) return delay;
+		for (const login of ordered) {
+			const url = `${this.baseUrl}${USAGE_DASHBOARD_QUOTA_PATH}?login=${encodeURIComponent(login)}`;
+			const res = await this.fetchImpl(url, {
+				headers: { accept: "application/json" },
+				signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.fetchTimeoutMs)]),
+			});
+			if (gen !== this.generation) return delay;
+			if (res.status === 409) {
+				// More than one account matches this key: try the next one.
+				void res.body?.cancel().catch(() => {});
+				continue;
+			}
+			if (!res.ok) return delay;
+			const body: unknown = await res.json();
+			if (gen !== this.generation) return delay;
+			if (!identityMatchesLogin(body, login)) return this.dropUnvouched(delay);
 
-		const reading = mapDashboardQuotaPayload(body, this.now());
-		if (!reading) return delay;
-		// Switched away from claude-code while the request was in flight.
-		if (this.getProvider() !== DASHBOARD_PROVIDER) return delay;
-		if (applyDashboardReading(this.ref, reading, this.now())) this.onChange?.();
+			const reading = mapDashboardQuotaPayload(body, this.now());
+			if (!reading) return delay;
+			// Switched away from claude-code while the request was in flight.
+			if (this.getProvider() !== DASHBOARD_PROVIDER) return delay;
+			this.preferredLogin = login;
+			if (applyDashboardReading(this.ref, reading, this.now())) this.onChange?.();
+			return delay;
+		}
+		// Every key matched more than one account: no way to tell which one is ours.
+		return this.dropUnvouched(delay);
+	}
+
+	/** The dashboard cannot vouch for this session's account: show nothing rather than a neighbour's numbers. */
+	private dropUnvouched(delay: number): number {
+		if (clearDashboardWindows(this.ref)) this.onChange?.();
 		return delay;
 	}
 }

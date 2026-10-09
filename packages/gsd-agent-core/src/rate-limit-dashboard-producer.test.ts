@@ -43,6 +43,7 @@ function okPayload(session = 8, weekly = 29, ageS = 0): Record<string, unknown> 
 		status: "ok",
 		stale: false,
 		age_s: ageS,
+		claude_org_uuid: "org-test-uuid",
 		windows: [
 			{ name: "5h", used_pct: session, resets_at: null, credit: false },
 			{ name: "weekly", used_pct: weekly, resets_at: null, credit: false },
