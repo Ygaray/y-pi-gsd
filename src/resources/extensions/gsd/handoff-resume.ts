@@ -1,0 +1,126 @@
+// Project/App: gsd-pi
+// File Purpose: the `/gsd resume-work` side of y-pi-gsd's yahir-handoff integration (HANDOFF-01
+// SC3): decides which handoff (if any) a resume takes, takes it only by an explicit validated id
+// (D-04, D-14), and formats its body as prompt context. Never throws; never writes files.
+
+import { sanitizeCliText } from "./commands-doc.js";
+import {
+  describeHandoffFailure,
+  showHandoff,
+  takeHandoff,
+} from "./handoff-client.js";
+import type { HandoffEntry, HandoffRunner } from "./handoff-client.js";
+import { balanceFences, demoteHeadings, oneLine } from "./handoff-body.js";
+import { readStoredHandoff } from "./handoff-record.js";
+
+export const RESUME_WORK_USAGE =
+  "Usage: /gsd resume-work [<handoff-id>]  (no id: resume this project's own handoff; an id: pick up a handoff another harness wrote for any harness)";
+
+/** Hard cap on the handoff text injected into the resume prompt. */
+export const HANDOFF_CONTEXT_MAX_BYTES = 12288;
+
+export type ResumeArgs = { ok: true; id: string | null } | { ok: false; message: string };
+
+export type ResumeDecision =
+  | { kind: "none" }
+  | { kind: "own"; id: string; entry: HandoffEntry; warning?: string }
+  | { kind: "own-stale"; id: string; state: string }
+  | { kind: "own-unavailable"; id: string; warning: string }
+  | { kind: "foreign-any"; id: string; entry: HandoffEntry }
+  | { kind: "refused"; message: string };
+
+export interface ResumeCallOpts {
+  cwd: string;
+  sessionId: string | null;
+  run?: HandoffRunner;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}
+
+// ─── Text helpers ───────────────────────────────────────────────────────────
+
+const encoder = new TextEncoder();
+
+function byteLen(text: string): number {
+  return encoder.encode(text).length;
+}
+
+/** Longest prefix of `text` that fits in `max` UTF-8 bytes (never splits a surrogate pair). */
+function cutBytes(text: string, max: number): string {
+  if (max <= 0) return "";
+  const head = text.length > max ? text.slice(0, max) : text;
+  if (byteLen(head) <= max) return head;
+  let lo = 0;
+  let hi = head.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (byteLen(head.slice(0, mid)) <= max) lo = mid;
+    else hi = mid - 1;
+  }
+  let out = head.slice(0, lo);
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1);
+  return out;
+}
+
+/** Demote headings, balance fences and fit the result into `budget` bytes. */
+function fitBody(text: string, budget: number): string {
+  const demoted = demoteHeadings(text).trimEnd();
+  const whole = balanceFences(demoted);
+  if (byteLen(whole) <= budget) return whole;
+  let reserve = 64;
+  for (;;) {
+    const cut = balanceFences(cutBytes(demoted, Math.max(0, budget - reserve)).trimEnd());
+    const out = `${cut}\n[truncated]`;
+    if (byteLen(out) <= budget) return out;
+    if (reserve >= budget) return "[truncated]";
+    reserve *= 2;
+  }
+}
+
+// ─── Args ───────────────────────────────────────────────────────────────────
+
+export function parseResumeArgs(args: string): ResumeArgs {
+  const tokens = args.trim().split(/\s+/).filter((t) => t !== "");
+  if (tokens.length === 0) return { ok: true, id: null };
+  return { ok: true, id: tokens[0] };
+}
+
+// ─── Resolution ─────────────────────────────────────────────────────────────
+
+/**
+ * Decide which handoff this resume takes. Never throws; any unexpected error means "no handoff"
+ * so the resume proceeds exactly as before (D-09).
+ */
+export async function resolveResumeHandoff(explicitId: string | null, callOpts: ResumeCallOpts): Promise<ResumeDecision> {
+  try {
+    const stored = readStoredHandoff();
+    if (explicitId === null && stored === null) return { kind: "none" };
+    if (stored !== null && (explicitId === null || explicitId === stored.id)) {
+      const show = await showHandoff(stored.id, callOpts);
+      if (show.ok && show.value.state === "open") {
+        const take = await takeHandoff(stored.id, callOpts);
+        return { kind: "own", id: stored.id, entry: take.ok ? take.value : show.value };
+      }
+      if (!show.ok) return { kind: "own-unavailable", id: stored.id, warning: describeHandoffFailure(show) };
+      return { kind: "own-stale", id: stored.id, state: show.value.state };
+    }
+    return { kind: "none" };
+  } catch {
+    return { kind: "none" };
+  }
+}
+
+// ─── Context formatting ─────────────────────────────────────────────────────
+
+export function formatOwnHandoffContext(entry: HandoffEntry): string {
+  const head =
+    `This resume took y-pi-gsd's own handoff ${entry.id} ("${oneLine(entry.title, 100)}"), ` +
+    "registered at pause time from canonical project state:\n\n";
+  const body = fitBody(sanitizeCliText(entry.body ?? "(no body)"), HANDOFF_CONTEXT_MAX_BYTES - byteLen(head));
+  return head + body;
+}
+
+export function formatNoHandoffContext(): string {
+  return "No yahir-handoff entry was taken for this resume; rely on .gsd/HANDOFF.md and canonical state.";
+}

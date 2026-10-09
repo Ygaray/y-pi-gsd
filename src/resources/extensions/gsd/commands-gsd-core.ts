@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 
 import { loadPrompt } from "./prompt-loader.js";
 import type { PauseHandoffDeps } from "./handoff-lifecycle.js";
+import type { HandoffRunner } from "./handoff-client.js";
 import { currentDirectoryRoot, GSDNoProjectError, projectRoot, withCommandCwd } from "./commands/context.js";
 import { getUnmergedMilestoneBlockMessageForBase } from "./unmerged-milestone-guard.js";
 import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
@@ -77,7 +78,7 @@ export const GSD_CORE_IMPLEMENTED_CATALOG: ReadonlyArray<{ cmd: string; desc: st
   { cmd: "ultraplan-phase", desc: "Extended-reasoning plan pass, review, then import" },
   { cmd: "autonomous", desc: "Run all remaining lifecycle work continuously" },
   { cmd: "pause-work", desc: "Create a context handoff (registered with yahir-handoff) when pausing mid-stream" },
-  { cmd: "resume-work", desc: "Resume work with full context restoration" },
+  { cmd: "resume-work", desc: "Resume work with full context restoration (takes this project's yahir-handoff; optional <handoff-id>)" },
   { cmd: "manager", desc: "Interactive command center for multiple milestones" },
   { cmd: "phase", desc: "CRUD for milestone queue ordering" },
   { cmd: "thread", desc: "Persistent context threads for cross-session work" },
@@ -168,11 +169,12 @@ interface DispatchOptions {
   notify?: string;
 }
 
+/** Returns true when the prompt was handed to the agent, false when the dispatch failed. */
 function dispatchPrompt(
   args: DispatchOptions,
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
-): void {
+): boolean {
   ctx.ui.notify(args.notify ?? `Running ${args.verb.toLowerCase()}…`, "info");
   try {
     const prompt = loadPrompt(args.prompt, args.vars ?? {});
@@ -180,9 +182,11 @@ function dispatchPrompt(
       { customType: args.customType, content: prompt, display: false },
       { triggerTurn: true },
     );
+    return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     ctx.ui.notify(`Failed to dispatch ${args.verb.toLowerCase()}: ${msg}`, "error");
+    return false;
   }
 }
 
@@ -1084,13 +1088,99 @@ export async function handlePauseWork(
   );
 }
 
-/** /gsd resume-work */
-export async function handleResumeWork(_args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
-  dispatchPrompt(
-    { prompt: "resume-work", customType: "gsd-resume-work", verb: "Resume work" },
-    ctx,
-    pi,
-  );
+/** Injectable seams for /gsd resume-work (tests); production uses the real CLI and dispatcher. */
+export interface ResumeWorkDeps {
+  run?: HandoffRunner;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  dispatchCommand?: (command: string) => Promise<void>;
+}
+
+/**
+ * /gsd resume-work [<handoff-id>]
+ *
+ * HANDOFF-01 SC3: takes this project's own yahir-handoff by its stored id (never at
+ * session_start, never id-less) and resumes from it. Fail-open (D-09): whatever happens with the
+ * handoff, the resume-work prompt is still dispatched exactly once when nothing else resumed.
+ */
+export async function handleResumeWork(
+  args: string,
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  deps: ResumeWorkDeps = {},
+): Promise<void> {
+  let promptDispatched = false;
+  const sendPrompt = (handoffContext: string): boolean => {
+    promptDispatched = true;
+    return dispatchPrompt(
+      { prompt: "resume-work", customType: "gsd-resume-work", verb: "Resume work", vars: { handoffContext } },
+      ctx,
+      pi,
+    );
+  };
+  try {
+    const resume = await import("./handoff-resume.js");
+    const parsed = resume.parseResumeArgs(args);
+    if (!parsed.ok) {
+      ctx.ui.notify(parsed.message, "error");
+      promptDispatched = true;
+      return;
+    }
+
+    let basePath: string | null = null;
+    try {
+      basePath = projectRoot();
+    } catch {
+      basePath = null;
+    }
+    if (basePath === null) {
+      sendPrompt(resume.formatNoHandoffContext());
+      return;
+    }
+    try {
+      const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+      await ensureDbOpen(basePath);
+    } catch {
+      /* a closed DB just means no stored record is readable */
+    }
+    const rawSessionId = (ctx as { sessionManager?: { getSessionId?: () => unknown } }).sessionManager?.getSessionId?.();
+    const sessionId = typeof rawSessionId === "string" && rawSessionId !== "" ? rawSessionId : null;
+    const callOpts = { cwd: basePath, sessionId, run: deps.run, env: deps.env, timeoutMs: deps.timeoutMs };
+
+    const decision = await resume.resolveResumeHandoff(parsed.id, callOpts);
+    if (decision.kind === "own") {
+      const ok = sendPrompt(resume.formatOwnHandoffContext(decision.entry));
+      if (ok) {
+        const { closeStoredHandoff } = await import("./handoff-record.js");
+        await closeStoredHandoff("done", basePath, {
+          sessionId,
+          run: deps.run,
+          env: deps.env,
+          timeoutMs: deps.timeoutMs,
+          onWarning: (m) => ctx.ui.notify(m, "warning"),
+        });
+      }
+      return;
+    }
+    sendPrompt(resume.formatNoHandoffContext());
+  } catch {
+    if (!promptDispatched) {
+      try {
+        dispatchPrompt(
+          {
+            prompt: "resume-work",
+            customType: "gsd-resume-work",
+            verb: "Resume work",
+            vars: { handoffContext: "No yahir-handoff entry was taken for this resume; rely on .gsd/HANDOFF.md and canonical state." },
+          },
+          ctx,
+          pi,
+        );
+      } catch {
+        /* dispatchPrompt reports its own failures */
+      }
+    }
+  }
 }
 
 // ─── Batch 5: project management ─────────────────────────────────────────────
