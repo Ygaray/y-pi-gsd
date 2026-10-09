@@ -250,6 +250,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `on_budget`: boolean — notify when budget thresholds are reached. Default: `true`.
   - `on_milestone`: boolean — notify when a milestone finishes. Default: `true`.
   - `on_attention`: boolean — notify when manual attention is needed. Default: `true`.
+  - `alert_bot`: boolean — tee auto-mode run events (blocked, needs input, milestone complete) to GSD-alert-bot through its `gsd-alert-emit` CLI. Only fires when that CLI is on `PATH`; never under tests or with `GSD_ALERT_DISABLE=1`. Independent of the master `enabled` toggle (like remote notifications) — use `alert_bot: false` to silence it. `needs_input` alerts post the pending question's text to the bot's Discord channel (secrets never go through `ask_user_questions`; they use `secure_env_collect`). Default: `true`.
   - Terminal auto-loop errors persist an `activity/*-auto-crash-note.json` file with error/session metadata; when available, the error notification includes the crash-note path and instructs resuming with `/gsd auto`.
 
 - `cmux`: configures cmux terminal integration when GSD is running inside a cmux workspace. Keys:
@@ -702,6 +703,7 @@ notifications:
   on_budget: true
   on_milestone: true
   on_attention: true
+  alert_bot: true
 ---
 ```
 

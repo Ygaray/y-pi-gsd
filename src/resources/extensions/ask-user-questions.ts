@@ -88,6 +88,7 @@ const AskUserQuestionsParams = Type.Object({
 // same IDs but different text/options are treated as distinct.
 
 import { createHash } from "node:crypto";
+import { QUESTION_CHANNELS, type QuestionPendingEvent } from "./shared/question-events.js";
 
 interface CachedResult {
 	content: { type: "text"; text: string }[];
@@ -323,6 +324,17 @@ export default function AskUserQuestions(pi: ExtensionAPI) {
 			const hasRemote = isRemoteConfigured();
 			if (ctx.hasUI || hasRemote) {
 				await playQuestionBell();
+			}
+			// Announce the pending question; the gsd extension decides whether it is a
+			// needs_input alert (it owns auto-mode state). Best-effort.
+			try {
+				const pending: QuestionPendingEvent = {
+					questions: params.questions.map((q) => ({ id: q.id, question: q.question })),
+					hasUI: ctx.hasUI,
+				};
+				pi.events.emit(QUESTION_CHANNELS.PENDING, pending);
+			} catch {
+				// Best-effort: question rendering must never depend on alert delivery.
 			}
 
 			// Case 1: Both remote and local UI available — race them.

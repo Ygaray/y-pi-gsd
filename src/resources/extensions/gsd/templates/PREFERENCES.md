@@ -78,6 +78,7 @@ notifications:
   on_budget:
   on_milestone:
   on_attention:
+  alert_bot:
 cmux:
   enabled:
   notifications:

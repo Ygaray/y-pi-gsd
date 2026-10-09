@@ -407,6 +407,7 @@ export async function runPreDispatch(
       "success",
       "milestone",
       basename(s.originalBasePath || s.basePath),
+      { alert: "milestone_complete" },
     );
     deps.logCmuxEvent(
       prefs,
@@ -564,6 +565,7 @@ export async function runPreDispatch(
         "success",
         "milestone",
         basename(s.originalBasePath || s.basePath),
+        { alert: "milestone_complete" },
       );
       deps.logCmuxEvent(
         prefs,
@@ -599,7 +601,7 @@ export async function runPreDispatch(
         kind: BLOCKED_RESUME_NOTIFICATION_KIND,
         scope: s.currentMilestoneId ?? "",
       });
-      deps.sendDesktopNotification("GSD", blockedResumeMessage, "warning", "attention", basename(s.originalBasePath || s.basePath));
+      deps.sendDesktopNotification("GSD", blockedResumeMessage, "warning", "attention", basename(s.originalBasePath || s.basePath), { alert: "blocked" });
       deps.logCmuxEvent(prefs, blockedResumeMessage, "warning");
     } else {
       const ids = incomplete.map((m: { id: string }) => m.id).join(", ");
@@ -669,6 +671,7 @@ export async function runPreDispatch(
       "success",
       "milestone",
       basename(s.originalBasePath || s.basePath),
+      { alert: "milestone_complete" },
     );
     deps.logCmuxEvent(
       prefs,
@@ -715,7 +718,7 @@ export async function runPreDispatch(
       kind: BLOCKED_RESUME_NOTIFICATION_KIND,
       scope: mid,
     });
-    deps.sendDesktopNotification("GSD", blockedResumeMessage, "warning", "attention", basename(s.originalBasePath || s.basePath));
+    deps.sendDesktopNotification("GSD", blockedResumeMessage, "warning", "attention", basename(s.originalBasePath || s.basePath), { alert: "blocked" });
     deps.logCmuxEvent(prefs, blockedResumeMessage, "warning");
     debugLog("autoLoop", { phase: "exit", reason: "blocked" });
     deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: ic.nextSeq(), eventType: "terminal", data: { reason: "blocked", blockers: state.blockers } });

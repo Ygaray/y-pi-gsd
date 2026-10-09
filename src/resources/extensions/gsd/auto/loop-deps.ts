@@ -6,6 +6,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
+import type { AlertBotEvent } from "../alert-bot.js";
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
 import type { ErrorContext, IterationData } from "./types.js";
@@ -191,6 +192,7 @@ export interface LoopDeps {
     kind: string,
     category: string,
     projectName?: string,
+    opts?: { alert?: AlertBotEvent },
   ) => void;
   setActiveMilestoneId: (basePath: string, mid: string) => void;
   pruneQueueOrder: (basePath: string, pendingIds: string[]) => void;

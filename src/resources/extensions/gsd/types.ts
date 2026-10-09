@@ -510,6 +510,7 @@ export interface NotificationPreferences {
   on_budget?: boolean; // notify on budget thresholds
   on_milestone?: boolean; // notify when milestone finishes
   on_attention?: boolean; // notify when manual attention needed
+  alert_bot?: boolean; // default true; tee run events to GSD-alert-bot when gsd-alert-emit is on PATH
 }
 
 // ─── Pre-Dispatch Hook Types ──────────────────────────────────────────────
