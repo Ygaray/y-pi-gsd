@@ -225,15 +225,6 @@ function runDocStub(root: string, stub: string, args: string, opts?: { run?: any
   return runDoc(root, args, opts, `${stub}${delimiter}${pathWithoutRealYahirTn()}`);
 }
 
-function recordingRunner(result: Record<string, unknown>) {
-  const calls: string[][] = [];
-  const run = async (argv: readonly string[]) => {
-    calls.push([...argv]);
-    return { ok: false, exitCode: 0, stdout: "", stderr: "", ...result } as any;
-  };
-  return { run, calls };
-}
-
 function okRun(stdout: string) {
   return { ok: true, exitCode: 0, stdout, stderr: "" };
 }
