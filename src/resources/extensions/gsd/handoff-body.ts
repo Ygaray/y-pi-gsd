@@ -62,7 +62,7 @@ export interface BuiltHandoffBody {
 
 const encoder = new TextEncoder();
 
-function byteLen(text: string): number {
+export function byteLen(text: string): number {
   return encoder.encode(text).length;
 }
 
@@ -129,7 +129,7 @@ export function balanceFences(text: string): string {
 }
 
 /** Demote, fence-balance and cap `text` to `budget` bytes; a cut ends with a marker line. */
-function foldText(text: string, budget: number): string {
+export function foldText(text: string, budget: number): string {
   if (budget <= 0) return "";
   const demoted = demoteHeadings(text).trimEnd();
   const whole = balanceFences(demoted);

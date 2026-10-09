@@ -8,7 +8,7 @@ import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { parseCliError, sanitizeCliText } from "./commands-doc.js";
+import { parseCliError, sanitizeCliText, tailChars } from "./commands-doc.js";
 
 export const YAHIR_HANDOFF_BIN = "yahir-handoff";
 /** Default wall-clock budget for one CLI call (SIGTERM at this point). */
@@ -342,11 +342,6 @@ const EXIT_KINDS: Record<number, HandoffFailureKind> = {
   11: "busy",
   130: "interrupted",
 };
-
-function tailChars(text: string, n: number): string {
-  const t = text.trim();
-  return t.length > n ? t.slice(t.length - n) : t;
-}
 
 /**
  * Map a non-ok run to one typed, sanitized failure (null when the run succeeded). A missing

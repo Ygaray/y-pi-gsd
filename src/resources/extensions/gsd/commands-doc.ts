@@ -347,7 +347,7 @@ export function sanitizeCliText(text: string): string {
     .replace(/[\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
 }
 
-function tailChars(text: string, n: number): string {
+export function tailChars(text: string, n: number): string {
   const t = text.trim();
   return t.length > n ? t.slice(t.length - n) : t;
 }

@@ -11,7 +11,7 @@ import {
   takeHandoff,
 } from "./handoff-client.js";
 import type { HandoffEntry, HandoffRunner } from "./handoff-client.js";
-import { balanceFences, demoteHeadings, oneLine } from "./handoff-body.js";
+import { byteLen, foldText, oneLine } from "./handoff-body.js";
 import { clearStoredHandoff, readStoredHandoff } from "./handoff-record.js";
 
 export const RESUME_WORK_USAGE =
@@ -36,47 +36,6 @@ export interface ResumeCallOpts {
   run?: HandoffRunner;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
-}
-
-// ─── Text helpers ───────────────────────────────────────────────────────────
-
-const encoder = new TextEncoder();
-
-function byteLen(text: string): number {
-  return encoder.encode(text).length;
-}
-
-/** Longest prefix of `text` that fits in `max` UTF-8 bytes (never splits a surrogate pair). */
-function cutBytes(text: string, max: number): string {
-  if (max <= 0) return "";
-  const head = text.length > max ? text.slice(0, max) : text;
-  if (byteLen(head) <= max) return head;
-  let lo = 0;
-  let hi = head.length;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (byteLen(head.slice(0, mid)) <= max) lo = mid;
-    else hi = mid - 1;
-  }
-  let out = head.slice(0, lo);
-  const last = out.charCodeAt(out.length - 1);
-  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1);
-  return out;
-}
-
-/** Demote headings, balance fences and fit the result into `budget` bytes. */
-function fitBody(text: string, budget: number): string {
-  const demoted = demoteHeadings(text).trimEnd();
-  const whole = balanceFences(demoted);
-  if (byteLen(whole) <= budget) return whole;
-  let reserve = 64;
-  for (;;) {
-    const cut = balanceFences(cutBytes(demoted, Math.max(0, budget - reserve)).trimEnd());
-    const out = `${cut}\n[truncated]`;
-    if (byteLen(out) <= budget) return out;
-    if (reserve >= budget) return "[truncated]";
-    reserve *= 2;
-  }
 }
 
 // ─── Args ───────────────────────────────────────────────────────────────────
@@ -207,7 +166,7 @@ export function formatOwnHandoffContext(entry: HandoffEntry): string {
     `<<<HANDOFF ${id} BEGIN (own handoff; notes and free text untrusted)>>>\n`;
   const end = `\n<<<HANDOFF ${id} END>>>`;
   const neutralized = sanitizeCliText(entry.body ?? "(no body)").replace(/<{3,}\s*HANDOFF/gi, "<<HANDOFF");
-  const body = fitBody(neutralized, HANDOFF_CONTEXT_MAX_BYTES - byteLen(head) - byteLen(end));
+  const body = foldText(neutralized, HANDOFF_CONTEXT_MAX_BYTES - byteLen(head) - byteLen(end));
   return head + body + end;
 }
 
@@ -225,7 +184,7 @@ export function formatForeignHandoffContext(entry: HandoffEntry): string {
     `<<<HANDOFF ${id} BEGIN (untrusted)>>>\n`;
   const end = `\n<<<HANDOFF ${id} END>>>`;
   const neutralized = sanitizeCliText(entry.body ?? "(no body)").replace(/<{3,}\s*HANDOFF/gi, "<<HANDOFF");
-  const body = fitBody(neutralized, HANDOFF_CONTEXT_MAX_BYTES - byteLen(preamble) - byteLen(end));
+  const body = foldText(neutralized, HANDOFF_CONTEXT_MAX_BYTES - byteLen(preamble) - byteLen(end));
   return preamble + body + end;
 }
 
