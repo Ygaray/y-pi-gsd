@@ -84,11 +84,18 @@ function truncateBytes(text: string, max: number): string {
   return out;
 }
 
+/** First `n` UTF-16 units of `text`, never ending in half of a surrogate pair. */
+export function cutChars(text: string, n: number): string {
+  const out = text.slice(0, Math.max(0, n));
+  const last = out.charCodeAt(out.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? out.slice(0, -1) : out;
+}
+
 /** Sanitize, collapse whitespace to a single line and cut to `max` characters (with an ellipsis). */
 export function oneLine(text: string, max: number): string {
   const flat = sanitizeCliText(String(text)).replace(/\s+/g, " ").trim();
   if (flat.length <= max) return flat;
-  return flat.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+  return cutChars(flat, max - 1).trimEnd() + "…";
 }
 
 /** Multi-line free text: control characters and escape sequences removed, secrets redacted. */

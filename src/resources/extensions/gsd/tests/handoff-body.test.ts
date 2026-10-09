@@ -10,6 +10,7 @@ import {
   buildHandoffBody,
   buildHandoffTitle,
   demoteHeadings,
+  oneLine,
   HANDOFF_BODY_MAX_BYTES,
   HANDOFF_NOTES_MAX_BYTES,
   HANDOFF_SECTIONS,
@@ -291,4 +292,12 @@ test("HANDOFF-01 body: the builder is deterministic for the same input", () => {
   const a = buildHandoffBody({ ...FULL(), notes: { text: "## Gotchas\nx", mtime: MTIME } });
   const b = buildHandoffBody({ ...FULL(), notes: { text: "## Gotchas\nx", mtime: MTIME } });
   assert.deepEqual(a, b);
+});
+
+test("HANDOFF-01 body: char cuts never leave half of a surrogate pair (IN-04)", () => {
+  const smile = "\u{1F600}";
+  const cut = oneLine("a" + smile.repeat(10), 3); // slice(0, 2) would end inside the first emoji
+  assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(cut), `no lone high surrogate: ${JSON.stringify(cut)}`);
+  assert.ok(cut.endsWith("…"));
+  assert.equal(oneLine("short", 10), "short");
 });

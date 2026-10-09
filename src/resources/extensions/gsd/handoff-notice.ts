@@ -8,6 +8,7 @@ import type { ExtensionContext } from "@gsd/pi-coding-agent";
 
 import { sanitizeCliText } from "./commands-doc.js";
 import { isDbAvailable } from "./gsd-db.js";
+import { cutChars } from "./handoff-body.js";
 import { describeHandoffFailure, noticeHandoffs, showHandoff } from "./handoff-client.js";
 import type { HandoffEntry, HandoffRunner } from "./handoff-client.js";
 import { readStoredHandoff } from "./handoff-record.js";
@@ -60,7 +61,7 @@ export function formatHandoffAge(createdAt: string | null, now: Date): string | 
 function cleanTitle(title: string): string {
   const flat = sanitizeCliText(title).replace(/\s+/g, " ").trim();
   if (flat === "") return "(untitled)";
-  return flat.length > NOTICE_TITLE_MAX ? flat.slice(0, NOTICE_TITLE_MAX).trimEnd() : flat;
+  return flat.length > NOTICE_TITLE_MAX ? cutChars(flat, NOTICE_TITLE_MAX).trimEnd() : flat;
 }
 
 function ageSuffix(entry: HandoffEntry, now: Date): string {
