@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PartialMessageBuilder, ZERO_USAGE, mapUsage } from "./partial-builder.js";
 import { createLegacySkillGuardHook, isLegacySkillGuardDisabled } from "./legacy-skill-guard.js";
 import {
@@ -2543,6 +2543,85 @@ function injectMilestoneStatusObservationToken(
 	};
 }
 
+/**
+ * GSD-alert-bot needs_input context for the out-of-process workflow MCP server. That server
+ * serves ask_user_questions for this provider but cannot see auto-mode state, so the host
+ * tells it per query (env is fixed when the SDK spawns the server for this query). Names must
+ * match packages/mcp-server/src/alert-bot.ts.
+ */
+export const ALERT_BOT_UNATTENDED_ENV = "GSD_UNATTENDED";
+export const ALERT_BOT_PROJECT_ENV = "GSD_ALERT_PROJECT";
+export const ALERT_BOT_ENABLED_ENV = "GSD_ALERT_BOT";
+
+export interface AlertBotSessionContext {
+	/** Nobody is watching: auto-mode active for this project, headless (GSD_HEADLESS=1), or no UI. */
+	unattended: boolean;
+	/** Project slug: the original project root, not an auto worktree. */
+	project: string;
+	/** notifications.alert_bot preference (default true). */
+	enabled: boolean;
+}
+
+export function resolveAlertBotSessionContext(
+	projectRoot: string,
+	hasUI: boolean,
+	deps: {
+		env?: NodeJS.ProcessEnv;
+		autoActive?: () => boolean;
+		autoRoots?: () => Array<string | undefined>;
+		alertBotEnabled?: () => boolean;
+	} = {},
+): AlertBotSessionContext {
+	const env = deps.env ?? process.env;
+	let autoForThisProject = false;
+	let project = basename(projectRoot);
+	try {
+		const active = (deps.autoActive ?? isAutoActive)();
+		const roots = (deps.autoRoots ?? (() => [autoSession.originalBasePath, autoSession.basePath]))();
+		autoForThisProject = active && roots.some(
+			(candidate) => candidate && resolveWorkflowMcpProjectRoot(candidate) === projectRoot,
+		);
+		const original = roots[0];
+		if (autoForThisProject && original) project = basename(original);
+	} catch {
+		// Treat unreadable auto state as "not auto"; headless/no-UI still mark unattended.
+	}
+	let enabled = true;
+	try {
+		enabled = (deps.alertBotEnabled ?? (() =>
+			loadEffectiveGSDPreferences(projectRoot)?.preferences.notifications?.alert_bot !== false))();
+	} catch {
+		// Default on, like the in-process alert-bot path.
+	}
+	return {
+		unattended: autoForThisProject || env.GSD_HEADLESS === "1" || !hasUI,
+		project,
+		enabled,
+	};
+}
+
+/** Write (or clear) the alert-bot context on the workflow MCP server's env for this query. */
+export function injectAlertBotSessionContext(
+	sdkOptions: Record<string, unknown>,
+	workflowServerName: string | undefined,
+	context: AlertBotSessionContext,
+): void {
+	if (!workflowServerName || !isRecord(sdkOptions.mcpServers)) return;
+	const workflowServer = sdkOptions.mcpServers[workflowServerName];
+	if (!isRecord(workflowServer) || typeof workflowServer.command !== "string") return;
+	const serverEnv = { ...(isStringRecord(workflowServer.env) ? workflowServer.env : {}) };
+	delete serverEnv[ALERT_BOT_UNATTENDED_ENV];
+	delete serverEnv[ALERT_BOT_PROJECT_ENV];
+	delete serverEnv[ALERT_BOT_ENABLED_ENV];
+	if (context.unattended) serverEnv[ALERT_BOT_UNATTENDED_ENV] = "1";
+	serverEnv[ALERT_BOT_PROJECT_ENV] = context.project;
+	if (!context.enabled) serverEnv[ALERT_BOT_ENABLED_ENV] = "0";
+	sdkOptions.mcpServers = {
+		...sdkOptions.mcpServers,
+		[workflowServerName]: { ...workflowServer, env: serverEnv },
+	};
+}
+
 /** Async pump that drives the Claude Agent SDK's async-iterable message stream and pushes events into `stream`. */
 async function pumpSdkMessages(
 	model: Model<any>,
@@ -2627,6 +2706,11 @@ async function pumpSdkMessages(
 			sdkOpts,
 			workflowMcpServerName,
 			milestoneStatusObservationToken,
+		);
+		injectAlertBotSessionContext(
+			sdkOpts,
+			workflowMcpServerName,
+			resolveAlertBotSessionContext(projectRoot, Boolean(uiContext)),
 		);
 		const allowPendingToolSearchHydration =
 			Boolean(workflowMcpServerName && gsdPhase)

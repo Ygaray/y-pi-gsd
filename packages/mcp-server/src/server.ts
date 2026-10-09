@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
+import { emitNeedsInputAlert } from './alert-bot.js';
 import type { SessionManager } from './session-manager.js';
 import { projectRecentEvents } from './session-manager.js';
 import type { DriverReconcileResult } from './session-manager.js';
@@ -826,6 +827,8 @@ interface AskUserQuestionsHandlerDeps {
   tryRemoteQuestions(questions: AskUserQuestion[], signal?: AbortSignal): Promise<RemoteToolResult | null>;
   writeGate?: AskUserQuestionsWriteGateModule | null;
   writeGateBasePath?: string;
+  /** Tee the pending question to GSD-alert-bot when the host marked the query unattended. */
+  alertNeedsInput?: (questions: AskUserQuestion[]) => void;
 }
 
 let askUserQuestionsWriteGateModulePromise: Promise<AskUserQuestionsWriteGateModule | null> | null = null;
@@ -994,6 +997,12 @@ export async function askUserQuestionsHandler(
     const validationError = validateAskUserQuestionsPayload(questions);
     if (validationError) return errorContent(validationError);
     await recordAskUserQuestionsPendingGate(questions, deps);
+    // Best-effort and synchronous-spawn: never delays or fails the question.
+    try {
+      (deps.alertNeedsInput ?? emitNeedsInputAlert)(questions);
+    } catch {
+      // Alert delivery must never affect the question.
+    }
 
     // Local-first: try the MCP host's elicitation channel (Claude Code,
     // Cursor, etc.) before any configured remote channel. A misconfigured
