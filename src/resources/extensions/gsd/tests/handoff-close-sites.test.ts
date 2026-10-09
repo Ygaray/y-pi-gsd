@@ -35,6 +35,8 @@ let gsdDb: typeof import("../gsd-db.ts");
 let cache: typeof import("../cache.ts");
 let kv: typeof import("../db/runtime-kv.ts");
 let interrupted: typeof import("../interrupted-session.ts");
+let autoMod: typeof import("../auto.ts");
+let runtimeState: typeof import("../auto-runtime-state.ts");
 
 before(async () => {
   gsdDb = await import("../gsd-db.ts");
@@ -43,6 +45,8 @@ before(async () => {
   interrupted = await import("../interrupted-session.ts");
   rec = await import("../handoff-record.ts");
   doctor = await import("../doctor-runtime-checks.ts");
+  autoMod = await import("../auto.ts");
+  runtimeState = await import("../auto-runtime-state.ts");
 });
 
 after(() => {
@@ -153,6 +157,56 @@ test("HANDOFF-01 close tracer: a read-only doctor run touches neither the record
   assert.equal(readStubCalls(stub).length, 0, "no CLI call on a read-only run");
   assert.equal(rec.readStoredHandoff()?.id, HANDOFF_ID, "record preserved");
   assert.ok(kv.getRuntimeKv("global", "", interrupted.PAUSED_SESSION_KV_KEY), "paused_session preserved");
+});
+
+// TODO (found while adding this behavioral coverage, IN-03): stopAuto's Step 12 (paused_session
+// delete + handoff drop) runs AFTER Step 6 has closed the workflow database, so deleteRuntimeKv is a
+// no-op and closeStoredHandoff sees no record - the drop never fires in production. The structural
+// guards above pass regardless. Fixing it means deciding whether an explicit stop must now really
+// clear paused_session (the #1383 intent), which changes stop semantics; it is left as a todo so
+// the gap stays visible and flips to green when the ordering is fixed.
+test("HANDOFF-01 close tracer: stopAuto drops the stored paused-linked handoff through the real runner and clears paused_session (IN-03)", {
+  todo: "stopAuto Step 12 runs after Step 6 closed the DB, so the drop never fires; needs a stop-semantics decision",
+}, async () => {
+  const dir = makeTempDir(tempDirs, "gsd-handoff-close-stop-");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  gsdDb.openDatabase(join(dir, ".gsd", "gsd.db"));
+  kv.setRuntimeKv("global", "", interrupted.PAUSED_SESSION_KV_KEY, {
+    milestoneId: "M001",
+    originalBasePath: dir,
+  } satisfies import("../interrupted-session.ts").PausedSessionMetadata);
+  assert.equal(
+    rec.writeStoredHandoff({ id: HANDOFF_ID, createdAt: "2026-10-09T06:00:00+00:00", hadPausedSession: true, source: "pause" }),
+    true,
+  );
+  const stub = makeHandoffStub(tempDirs, {
+    drop: { stdout: envelope(handoffEntry({ id: HANDOFF_ID, state: "dropped" })) },
+  });
+
+  const previousCwd = process.cwd();
+  runtimeState.autoSession.reset();
+  runtimeState.autoSession.active = true;
+  runtimeState.autoSession.paused = false;
+  runtimeState.autoSession.basePath = dir;
+  runtimeState.autoSession.originalBasePath = dir;
+  try {
+    await withPath(`${stub}:${pathWithoutRealYahirHandoff()}`, () =>
+      autoMod.stopAuto(
+        { hasUI: true, ui: { setStatus() {}, setWidget() {}, setHeader() {}, notify() {} }, modelRegistry: { find: () => null } } as any,
+        { events: { emit() {} } } as any,
+        "User requested stop",
+      ),
+    );
+  } finally {
+    runtimeState.autoSession.reset();
+    process.chdir(previousCwd);
+  }
+
+  const calls = readStubCalls(stub);
+  assert.equal(calls.length, 1, "exactly one CLI call");
+  assert.deepEqual(calls[0].argv, ["drop", HANDOFF_ID, "--json"]);
+  assert.equal(kv.getRuntimeKv("global", "", interrupted.PAUSED_SESSION_KV_KEY), null, "paused_session row cleared");
+  assert.equal(rec.readStoredHandoff(), null, "record cleared after the drop");
 });
 
 // ─── Structural / ordering guards (auto.ts, guided-flow.ts, interrupted-session.ts) ───
