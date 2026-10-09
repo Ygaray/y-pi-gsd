@@ -469,15 +469,11 @@ test("DOCS-01 failure: a failed call does not affect the next call", async () =>
 // ─── Task 3: input completeness ─────────────────────────────────────────────
 
 
-/** Every argv recorded by Task 3 successes; checked by the argv-shape invariant test. */
-const recordedArgvs: string[][] = [];
-
 /** Injected runner that records argv and returns a valid envelope echoing argv[2] as source. */
 function successRunner(extra: Record<string, unknown> = {}) {
   const calls: string[][] = [];
   const run = async (argv: readonly string[]) => {
     calls.push([...argv]);
-    recordedArgvs.push([...argv]);
     return okRun(envelope({ ...GOOD_ROW, source: argv[2], ...extra }));
   };
   return { run, calls };
@@ -618,7 +614,6 @@ test("DOCS-01 input: a pinned result renders Pinned with no Expires line and no 
   assert.ok(!note.message.includes("yahir-tn pin"), note.message);
   const inv = readInvocations(stub);
   assert.deepEqual(inv[0].slice(-2), ["--keep", "--json"]);
-  recordedArgvs.push(inv[0]);
 });
 
 test("DOCS-01 input: a quoted path with a space is published whole", async () => {
@@ -670,14 +665,27 @@ test("DOCS-01 input: an unsanitizable project directory name is a loud error wit
 });
 
 test("DOCS-01 input: no argv element after the verb can be read as an option", () => {
-  assert.ok(recordedArgvs.length >= 5, `expected recorded invocations, got ${recordedArgvs.length}`);
-  for (const argv of recordedArgvs) {
-    assert.equal(argv[0], "doc");
-    for (const el of argv.slice(1)) {
-      if (el === "--keep" || el === "--json") continue;
-      assert.ok(el.startsWith("/") || /^[A-Za-z0-9]/.test(el), `option-like argv element: ${el}`);
+  const { buildYahirTnArgv, sanitizeProjectSlug } = mods.doc;
+  const slugs = ["y-pi-gsd", "My Project", "-lead", "--keep", ".hidden"].map((n) => sanitizeProjectSlug(n));
+  const realPaths = ["/p/.planning/notes.md", "/p/-x.md", "/tmp/a b/--json.md"];
+  let checked = 0;
+  for (const slug of slugs) {
+    if (slug === null) continue;
+    for (const real of realPaths) {
+      for (const keep of [false, true]) {
+        const argv = buildYahirTnArgv(slug, real, keep);
+        assert.equal(argv[0], "doc");
+        assert.equal(argv[argv.length - 1], "--json");
+        assert.equal(argv.includes("--keep"), keep);
+        for (const el of argv.slice(1)) {
+          if (el === "--keep" || el === "--json") continue;
+          assert.ok(el.startsWith("/") || /^[A-Za-z0-9]/.test(el), `option-like argv element: ${el}`);
+        }
+        checked += 1;
+      }
     }
   }
+  assert.ok(checked >= 5, `expected built argvs, got ${checked}`);
 });
 
 // ─── 44-02 Task 1: registration + dispatcher tracer ─────────────────────────
