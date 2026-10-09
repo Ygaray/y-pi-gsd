@@ -26,6 +26,8 @@ import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
+import type { SessionExitRecord, SessionRegistry, SessionRegistryEntry } from '@opengsd/contracts';
+
 import {
   defaultGetProcessCwd,
   defaultGetProcessStartTime,
@@ -39,41 +41,9 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-/**
- * The death record of a driver, consumed by Phase 42's died-with-reason
- * widget. `reason` is a short human-readable string built ONLY from the exit
- * code/signal or a fixed reconcile phrase - never stderr, prompt text, or
- * agent output.
- */
-export interface SessionExitRecord {
-  reason: string;
-  code: number | null;
-  signal: string | null;
-  /** ISO timestamp of when the exit was observed. */
-  at: string;
-}
-
-export interface SessionRegistryEntry {
-  sessionId: string;
-  projectDir: string;
-  pid: number;
-  /** ISO timestamp recorded when we learned the child's pid. */
-  startTime: string;
-  /**
-   * Values used from Phase 41 on: 'starting' (registered right after
-   * start() resolves, before init), 'running', 'exited' (death tombstone).
-   */
-  status: string;
-  /**
-   * `process.pid` of the MCP server that spawned the driver. Advisory only -
-   * never authorises a signal. Optional so pre-Phase-41 rows stay valid.
-   */
-  ownerPid?: number;
-  /** Present only on a death tombstone (written by later Phase 41 plans). */
-  exit?: SessionExitRecord;
-}
-
-export type SessionRegistry = Record<string, SessionRegistryEntry>;
+// The registry row types live in @opengsd/contracts (Phase 42) and are re-exported here so
+// existing importers are unchanged.
+export type { SessionExitRecord, SessionRegistry, SessionRegistryEntry } from '@opengsd/contracts';
 
 export interface SessionLivenessOptions {
   kill?: (pid: number, signal?: NodeJS.Signals | 0) => void;

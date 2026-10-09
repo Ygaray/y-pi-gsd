@@ -3,3 +3,4 @@
 
 export * from "./rpc.js";
 export * from "./workflow.js";
+export * from "./driver-registry.js";
