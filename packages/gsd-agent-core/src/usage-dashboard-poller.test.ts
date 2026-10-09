@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, mock, test } from "node:test";
 import type { Api, Model } from "@gsd/pi-ai";
 import { AuthStorage } from "@gsd/pi-coding-agent/core/auth-storage.js";
 import { ModelRegistry } from "@gsd/pi-coding-agent/core/model-registry.js";
@@ -12,10 +12,13 @@ import type { RateLimitStatusRef } from "./rate-limit-status-ref.ts";
 import { createAgentSession } from "./sdk.ts";
 import {
 	buildClaudeAuthStatusInvocation,
+	claudeConfigPath,
 	identityMatchesLogin,
 	loginCandidates,
 	mapDashboardQuotaPayload,
 	parseClaudeAuthStatus,
+	parseClaudeConfigIdentity,
+	USAGE_DASHBOARD_BACKOFF_MS,
 	UsageDashboardPoller,
 	type ExecFileLike,
 	type FetchLike,
@@ -454,5 +457,246 @@ describe("usage dashboard login matching (D-03 / SC4)", () => {
 		assert.equal(identityMatchesLogin([{ claude_org_uuid: "org-1" }], "org-1"), false);
 		assert.equal(identityMatchesLogin(null, "org-1"), false);
 		assert.equal(identityMatchesLogin("org-1", "org-1"), false);
+	});
+});
+
+function failingExec(error: Error & { code?: string | number; stdout?: string | Buffer }): {
+	impl: ExecFileLike;
+	calls: number[];
+} {
+	const calls: number[] = [];
+	const impl: ExecFileLike = async () => {
+		calls.push(calls.length + 1);
+		throw error;
+	};
+	return { impl, calls };
+}
+
+function exitError(code: string | number, stdout?: string | Buffer): Error & { code: string | number; stdout?: string | Buffer } {
+	const error = new Error("Command failed") as Error & { code: string | number; stdout?: string | Buffer };
+	error.code = code;
+	if (stdout !== undefined) error.stdout = stdout;
+	return error;
+}
+
+function fakeConfigReader(result: string | Error): { impl: (path: string) => Promise<string>; paths: string[] } {
+	const paths: string[] = [];
+	return {
+		paths,
+		impl: async (path) => {
+			paths.push(path);
+			if (result instanceof Error) throw result;
+			return result;
+		},
+	};
+}
+
+const CONFIG_JSON = JSON.stringify({
+	numStartups: 3,
+	oauthAccount: { organizationUuid: "org-from-file", emailAddress: "file@example.test", accountUuid: "acct-from-file" },
+});
+
+describe("usage dashboard identity chain (D-03, RESEARCH Pitfall 8)", () => {
+	afterEach(() => {
+		mock.timers.reset();
+	});
+
+	test("a logged-out CLI that exits 1 with JSON on stdout makes no request and never reads the config file", async () => {
+		const ref: RateLimitStatusRef = {
+			current: { session: { usedPercent: 5, resetsAtEpochSec: 1 }, weekly: null },
+			provider: "claude-code",
+			meta: { session: { source: "dashboard", observedAtMs: Date.now() } },
+		};
+		const exec = failingExec(exitError(1, '{"loggedIn": false, "authMethod": "none"}'));
+		const reader = fakeConfigReader(CONFIG_JSON);
+		const fetcher = fakeFetch(() => okResponse());
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: exec.impl, readClaudeConfigImpl: reader.impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 0);
+			assert.equal(reader.paths.length, 0);
+			assert.equal(ref.current?.session, null);
+			assert.equal(notified, 1);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("a logged-in CLI that exits non-zero still yields its identity from stdout", async () => {
+		const ref: RateLimitStatusRef = {};
+		const exec = failingExec(exitError(1, Buffer.from(LOGGED_IN)));
+		const fetcher = fakeFetch(() => okResponse());
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: exec.impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 1);
+			assert.equal(loginOf(fetcher.calls[0].url), "org-test-uuid");
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("a missing CLI falls back to the oauthAccount block of .claude.json under CLAUDE_CONFIG_DIR", async () => {
+		const ref: RateLimitStatusRef = {};
+		const exec = failingExec(exitError("ENOENT"));
+		const reader = fakeConfigReader(CONFIG_JSON);
+		const fetcher = fakeFetch(() => okResponse(okPayload({ claude_org_uuid: "org-from-file" })));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{
+				fetchImpl: fetcher.impl,
+				execFileImpl: exec.impl,
+				readClaudeConfigImpl: reader.impl,
+				env: { CLAUDE_CONFIG_DIR: "/cfg/x" },
+				platform: "linux",
+			},
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.deepEqual(reader.paths, [join("/cfg/x", ".claude.json")]);
+			assert.equal(fetcher.calls.length, 1);
+			assert.equal(loginOf(fetcher.calls[0].url), "org-from-file");
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("without CLAUDE_CONFIG_DIR the fallback reads .claude.json in the home directory", async () => {
+		const exec = failingExec(exitError("ENOENT"));
+		const reader = fakeConfigReader(CONFIG_JSON);
+		const poller = new UsageDashboardPoller(
+			{ ref: {}, getProvider: () => "claude-code" },
+			{
+				fetchImpl: fakeFetch(() => okResponse(okPayload({ claude_org_uuid: "org-from-file" }))).impl,
+				execFileImpl: exec.impl,
+				readClaudeConfigImpl: reader.impl,
+				env: {},
+				platform: "linux",
+			},
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.deepEqual(reader.paths, [join(homedir(), ".claude.json")]);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("unparseable CLI output plus an unreadable config file means no identity and no request", async () => {
+		const reader = fakeConfigReader(new Error("EACCES"));
+		const fetcher = fakeFetch(() => okResponse());
+		const poller = new UsageDashboardPoller(
+			{ ref: {}, getProvider: () => "claude-code" },
+			{
+				fetchImpl: fetcher.impl,
+				execFileImpl: fakeExec("garbage").impl,
+				readClaudeConfigImpl: reader.impl,
+				env: {},
+				platform: "linux",
+			},
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(reader.paths.length, 1);
+			assert.equal(fetcher.calls.length, 0);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("claudeConfigPath and parseClaudeConfigIdentity read only the oauthAccount block", () => {
+		assert.equal(claudeConfigPath({ CLAUDE_CONFIG_DIR: " /a/b " }), join("/a/b", ".claude.json"));
+		assert.equal(claudeConfigPath({ CLAUDE_CONFIG_DIR: "  " }), join(homedir(), ".claude.json"));
+		assert.deepEqual(parseClaudeConfigIdentity(CONFIG_JSON), {
+			orgId: "org-from-file",
+			email: "file@example.test",
+			accountUuid: "acct-from-file",
+		});
+		assert.deepEqual(parseClaudeConfigIdentity(JSON.stringify({ oauthAccount: { emailAddress: "e@x" } })), { email: "e@x" });
+		assert.equal(parseClaudeConfigIdentity(JSON.stringify({ oauthAccount: {} })), null);
+		assert.equal(parseClaudeConfigIdentity(JSON.stringify({ oauthAccount: { emailAddress: "x".repeat(321) } })), null);
+		assert.equal(parseClaudeConfigIdentity(JSON.stringify({ oauthAccount: [] })), null);
+		assert.equal(parseClaudeConfigIdentity(JSON.stringify({ organizationUuid: "top-level" })), null);
+		assert.equal(parseClaudeConfigIdentity("{not json"), null);
+	});
+
+	test("without an identity the CLI is not re-run before the back-off", async () => {
+		mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
+		const exec = failingExec(exitError(1, '{"loggedIn": false}'));
+		const poller = new UsageDashboardPoller(
+			{ ref: {}, getProvider: () => "claude-code" },
+			{ fetchImpl: fakeFetch(() => okResponse()).impl, execFileImpl: exec.impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(exec.calls.length, 1);
+
+			mock.timers.tick(60_000);
+			await poller.refresh();
+			assert.equal(exec.calls.length, 1, "a manual refresh inside the back-off must not spawn the CLI");
+
+			mock.timers.tick(USAGE_DASHBOARD_BACKOFF_MS);
+			await poller.refresh();
+			assert.equal(exec.calls.length, 2);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("a 404 clears dashboard windows at once, forgets the identity and re-resolves after the back-off", async () => {
+		mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
+		const ref: RateLimitStatusRef = {};
+		const exec = fakeExec(LOGGED_IN);
+		const fetcher = fakeFetch((call) =>
+			call === 2 ? new Response(JSON.stringify({ detail: "no active anthropic account" }), { status: 404 }) : okResponse(),
+		);
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: exec.impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			assert.equal(notified, 1);
+
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 2);
+			assert.equal(ref.current?.session, null);
+			assert.equal(ref.current?.weekly, null);
+			assert.equal(notified, 2);
+			assert.equal(exec.calls.length, 1);
+
+			mock.timers.tick(60_000);
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 2, "no request inside the back-off");
+			assert.equal(exec.calls.length, 1);
+
+			mock.timers.tick(USAGE_DASHBOARD_BACKOFF_MS);
+			await poller.refresh();
+			assert.equal(exec.calls.length, 2, "identity resolved again after the back-off");
+			assert.equal(fetcher.calls.length, 3);
+			assert.equal(ref.current?.session?.usedPercent, 8);
+		} finally {
+			poller.stop();
+		}
 	});
 });

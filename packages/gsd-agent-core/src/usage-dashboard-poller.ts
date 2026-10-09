@@ -12,6 +12,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { RateLimitWindow } from "./rate-limit-headers.js";
 import {
@@ -30,6 +33,10 @@ export const USAGE_DASHBOARD_FETCH_TIMEOUT_MS = 3_000;
 export const USAGE_DASHBOARD_MAX_AGE_S = 600;
 export const USAGE_DASHBOARD_SCHEMA_VERSION = 1;
 export const CLAUDE_AUTH_STATUS_TIMEOUT_MS = 15_000;
+/** Wait before trying again after the dashboard cannot vouch for this session (no identity, 404, all-409, fingerprint). */
+export const USAGE_DASHBOARD_BACKOFF_MS = 300_000;
+/** The `.claude.json` fallback is skipped when the file is larger than this. */
+export const CLAUDE_CONFIG_MAX_BYTES = 8 * 1024 * 1024;
 
 const MAX_IDENTITY_FIELD_LENGTH = 320;
 
@@ -59,6 +66,9 @@ export interface UsageDashboardPollerOptions {
 	baseUrl?: string;
 	intervalMs?: number;
 	fetchTimeoutMs?: number;
+	backoffMs?: number;
+	/** Injected `.claude.json` reader (tests). Default: size-capped `fs.promises.readFile`. */
+	readClaudeConfigImpl?: (path: string) => Promise<string>;
 	env?: NodeJS.ProcessEnv;
 	platform?: NodeJS.Platform;
 }
@@ -161,23 +171,79 @@ export function identityMatchesLogin(body: unknown, login: string): boolean {
 	});
 }
 
-/** Resolves this session's Claude identity through the CLI. Null when it cannot be established. */
+/** `{CLAUDE_CONFIG_DIR or the home directory}/.claude.json`: where the CLI keeps the logged-in account block. */
+export function claudeConfigPath(env: NodeJS.ProcessEnv): string {
+	const dir = env.CLAUDE_CONFIG_DIR?.trim();
+	return join(dir ? dir : homedir(), ".claude.json");
+}
+
+/** Reads only the `oauthAccount` block of a `.claude.json` text. Null when it names no account field. */
+export function parseClaudeConfigIdentity(text: string): ClaudeIdentity | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+	const account = (parsed as Record<string, unknown>).oauthAccount;
+	if (!account || typeof account !== "object" || Array.isArray(account)) return null;
+	const block = account as Record<string, unknown>;
+	const orgId = cleanIdentityField(block.organizationUuid);
+	const email = cleanIdentityField(block.emailAddress);
+	const accountUuid = cleanIdentityField(block.accountUuid);
+	const identity: ClaudeIdentity = {};
+	if (orgId !== undefined) identity.orgId = orgId;
+	if (email !== undefined) identity.email = email;
+	if (accountUuid !== undefined) identity.accountUuid = accountUuid;
+	return Object.keys(identity).length > 0 ? identity : null;
+}
+
+async function readClaudeConfigCapped(path: string): Promise<string> {
+	const info = await stat(path);
+	if (info.size > CLAUDE_CONFIG_MAX_BYTES) throw new Error("config file too large");
+	return readFile(path, "utf8");
+}
+
+function outputText(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (Buffer.isBuffer(value)) return value.toString("utf8");
+	return undefined;
+}
+
+/**
+ * Resolves this session's Claude identity. `claude auth status --json` first (its stdout counts even
+ * when the CLI exits non-zero: a logged-out CLI exits 1 and still prints JSON). Only when the CLI is
+ * missing, times out or prints neither logged-in nor logged-out JSON does it read the `oauthAccount`
+ * block of `.claude.json`; an explicit `loggedIn:false` never falls back. Null when unresolved.
+ */
 export async function resolveClaudeIdentity(deps: {
 	execFileImpl: ExecFileLike;
 	env: NodeJS.ProcessEnv;
 	platform: NodeJS.Platform;
+	readClaudeConfigImpl?: (path: string) => Promise<string>;
 }): Promise<ClaudeIdentity | null> {
 	const { command, args } = buildClaudeAuthStatusInvocation(deps.platform);
+	let stdout: string | undefined;
 	try {
-		const { stdout } = await deps.execFileImpl(command, args, {
+		const result = await deps.execFileImpl(command, args, {
 			timeout: CLAUDE_AUTH_STATUS_TIMEOUT_MS,
 			env: deps.env,
 			windowsHide: true,
 			maxBuffer: 64 * 1024,
 		});
-		const text = typeof stdout === "string" ? stdout : stdout.toString("utf8");
-		const status = parseClaudeAuthStatus(text);
-		return status.kind === "logged-in" ? status.identity : null;
+		stdout = outputText(result.stdout);
+	} catch (error) {
+		stdout = outputText((error as { stdout?: unknown } | null)?.stdout);
+	}
+	if (stdout !== undefined) {
+		const status = parseClaudeAuthStatus(stdout);
+		if (status.kind === "logged-in") return status.identity;
+		if (status.kind === "logged-out") return null;
+	}
+	try {
+		const text = await (deps.readClaudeConfigImpl ?? readClaudeConfigCapped)(claudeConfigPath(deps.env));
+		return parseClaudeConfigIdentity(text);
 	} catch {
 		return null;
 	}
@@ -199,6 +265,8 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 	private readonly baseUrl: string;
 	private readonly intervalMs: number;
 	private readonly fetchTimeoutMs: number;
+	private readonly backoffMs: number;
+	private readonly readClaudeConfigImpl: ((path: string) => Promise<string>) | undefined;
 	private readonly env: NodeJS.ProcessEnv;
 	private readonly platform: NodeJS.Platform;
 
@@ -212,6 +280,8 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 	private identity: ClaudeIdentity | null | undefined;
 	/** The login key that last produced an accepted 200; tried first on later ticks. */
 	private preferredLogin: string | undefined;
+	/** While identity is null, the earliest time the CLI may be run again. */
+	private identityRetryAtMs = 0;
 
 	constructor(
 		core: { ref: RateLimitStatusRef; getProvider: () => string | undefined },
@@ -225,6 +295,8 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 		this.baseUrl = (options.baseUrl ?? USAGE_DASHBOARD_DEFAULT_BASE_URL).replace(/\/+$/, "");
 		this.intervalMs = options.intervalMs ?? USAGE_DASHBOARD_POLL_MS;
 		this.fetchTimeoutMs = options.fetchTimeoutMs ?? USAGE_DASHBOARD_FETCH_TIMEOUT_MS;
+		this.backoffMs = options.backoffMs ?? USAGE_DASHBOARD_BACKOFF_MS;
+		this.readClaudeConfigImpl = options.readClaudeConfigImpl;
 		this.env = options.env ?? process.env;
 		this.platform = options.platform ?? process.platform;
 	}
@@ -287,16 +359,21 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 		if (!controller) return delay;
 		if (this.getProvider() !== DASHBOARD_PROVIDER) return delay;
 
-		if (this.identity === undefined) {
+		if (this.identity === null && this.now() < this.identityRetryAtMs) {
+			return this.identityRetryAtMs - this.now();
+		}
+		if (!this.identity) {
 			this.identity = await resolveClaudeIdentity({
 				execFileImpl: this.execFileImpl,
 				env: this.env,
 				platform: this.platform,
+				readClaudeConfigImpl: this.readClaudeConfigImpl,
 			});
+			if (!this.identity) this.identityRetryAtMs = this.now() + this.backoffMs;
 			if (gen !== this.generation) return delay;
+			if (!this.identity) return this.dropUnvouched();
 		}
 		const identity = this.identity;
-		if (!identity) return delay;
 		const candidates = loginCandidates(identity);
 		if (candidates.length === 0) return delay;
 		const preferred = this.preferredLogin?.toLowerCase();
@@ -312,6 +389,11 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 				signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.fetchTimeoutMs)]),
 			});
 			if (gen !== this.generation) return delay;
+			if (res.status === 404) {
+				// This identity is unknown to the dashboard (or the operator logged in as someone else).
+				void res.body?.cancel().catch(() => {});
+				return this.forgetIdentity();
+			}
 			if (res.status === 409) {
 				// More than one account matches this key: try the next one.
 				void res.body?.cancel().catch(() => {});
@@ -320,7 +402,7 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 			if (!res.ok) return delay;
 			const body: unknown = await res.json();
 			if (gen !== this.generation) return delay;
-			if (!identityMatchesLogin(body, login)) return this.dropUnvouched(delay);
+			if (!identityMatchesLogin(body, login)) return this.dropUnvouched();
 
 			const reading = mapDashboardQuotaPayload(body, this.now());
 			if (!reading) return delay;
@@ -331,13 +413,22 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 			return delay;
 		}
 		// Every key matched more than one account: no way to tell which one is ours.
-		return this.dropUnvouched(delay);
+		return this.dropUnvouched();
 	}
 
 	/** The dashboard cannot vouch for this session's account: show nothing rather than a neighbour's numbers. */
-	private dropUnvouched(delay: number): number {
+	private dropUnvouched(): number {
 		if (clearDashboardWindows(this.ref)) this.onChange?.();
-		return delay;
+		return this.backoffMs;
+	}
+
+	/** 404: forget the cached identity so it is resolved again after the back-off. */
+	private forgetIdentity(): number {
+		const wait = this.dropUnvouched();
+		this.identity = null;
+		this.preferredLogin = undefined;
+		this.identityRetryAtMs = this.now() + this.backoffMs;
+		return wait;
 	}
 }
 
