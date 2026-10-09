@@ -20,13 +20,14 @@ test('OBS-01 the cli port stops a real registered process through the real Sessi
   try {
     assert.ok(child.pid, 'child spawned')
     const pid = child.pid as number
-    const exited = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('child did not exit within 5s')), 5000)
-      child.once('exit', () => {
-        clearTimeout(timer)
-        resolve()
-      })
-    })
+    // The 5 s budget covers the child's exit AFTER the stop returns; it must not include the one-time lazy module
+    // loads the first stop performs (slow under a loaded test run).
+    const exitedEarly = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+    const exited = (): Promise<void> =>
+      Promise.race([
+        exitedEarly,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('child did not exit within 5s')), 5000).unref()),
+      ])
     mkdirSync(gsdHome, { recursive: true })
     const registryPath = join(gsdHome, 'session-instances.json')
     writeFileSync(
@@ -36,7 +37,7 @@ test('OBS-01 the cli port stops a real registered process through the real Sessi
 
     const result = await createDriverControlPort().stopDriver(canon, { pid, startTime })
     assert.deepEqual(result, { outcome: 'stopped', pid })
-    await exited
+    await exited()
     const after = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, 'utf-8')) : {}
     assert.equal(after[canon], undefined, 'registry row removed after the process is gone')
   } finally {
