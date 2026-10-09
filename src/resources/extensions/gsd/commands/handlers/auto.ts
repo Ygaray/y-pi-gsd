@@ -221,6 +221,17 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
       return true;
     }
     await pauseAuto(ctx, pi, undefined, { abortActiveTurn: true });
+    // HANDOFF-01 (D-01): only this explicit operator pause registers a yahir-handoff entry, here
+    // and never inside pauseAuto. pauseAuto may return early without pausing, hence isAutoPaused().
+    // Fail-open (D-09): a registration problem never changes the pause outcome.
+    if (isAutoPaused()) {
+      try {
+        const { registerPauseHandoff } = await import("../../handoff-lifecycle.js");
+        await registerPauseHandoff(ctx, "pause");
+      } catch {
+        /* fail-open */
+      }
+    }
     return true;
   }
 
