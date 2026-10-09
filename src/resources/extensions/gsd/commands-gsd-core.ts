@@ -1162,6 +1162,18 @@ export async function handleResumeWork(
       return;
     }
 
+    if (decision.kind === "foreign-any") {
+      // D-14/DP-4: text-only pickup of an `any` handoff: no auto/next re-entry even with a
+      // paused_session, and the own stored record is never read or written here.
+      const ok = sendPrompt(resume.formatForeignHandoffContext(decision.entry));
+      if (ok) {
+        const { doneHandoff, describeHandoffFailure } = await import("./handoff-client.js");
+        const done = await doneHandoff(decision.id, callOpts);
+        if (!done.ok) ctx.ui.notify(`handoff ${decision.id} not closed — ${describeHandoffFailure(done)}`, "warning");
+      }
+      return;
+    }
+
     if (decision.kind === "own" || decision.kind === "own-stale" || decision.kind === "own-unavailable") {
       if (decision.kind === "own" && decision.warning) ctx.ui.notify(decision.warning, "warning");
       if (decision.kind === "own-unavailable") ctx.ui.notify(decision.warning, "warning");
