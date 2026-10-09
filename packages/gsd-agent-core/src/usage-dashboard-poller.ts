@@ -6,9 +6,12 @@
  * `unavailable`. The UsageDashboard (127.0.0.1:8820, contract schema_version 1) already holds the
  * same 5h / weekly numbers; this producer maps them onto the shared `RateLimitStatusRef`.
  *
- * Identity (D-03): this session's login comes from `claude auth status --json` -- the only
- * identity source the externalCli backend has. This module reads nothing else and never touches
- * credential files.
+ * Identity (D-03): this session's login comes from `claude auth status --json`, the identity source
+ * the externalCli backend has. Only when the CLI is missing, times out or prints neither logged-in nor
+ * logged-out JSON does it fall back to reading `{CLAUDE_CONFIG_DIR or the home directory}/.claude.json`
+ * (size-capped). That whole file is read and parsed, but only the `oauthAccount` fields
+ * (organizationUuid, emailAddress, accountUuid) are kept; everything else is discarded. It never reads
+ * credential or token files, and it never logs or prints identity values.
  */
 
 import { execFile } from "node:child_process";
