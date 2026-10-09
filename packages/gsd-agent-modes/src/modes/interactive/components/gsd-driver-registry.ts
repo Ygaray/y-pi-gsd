@@ -1,14 +1,17 @@
 // Project/App: gsd-pi
 // File Purpose: READ-ONLY projection of the y-pi-gsd driver registry (`$GSD_HOME/session-instances.json`,
 // written by mcp-server) for the interactive TUI. This module never writes, renames, quarantines or
-// signals anything: a corrupt registry reads as "unreadable", never a `.corrupt-*` rename (RD-RESEARCH-OPEN 3).
+// signals anything: a corrupt registry reads as "unreadable" and is never quarantined under a `.corrupt-*` name
+// (RD-RESEARCH-OPEN 3).
 
 import { execFile as nodeExecFile } from "node:child_process";
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { SessionRegistryEntry } from "@opengsd/contracts";
+import { findPlanningStatePath } from "./gsd-state-reader.js";
+import { sanitizeFooterText } from "./gsd-statusline-format.js";
 
 export const DRIVER_REGISTRY_FILENAME = "session-instances.json";
 /** Ceiling on registry bytes read. A larger file is "unreadable", never silently treated as empty. */
@@ -262,7 +265,7 @@ function defaultExecFile(
  * event loop. An unavailable start time (null) fails open to signal-0 liveness.
  */
 export function createProcessProbes(options: ProcessProbeOptions = {}): DriverProcessProbes {
-	const kill = options.kill ?? ((pid: number, signal: 0) => process.kill(pid, signal));
+	const kill = options.kill ?? ((pid: number) => process.kill(pid, 0));
 	const exec = options.execFile ?? defaultExecFile;
 	const now = options.now ?? Date.now;
 	const cache = new Map<number, { ms: number | null; fetchedAt: number }>();
@@ -319,4 +322,184 @@ export function createProcessProbes(options: ProcessProbeOptions = {}): DriverPr
 			await Promise.all(pending);
 		},
 	};
+}
+
+/** Canonical form of a worktree path, matching mcp-server: `realpathSync.native(resolve(dir))`, `resolve` on any error. */
+export function canonicalDriverDir(dir: string): string {
+	const resolved = resolve(dir);
+	try {
+		return realpathSync.native(resolved);
+	} catch {
+		return resolved;
+	}
+}
+
+/** Project root for the TUI's cwd: the directory holding the nearest `.planning/STATE.md`, else the cwd itself. */
+export function findDriverProjectRoot(cwd: string): string {
+	const statePath = findPlanningStatePath(cwd);
+	return canonicalDriverDir(statePath === null ? cwd : dirname(dirname(statePath)));
+}
+
+function isStrictDescendant(child: string, parent: string): boolean {
+	const rel = relative(parent, child);
+	return rel.length > 0 && !isAbsolute(rel) && rel.split(sep)[0] !== "..";
+}
+
+/**
+ * A row relates to the TUI project when its canonical dir equals the project root, is a strict descendant of it
+ * (a worktree under the project), or is a strict ancestor of it - except that the filesystem root never counts as
+ * an ancestor (a row for `/` would otherwise relate to every project).
+ */
+export function relatesToProject(dir: string, projectRoot: string): boolean {
+	if (dir === projectRoot) return true;
+	if (isStrictDescendant(dir, projectRoot)) return true;
+	return dirname(dir) !== dir && isStrictDescendant(projectRoot, dir);
+}
+
+/** Identity of one death for in-memory dismissal: the same worktree, pid and recorded start. */
+export function driverRowKey(canonicalDir: string, row: SessionRegistryEntry): string {
+	return `${canonicalDir}|${row.pid}|${row.startTime}`;
+}
+
+export type DriverSupervisor = "alive" | "gone" | "none";
+
+export interface ClassifiedDriver {
+	/** The registry key of the row that was classified. */
+	key: string;
+	rowKey: string;
+	canonicalDir: string;
+	row: SessionRegistryEntry;
+	liveness: DriverLiveness;
+	supervisor: DriverSupervisor;
+	related: boolean;
+	dismissed: boolean;
+}
+
+/**
+ * Collapse rows stored under several keys for one worktree (legacy `resolve()` key, symlink alias key) into one
+ * classified driver, preferring the row whose key equals the canonical dir, else the first in file order - the same
+ * row mcp-server's getSessionEntry would act on.
+ */
+export function classifyDrivers(
+	entries: readonly RegistryRowEntry[],
+	opts: { ctx: ClassifyContext; projectRoot: string; dismissed: ReadonlySet<string> },
+): ClassifiedDriver[] {
+	const groups = new Map<string, RegistryRowEntry>();
+	for (const entry of entries) {
+		const canonical = canonicalDriverDir(entry.row.projectDir);
+		const existing = groups.get(canonical);
+		if (existing === undefined || (existing.key !== canonical && entry.key === canonical)) {
+			groups.set(canonical, entry);
+		}
+	}
+
+	const drivers: ClassifiedDriver[] = [];
+	for (const [canonicalDir, entry] of groups) {
+		const { row } = entry;
+		const liveness = classifyDriverRow(row, opts.ctx);
+		let supervisor: DriverSupervisor = "none";
+		if (row.exit === undefined && row.ownerPid !== undefined) {
+			supervisor = opts.ctx.isOwnerAlive(row.ownerPid) ? "alive" : "gone";
+		}
+		const rowKey = driverRowKey(canonicalDir, row);
+		drivers.push({
+			key: entry.key,
+			rowKey,
+			canonicalDir,
+			row,
+			liveness,
+			supervisor,
+			related: relatesToProject(canonicalDir, opts.projectRoot),
+			dismissed: opts.dismissed.has(rowKey),
+		});
+	}
+	return drivers;
+}
+
+/** A reconciled death stays on screen for this long after `exit.at`. */
+export const DIED_DISPLAY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Visibility of one classified driver. Running and stale rows are always visible. A died row is hidden once
+ * dismissed, or once a reconciled tombstone is older than the display TTL; a tombstone with an unparsable
+ * `exit.at` and an unreconciled dead row stay visible until dismissed.
+ */
+export function isDriverVisible(d: ClassifiedDriver, nowMs: number): boolean {
+	if (d.liveness.kind !== "died") return true;
+	if (d.dismissed) return false;
+	if (d.liveness.reconciled && d.liveness.atMs !== null && nowMs - d.liveness.atMs >= DIED_DISPLAY_TTL_MS) return false;
+	return true;
+}
+
+export type DriverSummary =
+	| { kind: "none" }
+	| {
+			kind: "drivers";
+			worst: ClassifiedDriver | null;
+			relatedCount: number;
+			others: { count: number; worst: "died" | "stale" | null };
+	  };
+
+const SEVERITY: Record<DriverLiveness["kind"], number> = { running: 0, stale: 1, died: 2 };
+
+function diedAtMs(d: ClassifiedDriver): number {
+	return d.liveness.kind === "died" && d.liveness.atMs !== null ? d.liveness.atMs : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Summarise visible drivers for the one-row widget: the worst related row (died > stale > running) with the
+ * related count, plus unrelated died/stale rows counted in `others`. Unrelated running rows never count.
+ */
+export function summarizeDrivers(drivers: readonly ClassifiedDriver[], nowMs: number): DriverSummary {
+	const visible = drivers.filter((d) => isDriverVisible(d, nowMs));
+	const related = visible.filter((d) => d.related);
+	const attention = visible.filter((d) => !d.related && d.liveness.kind !== "running");
+
+	let worst: ClassifiedDriver | null = null;
+	for (const d of related) {
+		if (worst === null) {
+			worst = d;
+			continue;
+		}
+		const delta = SEVERITY[d.liveness.kind] - SEVERITY[worst.liveness.kind];
+		if (delta > 0 || (delta === 0 && d.liveness.kind === "died" && diedAtMs(d) > diedAtMs(worst))) worst = d;
+	}
+
+	if (related.length === 0 && attention.length === 0) return { kind: "none" };
+
+	const othersWorst: "died" | "stale" | null = attention.some((d) => d.liveness.kind === "died")
+		? "died"
+		: attention.length > 0
+			? "stale"
+			: null;
+	return {
+		kind: "drivers",
+		worst,
+		relatedCount: related.length,
+		others: { count: attention.length, worst: othersWorst },
+	};
+}
+
+export const MAX_DRIVER_TEXT_CHARS = 200;
+
+/**
+ * Sanitise untrusted registry text before it reaches the terminal (T-42-01): CR/LF/TAB become spaces, every C0,
+ * DEL and C1 control character is removed (stricter than sanitizeFooterText, which keeps BEL and C1), spaces are
+ * collapsed, and the result is bounded to `max` characters with a trailing ellipsis when cut.
+ */
+export function sanitizeDriverText(text: string, max: number = MAX_DRIVER_TEXT_CHARS): string {
+	const cleaned = sanitizeFooterText(String(text).replace(/[\r\n\t]/g, " ").replace(/[\x00-\x1f\x7f-\x9f]/g, ""));
+	return cleaned.length > max ? `${cleaned.slice(0, Math.max(0, max - 1))}\u2026` : cleaned;
+}
+
+/** Compact age: `45s`, `12m`, `3h`, `2d`; null for an unknown or negative age (never `NaNm`). */
+export function formatDriverAge(ms: number | null): string | null {
+	if (ms === null || !Number.isFinite(ms) || ms < 0) return null;
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h`;
+	return `${Math.floor(hours / 24)}d`;
 }

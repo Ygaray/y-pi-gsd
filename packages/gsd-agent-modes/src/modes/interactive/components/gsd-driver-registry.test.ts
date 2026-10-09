@@ -7,15 +7,22 @@
 
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionRegistry } from "@opengsd/contracts";
 import {
+	DIED_DISPLAY_TTL_MS,
 	MAX_REGISTRY_BYTES,
 	classifyDriverRow,
+	classifyDrivers,
 	createProcessProbes,
+	formatDriverAge,
 	readDriverRegistry,
+	relatesToProject,
+	sanitizeDriverText,
+	summarizeDrivers,
+	type ClassifiedDriver,
 	type ClassifyContext,
 } from "./gsd-driver-registry.js";
 
@@ -363,5 +370,110 @@ describe("gsd-driver-registry", () => {
 		);
 		assert.equal("ownerPid" in read.entries[0]!.row, false);
 		assert.equal("ownerPid" in read.entries[1]!.row, false);
+	});
+
+	it("rows for one worktree under alias keys collapse to the row stop-by-dir would target", () => {
+		const base = makeTempDir();
+		const real = join(base, "real");
+		mkdirSync(real);
+		const link = join(base, "link");
+		symlinkSync(real, link);
+		const canonical = realpathSync.native(real);
+		const mk = (pid: number, projectDir: string) => ({
+			sessionId: `s${pid}`,
+			projectDir,
+			pid,
+			startTime: "2026-10-08T11:00:00.000Z",
+			status: "running",
+		});
+		const nowMs = Date.parse("2026-10-08T12:00:00.000Z");
+		const opts = { ctx: makeCtx(nowMs).ctx, projectRoot: canonical, dismissed: new Set<string>() };
+
+		const both = classifyDrivers([{ key: link, row: mk(1111, link) }, { key: canonical, row: mk(2222, real) }], opts);
+		assert.equal(both.length, 1);
+		assert.equal(both[0]!.row.pid, 2222);
+		assert.equal(both[0]!.canonicalDir, canonical);
+
+		const aliasOnly = classifyDrivers([{ key: link, row: mk(1111, link) }], opts);
+		assert.equal(aliasOnly.length, 1);
+		assert.equal(aliasOnly[0]!.row.pid, 1111);
+		assert.equal(aliasOnly[0]!.canonicalDir, canonical);
+	});
+
+	it("relatesToProject matches equal, descendant and ancestor dirs but not siblings or the filesystem root", () => {
+		assert.equal(relatesToProject("/a/b", "/a/b"), true);
+		assert.equal(relatesToProject("/a/b/wt/x", "/a/b"), true);
+		assert.equal(relatesToProject("/a", "/a/b"), true);
+		assert.equal(relatesToProject("/a/c", "/a/b"), false);
+		assert.equal(relatesToProject("/a/bc", "/a/b"), false);
+		assert.equal(relatesToProject("/", "/a/b"), false);
+	});
+
+	it("summarizeDrivers picks the worst related row, counts others needing attention, and hides dismissed or expired deaths", () => {
+		const nowMs = Date.parse("2026-10-08T12:00:00.000Z");
+		const driver = (
+			name: string,
+			related: boolean,
+			liveness: ClassifiedDriver["liveness"],
+			dismissed = false,
+		): ClassifiedDriver => ({
+			key: name,
+			rowKey: `${name}|1|t`,
+			canonicalDir: `/${name}`,
+			row: { sessionId: "s", projectDir: `/${name}`, pid: 10, startTime: "t", status: "running" },
+			liveness,
+			supervisor: "none",
+			related,
+			dismissed,
+		});
+		const running = { kind: "running", sinceMs: 1 } as const;
+		const stale = { kind: "stale", why: "supervisor-gone", sinceMs: 1 } as const;
+		const died = (atMs: number | null, reconciled = true) =>
+			({ kind: "died", reason: "r", code: null, signal: null, atMs, reconciled }) as const;
+
+		const relatedMix = summarizeDrivers([driver("a", true, running), driver("b", true, stale)], nowMs);
+		assert.equal(relatedMix.kind, "drivers");
+		if (relatedMix.kind === "drivers") {
+			assert.equal(relatedMix.worst?.key, "b");
+			assert.equal(relatedMix.relatedCount, 2);
+			assert.deepEqual(relatedMix.others, { count: 0, worst: null });
+		}
+
+		const others = summarizeDrivers(
+			[driver("x", false, died(nowMs - 1000)), driver("y", false, stale), driver("z", false, running)],
+			nowMs,
+		);
+		assert.equal(others.kind, "drivers");
+		if (others.kind === "drivers") {
+			assert.equal(others.worst, null);
+			assert.equal(others.relatedCount, 0);
+			assert.deepEqual(others.others, { count: 2, worst: "died" });
+		}
+
+		assert.deepEqual(summarizeDrivers([driver("old", true, died(nowMs - DIED_DISPLAY_TTL_MS - 3_600_000))], nowMs), {
+			kind: "none",
+		});
+		const garbage = summarizeDrivers([driver("g", true, died(null))], nowMs);
+		assert.equal(garbage.kind, "drivers");
+		assert.deepEqual(summarizeDrivers([driver("d", true, died(nowMs - 1000), true)], nowMs), { kind: "none" });
+		assert.deepEqual(summarizeDrivers([driver("u", false, running)], nowMs), { kind: "none" });
+		assert.deepEqual(summarizeDrivers([], nowMs), { kind: "none" });
+	});
+
+	it("sanitizeDriverText strips C0, DEL and C1 controls and bounds length", () => {
+		assert.equal(sanitizeDriverText("a\x07b\x9bc\x1b[31md\r\ne\tf\x7f"), "abc[31md e f");
+		const long = sanitizeDriverText("x".repeat(300));
+		assert.equal(long.length, 200);
+		assert.ok(long.endsWith("\u2026"));
+	});
+
+	it("formatDriverAge renders s/m/h/d and omits unknown ages", () => {
+		assert.equal(formatDriverAge(45_000), "45s");
+		assert.equal(formatDriverAge(12 * 60_000), "12m");
+		assert.equal(formatDriverAge(3 * 3_600_000), "3h");
+		assert.equal(formatDriverAge(2 * 86_400_000), "2d");
+		assert.equal(formatDriverAge(null), null);
+		assert.equal(formatDriverAge(Number.NaN), null);
+		assert.equal(formatDriverAge(-1), null);
 	});
 });
