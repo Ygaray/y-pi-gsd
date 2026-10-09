@@ -603,6 +603,15 @@ export function createUsageDashboardPoller(
 	core: { ref: RateLimitStatusRef; getProvider: () => string | undefined },
 ): UsageDashboardPoller | undefined {
 	if (options === false) return undefined;
-	if (resolveUsageDashboardBaseUrl(options?.baseUrl, options?.env ?? process.env) === null) return undefined;
+	const env = options?.env ?? process.env;
+	if (resolveUsageDashboardBaseUrl(options?.baseUrl, env) === null) {
+		// `off` is a deliberate switch; anything else that resolved to null was a rejected override (typo, non-loopback).
+		const override = options?.baseUrl?.trim() || env[USAGE_DASHBOARD_URL_ENV]?.trim();
+		if (override && override.toLowerCase() !== "off" && env[USAGE_DASHBOARD_DEBUG_ENV] === "1") {
+			const log = options?.debugLog ?? ((line: string) => void process.stderr.write(`${line}\n`));
+			log("[usage-dashboard] disabled: base-url"); // fixed token only: the rejected URL is never echoed
+		}
+		return undefined;
+	}
 	return new UsageDashboardPoller(core, options ?? {});
 }

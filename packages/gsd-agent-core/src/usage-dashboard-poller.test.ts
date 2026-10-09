@@ -1131,6 +1131,18 @@ describe("usage dashboard transport safety (T-43-06, T-43-08)", () => {
 		assert.equal(createUsageDashboardPoller({ env: { GSD_USAGE_DASHBOARD_URL: "http://10.0.0.5:8820" } }, core), undefined);
 		assert.ok(createUsageDashboardPoller({ env: {} }, core));
 
+		// IN-02: a rejected override is distinguishable from "off" in the debug output, and never echoes the URL.
+		const lines: string[] = [];
+		const debugEnv = { GSD_DEBUG_USAGE_DASHBOARD: "1" };
+		const debugLog = (line: string) => lines.push(line);
+		assert.equal(createUsageDashboardPoller({ env: { ...debugEnv, GSD_USAGE_DASHBOARD_URL: "http://dashboard.lan:8820" }, debugLog }, core), undefined);
+		assert.deepEqual(lines, ["[usage-dashboard] disabled: base-url"]);
+		assert.equal(createUsageDashboardPoller({ baseUrl: "off", env: debugEnv, debugLog }, core), undefined);
+		assert.equal(createUsageDashboardPoller({ env: { ...debugEnv, GSD_USAGE_DASHBOARD_URL: "OFF" }, debugLog }, core), undefined);
+		assert.equal(lines.length, 1, "the kill switch stays silent");
+		assert.equal(createUsageDashboardPoller({ env: { GSD_USAGE_DASHBOARD_URL: "http://dashboard.lan:8820" }, debugLog }, core), undefined);
+		assert.equal(lines.length, 1, "nothing is printed without the debug flag");
+
 		const exec = fakeExec(LOGGED_IN);
 		const fetcher = fakeFetch(() => okResponse());
 		const remote = new UsageDashboardPoller(core, {
