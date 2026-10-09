@@ -230,6 +230,34 @@ export function isTombstoneEntry(entry: Pick<SessionRegistryEntry, 'exit'> | und
 }
 
 /**
+ * How long an exit tombstone is kept in the shared registry before
+ * `registerSessionEntry` physically prunes it (7 days). This is the Phase-41
+ * IN-03 hand-off: tombstones were never garbage-collected. It is independent of
+ * the TUI's 24 h display window, which only hides old deaths from the widget.
+ */
+export const TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete (in place) every exit tombstone whose `exit.at` parses and is more than
+ * `TOMBSTONE_RETENTION_MS` older than `nowMs`; returns the pruned keys. Live
+ * claims and tombstones with a missing or unparsable `exit.at` are never
+ * touched, so a malformed death record is kept rather than silently erased.
+ */
+export function pruneExpiredTombstones(registry: SessionRegistry, nowMs: number): string[] {
+  const pruned: string[] = [];
+  for (const [key, row] of Object.entries(registry)) {
+    if (!isTombstoneEntry(row)) continue;
+    const at = Date.parse(row.exit?.at as string);
+    if (!Number.isFinite(at)) continue;
+    if (nowMs - at > TOMBSTONE_RETENTION_MS) {
+      delete registry[key];
+      pruned.push(key);
+    }
+  }
+  return pruned;
+}
+
+/**
  * Persist (or overwrite) the session entry for a projectDir.
  *
  * SC3 pid uniqueness (Phase 41): when the entry being written is a live claim
@@ -237,6 +265,12 @@ export function isTombstoneEntry(entry: Pick<SessionRegistryEntry, 'exit'> | und
  * pid is dropped first - two keys can never claim one live driver. Exit
  * tombstones are exempt on both sides: a tombstone is a death record, not a
  * claim, so it is neither dropped by this rule nor does it trigger it.
+ *
+ * Tombstone retention (Phase 42, 41-REVIEW-FIX IN-03 hand-off): before it
+ * writes, this prunes exit tombstones older than `TOMBSTONE_RETENTION_MS`
+ * (judged against `nowMs`, defaulting to the wall clock). Live-claim rows and
+ * tombstones with a missing or unparsable `exit.at` are never pruned, and no
+ * timer or extra writer exists - the GC rides this existing write.
  *
  * Cross-process note (research Q4, accepted deliberately): this
  * read-modify-write is atomic per write (temp file + rename) but NOT locked
@@ -248,8 +282,15 @@ export function isTombstoneEntry(entry: Pick<SessionRegistryEntry, 'exit'> | und
 export function registerSessionEntry(
   entry: SessionRegistryEntry,
   registryPath = REGISTRY_PATH,
+  nowMs: number = Date.now(),
 ): void {
   const registry = readSessionRegistry(registryPath);
+  const prunedTombstones = pruneExpiredTombstones(registry, nowMs);
+  if (prunedTombstones.length > 0) {
+    process.stderr.write(
+      `[gsd-mcp-server] session registry: pruned ${prunedTombstones.length} exit tombstone(s) older than the retention window\n`,
+    );
+  }
   const key = keyFor(entry.projectDir);
   const sameDirKeys = keysForSameDir(registry, entry.projectDir);
 

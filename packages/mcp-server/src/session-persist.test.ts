@@ -27,6 +27,7 @@ import {
   removeSessionEntry,
   removeSessionEntryIfPid,
   type SessionExitRecord,
+  TOMBSTONE_RETENTION_MS,
   type SessionRegistryEntry,
 } from './session-persist.js';
 
@@ -274,11 +275,60 @@ describe('Phase 41 registry primitives', () => {
       exit: exitRecord('2026-10-08T10:00:00.000Z'),
     });
     const b = makeEntry({ projectDir: join(tmp, 'b'), pid: 777 });
-    registerSessionEntry(a, registryPath);
-    registerSessionEntry(b, registryPath);
+    // Pinned clock: the tombstone is dated 2026-10-08, so an unpinned register
+    // would start pruning it (7-day GC) once the wall clock passes 2026-10-15.
+    const pinnedNow = Date.parse('2026-10-08T12:00:00.000Z');
+    registerSessionEntry(a, registryPath, pinnedNow);
+    registerSessionEntry(b, registryPath, pinnedNow);
     assert.ok(getSessionEntry(a.projectDir, registryPath)?.exit, 'tombstone must survive');
     assert.equal(getSessionEntry(b.projectDir, registryPath)?.pid, 777);
     assert.equal(Object.keys(readSessionRegistry(registryPath)).length, 2);
+  });
+
+  test('tombstones older than the retention window are pruned on register', () => {
+    const t0 = Date.parse('2026-10-01T00:00:00.000Z');
+    const a = makeEntry({
+      projectDir: join(tmp, 'a'),
+      pid: 801,
+      status: 'exited',
+      exit: exitRecord(new Date(t0).toISOString()),
+    });
+    const b = makeEntry({ projectDir: join(tmp, 'b'), pid: 802 });
+    registerSessionEntry(a, registryPath, t0);
+
+    // Just inside the window: the tombstone survives.
+    registerSessionEntry(b, registryPath, t0 + TOMBSTONE_RETENTION_MS - 1);
+    assert.ok(getSessionEntry(a.projectDir, registryPath)?.exit, 'tombstone inside the window must survive');
+
+    // Just past the window: it is pruned and the new live row is written.
+    registerSessionEntry(b, registryPath, t0 + TOMBSTONE_RETENTION_MS + 1);
+    assert.equal(getSessionEntry(a.projectDir, registryPath), undefined, 'expired tombstone must be pruned');
+    assert.equal(getSessionEntry(b.projectDir, registryPath)?.pid, 802);
+    assert.equal(Object.keys(readSessionRegistry(registryPath)).length, 1);
+  });
+
+  test('live claims and tombstones with an unparsable exit time are never pruned', () => {
+    const t0 = Date.parse('2026-10-01T00:00:00.000Z');
+    const oldLive = makeEntry({
+      projectDir: join(tmp, 'old-live'),
+      pid: 811,
+      startTime: new Date(t0 - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const garbage = makeEntry({
+      projectDir: join(tmp, 'garbage'),
+      pid: 812,
+      status: 'exited',
+      exit: exitRecord('garbage'),
+    });
+    const fresh = makeEntry({ projectDir: join(tmp, 'fresh'), pid: 813 });
+    registerSessionEntry(oldLive, registryPath, t0);
+    registerSessionEntry(garbage, registryPath, t0);
+
+    for (const nowMs of [t0, t0 + TOMBSTONE_RETENTION_MS * 10, Number.MAX_SAFE_INTEGER]) {
+      registerSessionEntry(fresh, registryPath, nowMs);
+      assert.equal(getSessionEntry(oldLive.projectDir, registryPath)?.pid, 811, 'a live claim is never pruned');
+      assert.equal(getSessionEntry(garbage.projectDir, registryPath)?.exit?.at, 'garbage', 'an unparsable tombstone is kept');
+    }
   });
 
   test('findSessionEntryBySessionId ignores an empty or whitespace sessionId', () => {
