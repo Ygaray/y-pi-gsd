@@ -418,7 +418,8 @@ export function formatPublishSuccess(doc: PublishedDoc): string {
     doc.pinned ? "Pinned:    yes (no expiry)" : `Expires:   ${doc.expiresAt ?? "unknown"}`,
     `Name:      ${doc.name ?? "(not reported by yahir-tn)"}`,
   ];
-  if (doc.name !== null) lines.push(`Pin it:    yahir-tn pin ${doc.name}`);
+  // The pin hint only makes sense for a doc that is not already pinned (IN-01).
+  if (doc.name !== null && !doc.pinned) lines.push(`Pin it:    yahir-tn pin ${doc.name}`);
   return lines.join("\n");
 }
 

@@ -614,7 +614,7 @@ test("DOCS-01 input: --keep passes through before --json, from either side of th
   }
 });
 
-test("DOCS-01 input: a pinned result renders Pinned, no Expires line, and still a pin hint", async () => {
+test("DOCS-01 input: a pinned result renders Pinned with no Expires line and no pin hint", async () => {
   const root = makeProject();
   const stub = makeStub({
     stdout: envelope({ ...GOOD_ROW, pinned: true, expires_at: null }),
@@ -624,7 +624,7 @@ test("DOCS-01 input: a pinned result renders Pinned, no Expires line, and still 
   assert.equal(note.level, "success", note.message);
   assert.match(note.message, /Pinned/);
   assert.ok(!note.message.includes("Expires:"), note.message);
-  assert.ok(note.message.includes("yahir-tn pin doc:p/notes"), note.message);
+  assert.ok(!note.message.includes("yahir-tn pin"), note.message);
   const inv = readInvocations(stub);
   assert.deepEqual(inv[0].slice(-2), ["--keep", "--json"]);
   recordedArgvs.push(inv[0]);
