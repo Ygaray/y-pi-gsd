@@ -108,6 +108,13 @@ export class DriverLivenessMonitor {
 	private lastSignature = "";
 	private inFlight: Promise<boolean> | null = null;
 	private cached: { path: string; atMs: number; read: DriverRegistryRead } | null = null;
+	/** Dismissed death identities (driverRowKey) for this TUI session only; never persisted. */
+	private readonly dismissed = new Set<string>();
+	/** Death identities already announced in this session (dedupe key: canonicalDir|pid|startTime). */
+	private readonly alerted = new Set<string>();
+	private startupDone = false;
+	private lastDrivers: ClassifiedDriver[] = [];
+	private lastNowMs = 0;
 
 	constructor(options: DriverLivenessMonitorOptions) {
 		this.projectRoot = options.projectRoot;
@@ -168,8 +175,10 @@ export class DriverLivenessMonitor {
 			const drivers = classifyDrivers(read.entries, {
 				ctx: this.classifyContext(nowMs),
 				projectRoot: this.projectRoot,
-				dismissed: new Set<string>(),
+				dismissed: this.dismissed,
 			});
+			this.lastDrivers = drivers;
+			this.lastNowMs = nowMs;
 			this.detectDeaths(drivers, nowMs);
 			const summary = summarizeDrivers(drivers, nowMs);
 			return this.publish({ kind: "summary", summary, nowMs });
@@ -186,8 +195,6 @@ export class DriverLivenessMonitor {
 		return changed;
 	}
 
-	private readonly alerted = new Set<string>();
-
 	private emit(alert: DriverDeathAlert): void {
 		try {
 			this.onAlert?.(alert);
@@ -196,11 +203,97 @@ export class DriverLivenessMonitor {
 		}
 	}
 
+	/**
+	 * One alert per visible death, ever (per session). Deaths already present on the first successful read are
+	 * capped at MAX_STARTUP_DEATH_ALERTS age-prefixed alerts plus one summary; later deaths alert immediately.
+	 */
 	private detectDeaths(drivers: readonly ClassifiedDriver[], nowMs: number): void {
+		const fresh: ClassifiedDriver[] = [];
 		for (const d of drivers) {
 			if (d.liveness.kind !== "died" || !isDriverVisible(d, nowMs) || this.alerted.has(d.rowKey)) continue;
 			this.alerted.add(d.rowKey);
-			this.emit(deathAlert(d, "✕ Driver died: "));
+			fresh.push(d);
 		}
+
+		if (this.startupDone) {
+			for (const d of fresh) this.emit(deathAlert(d, "\u2715 Driver died: "));
+			return;
+		}
+		this.startupDone = true;
+
+		const exitedAt = (d: ClassifiedDriver): number =>
+			d.liveness.kind === "died" && d.liveness.atMs !== null ? d.liveness.atMs : Number.NEGATIVE_INFINITY;
+		fresh.sort((a, b) => Number(b.related) - Number(a.related) || exitedAt(b) - exitedAt(a));
+
+		for (const d of fresh.slice(0, MAX_STARTUP_DEATH_ALERTS)) {
+			const age = driverAgeText(d, nowMs);
+			this.emit(deathAlert(d, age === null ? "\u2715 Driver died: " : `\u2715 Driver died ${age} ago: `));
+		}
+		const remaining = fresh.length - MAX_STARTUP_DEATH_ALERTS;
+		if (remaining > 0) {
+			this.emit({
+				headline: remaining === 1 ? "\u2715 1 more driver died; run /drivers" : `\u2715 ${remaining} more drivers died; run /drivers`,
+				details: [],
+			});
+		}
+	}
+
+	/**
+	 * Hide every currently visible died row (related or not) from the widget for this TUI session. In memory only:
+	 * the registry is never written. Returns how many were dismissed.
+	 */
+	dismissDied(): number {
+		let count = 0;
+		for (const d of this.lastDrivers) {
+			if (d.liveness.kind === "died" && isDriverVisible(d, this.lastNowMs)) {
+				this.dismissed.add(d.rowKey);
+				count++;
+			}
+		}
+		if (count > 0) {
+			this.lastDrivers = this.lastDrivers.map((d) => (this.dismissed.has(d.rowKey) ? { ...d, dismissed: true } : d));
+			if (this.snapshot.kind === "summary") {
+				// lastSignature is left stale on purpose so the next refresh reports a change and the widget repaints.
+				this.snapshot = {
+					kind: "summary",
+					summary: summarizeDrivers(this.lastDrivers, this.lastNowMs),
+					nowMs: this.lastNowMs,
+				};
+			}
+		}
+		return count;
+	}
+
+	/**
+	 * Fresh, machine-wide, classified listing for `/drivers`: always re-reads (bypassing the cache), sorted died
+	 * (newest exit first, unknown last) -> stale -> running (oldest first). Emits no alerts.
+	 */
+	async listAll(): Promise<DriverListing> {
+		const path = this.registryPath();
+		const nowMs = this.now();
+		const read = readDriverRegistry(path);
+		this.cached = { path, atMs: nowMs, read };
+		if (read.kind === "unreadable") return { kind: "unreadable", path, why: read.why };
+
+		const livePids = read.entries.filter((e) => e.row.exit === undefined).map((e) => e.row.pid);
+		await this.probes.prefetchStartTimes([...new Set(livePids)]);
+
+		const drivers = classifyDrivers(read.entries, {
+			ctx: this.classifyContext(nowMs),
+			projectRoot: this.projectRoot,
+			dismissed: this.dismissed,
+		});
+		const rank = { died: 0, stale: 1, running: 2 } as const;
+		const diedAt = (d: ClassifiedDriver): number =>
+			d.liveness.kind === "died" && d.liveness.atMs !== null ? d.liveness.atMs : Number.NEGATIVE_INFINITY;
+		const since = (d: ClassifiedDriver): number =>
+			d.liveness.kind !== "died" && d.liveness.sinceMs !== null ? d.liveness.sinceMs : Number.NEGATIVE_INFINITY;
+		drivers.sort((a, b) => {
+			const byKind = rank[a.liveness.kind] - rank[b.liveness.kind];
+			if (byKind !== 0) return byKind;
+			if (a.liveness.kind === "died") return diedAt(b) - diedAt(a);
+			return since(b) - since(a);
+		});
+		return { kind: "ok", path, drivers };
 	}
 }

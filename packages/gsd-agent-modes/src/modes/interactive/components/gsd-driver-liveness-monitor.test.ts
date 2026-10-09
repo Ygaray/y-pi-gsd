@@ -142,4 +142,169 @@ describe("DriverLivenessMonitor", () => {
 		assert.equal(h.alerts.length, 1);
 		assert.equal(h.alerts[0].headline, "✕ Driver died: Agent process exited unexpectedly (signal SIGKILL)");
 	});
+
+	it("a running-to-died transition emits exactly one alert and repeated refreshes emit none", async () => {
+		const h = makeHarness();
+		writeRegistry(h.registryPath, [liveRow(h.root, 4242, 12 * MIN)]);
+		await h.monitor.refresh();
+		assert.equal(h.alerts.length, 0);
+
+		h.probes.alive.delete(4242);
+		await h.monitor.refresh();
+		assert.equal(h.alerts.length, 1);
+		assert.equal(
+			h.alerts[0].headline,
+			"\u2715 Driver died: driver pid 4242 is no longer running; exit status unobserved",
+		);
+		assert.equal(h.alerts[0].details.length, 1);
+		assert.ok(h.alerts[0].details[0].startsWith("  pid 4242 \u00b7 project "), h.alerts[0].details[0]);
+		assert.ok(h.alerts[0].details[0].endsWith(" \u00b7 /drivers for details"));
+		assert.ok(!/\d\d:\d\d:\d\d/.test(h.alerts[0].details[0]), "no time for an unknown exit time");
+
+		for (let i = 0; i < 3; i++) {
+			h.clock.now += 3_000;
+			await h.monitor.refresh();
+		}
+		assert.equal(h.alerts.length, 1);
+	});
+
+	it("an unreconciled death that later becomes a tombstone is not re-alerted", async () => {
+		const h = makeHarness();
+		writeRegistry(h.registryPath, [liveRow(h.root, 4242, 12 * MIN)]);
+		await h.monitor.refresh();
+		h.probes.alive.delete(4242);
+		await h.monitor.refresh();
+		assert.equal(h.alerts.length, 1);
+
+		writeRegistry(h.registryPath, [tombstone(h.root, 4242, 1 * MIN)]);
+		h.clock.now += 5_000;
+		await h.monitor.refresh();
+		assert.equal(h.alerts.length, 1);
+		const text = stripAnsi(new DriverLivenessWidget(h.monitor).render(120)[0]);
+		assert.ok(text.includes("Agent process exited unexpectedly (signal SIGKILL)"), text);
+	});
+
+	it("startup deaths emit at most three age-prefixed alerts plus one summary", async () => {
+		const h = makeHarness([]);
+		const otherA = makeTempDir();
+		const otherB = makeTempDir();
+		const otherC = makeTempDir();
+		const otherOld = makeTempDir();
+		writeRegistry(h.registryPath, [
+			tombstone(h.root, 5001, 5 * HOUR, "related-five"),
+			tombstone(join(h.root, "wt"), 5002, 4 * HOUR, "related-four"),
+			tombstone(otherA, 5003, 1 * HOUR, "other-one"),
+			tombstone(otherB, 5004, 2 * HOUR, "other-two"),
+			tombstone(otherC, 5005, 3 * HOUR, "other-three"),
+			tombstone(otherOld, 5006, 25 * HOUR, "too-old"),
+		]);
+		await h.monitor.refresh();
+		assert.deepEqual(
+			h.alerts.map((a) => a.headline),
+			[
+				"\u2715 Driver died 4h ago: related-four",
+				"\u2715 Driver died 5h ago: related-five",
+				"\u2715 Driver died 1h ago: other-one",
+				"\u2715 2 more drivers died; run /drivers",
+			],
+		);
+		assert.deepEqual(h.alerts[3].details, []);
+
+		await h.monitor.refresh();
+		assert.equal(h.alerts.length, 4, "no repeat on the next refresh");
+	});
+
+	it("dismissDied hides died rows from the widget but listAll still returns them marked dismissed", async () => {
+		const h = makeHarness([]);
+		writeRegistry(h.registryPath, [tombstone(h.root, 4242, 3 * MIN)]);
+		await h.monitor.refresh();
+		const widget = new DriverLivenessWidget(h.monitor);
+		assert.equal(widget.render(100).length, 1);
+
+		assert.equal(h.monitor.dismissDied(), 1);
+		const snapshot = h.monitor.getSnapshot();
+		assert.equal(snapshot.kind, "summary");
+		assert.equal(snapshot.kind === "summary" && snapshot.summary.kind, "none");
+		assert.deepEqual(widget.render(100), []);
+		assert.equal(h.monitor.dismissDied(), 0, "nothing left to dismiss");
+
+		const listing = await h.monitor.listAll();
+		assert.equal(listing.kind, "ok");
+		if (listing.kind === "ok") {
+			assert.equal(listing.drivers.length, 1);
+			assert.equal(listing.drivers[0].dismissed, true);
+		}
+
+		h.clock.now += 5_000;
+		await h.monitor.refresh();
+		assert.deepEqual(widget.render(100), [], "dismissal survives later refreshes in this session");
+		assert.equal(h.alerts.length, 1, "dismissing never re-alerts");
+	});
+
+	it("listAll bypasses the cache and sorts died, stale, running", async () => {
+		const h = makeHarness([4242, 4243, 4100, 5001]);
+		const dirs = [1, 2, 3, 4, 5].map(() => makeTempDir());
+		writeRegistry(h.registryPath, [liveRow(h.root, 4243, 5 * MIN)]);
+		await h.monitor.refresh();
+
+		writeRegistry(h.registryPath, [
+			liveRow(dirs[0], 4243, 5 * MIN),
+			liveRow(dirs[1], 4242, 30 * MIN),
+			liveRow(dirs[2], 5001, 41 * MIN, { ownerPid: 5999 }),
+			tombstone(dirs[3], 6001, 3 * HOUR, "older death"),
+			tombstone(dirs[4], 6002, 1 * HOUR, "newer death"),
+		]);
+		const listing = await h.monitor.listAll();
+		assert.equal(listing.kind, "ok");
+		if (listing.kind !== "ok") return;
+		assert.equal(listing.path, h.registryPath);
+		assert.deepEqual(
+			listing.drivers.map((d) => [d.liveness.kind, d.row.pid]),
+			[
+				["died", 6002],
+				["died", 6001],
+				["stale", 5001],
+				["running", 4242],
+				["running", 4243],
+			],
+		);
+
+		writeFileSync(h.registryPath, "{not json");
+		const bad = await h.monitor.listAll();
+		assert.deepEqual(bad, { kind: "unreadable", path: h.registryPath, why: "parse failed" });
+	});
+
+	it("refresh never rejects and never overlaps", async () => {
+		const h = makeHarness();
+		writeRegistry(h.registryPath, [liveRow(h.root, 4242, 12 * MIN)]);
+		assert.equal(await h.monitor.refresh(), true);
+		const before = h.monitor.getSnapshot();
+
+		h.probes.failPrefetch = true;
+		h.clock.now += 5_000;
+		assert.equal(await h.monitor.refresh(), false);
+		assert.equal(h.monitor.getSnapshot(), before, "previous snapshot kept");
+
+		h.probes.failPrefetch = false;
+		h.clock.now += 5_000;
+		const prefetchesBefore = h.probes.prefetches.length;
+		const a = h.monitor.refresh();
+		const b = h.monitor.refresh();
+		assert.equal(a, b, "concurrent refreshes share one promise");
+		await a;
+		assert.equal(h.probes.prefetches.length, prefetchesBefore + 1, "one read per overlapping burst");
+		assert.deepEqual(h.probes.prefetches[h.probes.prefetches.length - 1], [4242], "only live-claim pids are prefetched");
+	});
+
+	it("hostile control bytes in a tombstone reason never reach an alert", async () => {
+		const h = makeHarness([]);
+		writeRegistry(h.registryPath, [tombstone(h.root, 4242, 3 * MIN, "boom\x07\x9b\x1b[31mred")]);
+		await h.monitor.refresh();
+		assert.equal(h.alerts.length, 1);
+		for (const text of [h.alerts[0].headline, ...h.alerts[0].details]) {
+			assert.ok(!text.includes("\x07") && !text.includes("\x9b") && !text.includes("\x1b"), JSON.stringify(text));
+		}
+		assert.equal(h.alerts[0].headline, "\u2715 Driver died 3m ago: boom[31mred");
+		assert.match(h.alerts[0].details[0], /\d\d:\d\d:\d\d/, "known exit time is shown");
+	});
 });
