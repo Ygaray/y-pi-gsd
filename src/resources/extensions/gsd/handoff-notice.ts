@@ -8,10 +8,11 @@ import type { ExtensionContext } from "@gsd/pi-coding-agent";
 
 import { sanitizeCliText } from "./commands-doc.js";
 import { isDbAvailable } from "./gsd-db.js";
-import { describeHandoffFailure, noticeHandoffs } from "./handoff-client.js";
+import { describeHandoffFailure, noticeHandoffs, showHandoff } from "./handoff-client.js";
 import type { HandoffEntry, HandoffRunner } from "./handoff-client.js";
 import { readStoredHandoff } from "./handoff-record.js";
 import type { StoredHandoff } from "./handoff-record.js";
+import { logWarning } from "./workflow-logger.js";
 
 /** Handoff lines shown in one startup notify; the rest collapse into an overflow line (DP-10). */
 export const STARTUP_NOTICE_MAX_LINES = 5;
@@ -62,22 +63,52 @@ function cleanTitle(title: string): string {
   return flat.length > NOTICE_TITLE_MAX ? flat.slice(0, NOTICE_TITLE_MAX).trimEnd() : flat;
 }
 
-/** Tracer form: the pickable y-pi-gsd lines only. Returns null when there is nothing to show. */
+function ageSuffix(entry: HandoffEntry, now: Date): string {
+  const age = formatHandoffAge(entry.createdAt, now);
+  return age === null ? "" : ` · ${age}`;
+}
+
+/**
+ * One line per handoff (DP-10), written here from structured fields only (D-07). Entries are
+ * open by construction. Order: own (pickable y-pi-gsd) first, then `any` (D-14, labelled as
+ * another harness's), then y-pi-gsd entries this project did not record, then every other
+ * harness; CLI order is kept within a group. `stored === undefined` means ownership is unknown
+ * (DB unavailable, DP-11), so y-pi-gsd entries show as pickable. A taken-but-unfinished stored
+ * handoff (D-06) leads. Returns null when there is nothing to show.
+ */
 export function formatStartupNotice(
   entries: HandoffEntry[],
   stored: StoredHandoff | null | undefined,
   takenStored: HandoffEntry | null,
   now: Date,
 ): string | null {
-  void takenStored;
-  const lines: string[] = [];
+  const own: string[] = [];
+  const any: string[] = [];
+  const unrecorded: string[] = [];
+  const foreign: string[] = [];
   for (const entry of entries) {
-    if (entry.harness !== "y-pi-gsd") continue;
-    if (stored !== undefined && stored?.id !== entry.id) continue;
-    const age = formatHandoffAge(entry.createdAt, now);
-    lines.push(`Handoff waiting: ${cleanTitle(entry.title)}${age === null ? "" : ` · ${age}`} — /gsd resume-work (${entry.id})`);
+    const title = cleanTitle(entry.title);
+    const age = ageSuffix(entry, now);
+    if (entry.harness === "y-pi-gsd") {
+      if (stored === undefined || stored?.id === entry.id) {
+        own.push(`Handoff waiting: ${title}${age} — /gsd resume-work (${entry.id})`);
+      } else {
+        unrecorded.push(`y-pi-gsd handoff not recorded by this project: ${title}${age} — yahir-handoff show ${entry.id}`);
+      }
+    } else if (entry.harness === "any") {
+      any.push(`Handoff waiting (written by another harness): ${title}${age} — /gsd resume-work ${entry.id}`);
+    } else {
+      foreign.push(`Handoff for ${entry.harness} (not resumable here): ${title}${age} — yahir-handoff show ${entry.id}`);
+    }
   }
-  return lines.length === 0 ? null : lines.join("\n");
+  const all = [...own, ...any, ...unrecorded, ...foreign];
+  if (takenStored !== null) {
+    all.unshift(`Handoff taken but not completed: ${cleanTitle(takenStored.title)} — /gsd resume-work (${takenStored.id})`);
+  }
+  if (all.length === 0) return null;
+  const shown = all.slice(0, STARTUP_NOTICE_MAX_LINES);
+  if (all.length > shown.length) shown.push(`… and ${all.length - shown.length} more — yahir-handoff ls`);
+  return shown.join("\n");
 }
 
 /** One warning line that always names "yahir-handoff notice failed" plus the exit code or kind. */
@@ -103,19 +134,25 @@ export async function showStartupNotice(
     const stored = deps.readStored ? deps.readStored() : isDbAvailable() ? readStoredHandoff() : undefined;
     const sessionIdRaw = ctx.sessionManager?.getSessionId?.();
     const sessionId = typeof sessionIdRaw === "string" && sessionIdRaw !== "" ? sessionIdRaw : undefined;
-    const result = await noticeHandoffs({
-      cwd: basePath,
-      sessionId,
-      env: deps.env,
-      run: deps.run,
-      timeoutMs: deps.timeoutMs,
-    });
+    const result = await noticeHandoffs({ cwd: basePath, sessionId, env: deps.env, run: deps.run, timeoutMs: deps.timeoutMs });
     if (result.ok === false) {
       if (result.kind === "not-installed") return;
       ctx.ui.notify(failureWarning(describeHandoffFailure(result)), "warning");
       return;
     }
-    const line = formatStartupNotice(result.value.handoffs, stored, null, deps.now?.() ?? new Date());
+    const callOpts = { cwd: basePath, sessionId, env: deps.env, run: deps.run, timeoutMs: deps.timeoutMs };
+    // Pitfall 2: a stored handoff missing from the open list may be taken-but-unfinished (a failed
+    // resume); look it up so it stays visible. Any failure here is logged, never notified.
+    let takenStored: HandoffEntry | null = null;
+    if (stored && !result.value.handoffs.some((h) => h.id === stored.id)) {
+      const shown = await showHandoff(stored.id, callOpts);
+      if (shown.ok === true) {
+        if (shown.value.state === "taken") takenStored = shown.value;
+      } else {
+        logWarning("session", `startup handoff lookup failed: ${describeHandoffFailure(shown)}`, { file: "handoff-notice.ts" });
+      }
+    }
+    const line = formatStartupNotice(result.value.handoffs, stored, takenStored, deps.now?.() ?? new Date());
     if (line !== null) ctx.ui.notify(sanitizeCliText(line).replace(/\r/g, ""), "info");
   } catch {
     /* fail-open: the notice must never break startup */
