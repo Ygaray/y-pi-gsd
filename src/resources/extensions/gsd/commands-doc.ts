@@ -277,6 +277,13 @@ const HTML_SUFFIX_RE = /\.html?$/i;
  * disallowed characters become "-", leading non-alphanumerics are dropped, the result
  * is cut to 64 characters, then trailing .html/.htm is stripped. Case is preserved
  * (URL paths are case-sensitive and existing docs are keyed by original case).
+ *
+ * Known limitation (IN-06, accepted under D-03): the slug is basename-keyed and lossy, so
+ * unrelated repos that sanitize to the same name ("My Project" and "My-Project", or two
+ * repos both called "app" under different parents) share one yahir-docs project, and pages
+ * with the same stem overwrite each other (last publish wins). The success output always
+ * shows the absolute Source path so the operator can tell which file is live. D-03 fixes
+ * the slug as the sanitized basename, so no path hash is appended.
  */
 export function sanitizeProjectSlug(name: string): string | null {
   let s = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 64);
