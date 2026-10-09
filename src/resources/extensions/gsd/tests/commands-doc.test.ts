@@ -372,6 +372,21 @@ test("DOCS-01 failure: parsePublishResult unit cases", () => {
   assert.equal(parsePublishResult(JSON.stringify({ schema_version: 1 }), "/s").ok, false);
 });
 
+test("DOCS-01 failure (WR-03): spoofing URLs are rejected and invisible format characters are stripped", () => {
+  const { parsePublishResult, sanitizeCliText } = mods.doc;
+  const wrap = (url: string) => JSON.stringify({ schema_version: 1, result: { ...GOOD_ROW, url } });
+  for (const url of [
+    "https://trusted.ts.net@evil.example/Doc/p/notes.html",
+    "https://user:pw@h.ts.net/Doc/p/notes.html",
+    "https://h.ts.net/Doc/p/\u202enotes.html",
+    "https://h.ts.net/Doc/p/\u200bnotes.html",
+    "https://h\u00e9.ts.net/Doc/p/notes.html",
+  ]) {
+    assert.equal(parsePublishResult(wrap(url), "/s").ok, false, url);
+  }
+  assert.equal(sanitizeCliText("a\u202eb\u200bc\u2066d\ufeffe\u009bf"), "abcdef");
+});
+
 test("DOCS-01 failure: a rejecting runner becomes one error notify", async () => {
   const root = makeProject();
   const ctx = await runDoc(root, ".planning/notes.md", { run: () => Promise.reject(new Error("kaboom")) });

@@ -143,6 +143,12 @@ export function parsePublishResult(stdout: string, sentPath: string): ParsedPubl
   if (/[\s\u0000-\u001f\u007f-\u009f]/.test(url)) {
     return { ok: false, reason: "result.url contains whitespace or control characters" };
   }
+  // A canonical URL is printable ASCII. Anything else (bidi overrides, zero-width or
+  // other format characters, raw IDN) can make the displayed link differ from what a
+  // browser opens, so the raw string is only shown when it is plain ASCII (WR-03).
+  if (/[^\u0021-\u007e]/.test(url)) {
+    return { ok: false, reason: "result.url contains non-ASCII or non-printable characters" };
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -151,6 +157,9 @@ export function parsePublishResult(stdout: string, sentPath: string): ParsedPubl
   }
   if (parsed.protocol !== "https:" || parsed.hostname === "") {
     return { ok: false, reason: "result.url is not an https URL" };
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return { ok: false, reason: "result.url contains credentials (user info before the host)" };
   }
   return {
     ok: true,
@@ -291,14 +300,17 @@ export function buildYahirTnArgv(slug: string, realPath: string, keep: boolean):
 
 /**
  * Strip ANSI escape sequences (CSI, OSC, other ESC pairs) and control characters
- * other than newline and tab from CLI-originated text before it reaches notify.
+ * other than newline and tab, plus zero-width and bidi format characters, from
+ * CLI-originated text before it reaches notify.
  */
 export function sanitizeCliText(text: string): string {
   return text
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b[\s\S]?/g, "")
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+    // zero-width, bidi and other invisible format characters (WR-03)
+    .replace(/[\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
 }
 
 function tailChars(text: string, n: number): string {
