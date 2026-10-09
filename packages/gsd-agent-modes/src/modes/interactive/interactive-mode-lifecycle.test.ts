@@ -41,6 +41,34 @@ describe("InteractiveMode lifecycle", () => {
 		assert.equal(mode._themeChangeUnsub, undefined);
 	});
 
+	it("stop disposes the driver liveness widget", () => {
+		const mode = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
+		let disposeCount = 0;
+
+		mode.loadingAnimation = undefined;
+		mode.extensionTerminalInputUnsubscribers = new Set();
+		mode.clearExtensionTerminalInputListeners = () => {};
+		mode._branchChangeUnsub = undefined;
+		mode._themeChangeUnsub = undefined;
+		mode.onInputCallback = undefined;
+		mode.clearExtensionWidgets = () => {};
+		mode.customFooter = undefined;
+		mode.customHeader = undefined;
+		mode.footer = { dispose() {} };
+		mode.driverLivenessWidget = {
+			dispose() {
+				disposeCount++;
+			},
+		};
+		mode.footerDataProvider = { dispose() {} };
+		mode.unsubscribe = undefined;
+		mode.isInitialized = false;
+
+		mode.stop();
+
+		assert.equal(disposeCount, 1);
+	});
+
 	it("caches markdown theme settings until the code block indent changes", () => {
 		const mode = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
 		let codeBlockIndent = "  ";

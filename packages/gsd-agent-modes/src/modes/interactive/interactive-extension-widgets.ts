@@ -260,6 +260,10 @@ export function renderWidgets(host: InteractiveModeDelegateHost): void {
 		if (host.gsdStatusWidget) {
 			host.widgetContainerAbove.addChild(host.gsdStatusWidget);
 		}
+		// Phase 42 (D-02): the driver liveness row sits directly under the status widget; it adds no blank line.
+		if (host.driverLivenessWidget) {
+			host.widgetContainerAbove.addChild(host.driverLivenessWidget);
+		}
 		for (const component of host.extensionWidgetsAbove.values()) {
 			host.widgetContainerAbove.addChild(component);
 		}

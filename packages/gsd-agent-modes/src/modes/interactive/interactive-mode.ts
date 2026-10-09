@@ -23,6 +23,9 @@ import { FooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provid
 import { KeybindingsManager } from "@gsd/agent-core";
 import { ensureTool } from "@gsd/pi-coding-agent/utils/tools-manager.js";
 import { GsdStatusWidget } from "./components/gsd-status-widget.js";
+import { DriverLivenessMonitor } from "./components/gsd-driver-liveness-monitor.js";
+import { DriverLivenessWidget } from "./components/gsd-driver-liveness-widget.js";
+import { findDriverProjectRoot } from "./components/gsd-driver-registry.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
 import { CustomEditor } from "./components/custom-editor.js";
@@ -100,6 +103,8 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private gsdStatusWidget: GsdStatusWidget;
+	private driverLivenessMonitor?: DriverLivenessMonitor;
+	private driverLivenessWidget?: DriverLivenessWidget;
 	private gsdStatusExpanded: boolean | undefined = undefined;
 	private gsdProgressState: import("@gsd/pi-coding-agent/core/extensions/extension-upstream-types.js").GsdProgressState | undefined;
 	private gsdProgressDispose?: () => void;
@@ -207,6 +212,14 @@ export class InteractiveMode {
 			gsdProgress: this.gsdProgressState,
 			isStreaming: this.session.isStreaming,
 		}));
+		// Phase 42 (D-02): the driver liveness row is a sibling of the status widget with its own monitor,
+		// timer and dispose. It is mounted by renderWidgets(), never via ui.addChild, because renderWidgets
+		// re-parents its children on every call. The timer starts after init (requestRender is gated on it).
+		this.driverLivenessMonitor = new DriverLivenessMonitor({
+			projectRoot: findDriverProjectRoot(process.cwd()),
+			onAlert: () => {}, // Task 2 routes alerts to showDriverAlert
+		});
+		this.driverLivenessWidget = new DriverLivenessWidget(this.driverLivenessMonitor);
 		this.statusContainer = new Container();
 		this.pinnedMessageContainer = new Container();
 		this.blockingErrorContainer = new Container();
@@ -288,6 +301,7 @@ export class InteractiveMode {
 		};
 		this.installStdinErrorRecovery();
 		this.isInitialized = true;
+		this.driverLivenessWidget?.start(() => this.ui.requestRender());
 
 		modeInit.updateTerminalTitle(this);
 		this.subscribeToAgent();
@@ -473,6 +487,7 @@ export class InteractiveMode {
 		this.autocompleteProvider = undefined;
 
 		this.footer.dispose();
+		this.driverLivenessWidget?.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
