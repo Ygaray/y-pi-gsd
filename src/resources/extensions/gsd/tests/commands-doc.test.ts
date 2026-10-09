@@ -277,6 +277,27 @@ test("DOCS-01 failure (WR-05): a child that ignores SIGTERM is SIGKILLed and the
   assert.match(mods.doc.formatRunFailure(run, 200), /did not finish within/);
 });
 
+test("DOCS-01 failure (coverage): signal, non-ENOENT spawn error and maxBuffer overflow are loud errors", async () => {
+  const { formatRunFailure } = mods.doc;
+  const base = { ok: false, exitCode: null, stdout: "", stderr: "" };
+  assert.match(formatRunFailure({ ...base, signal: "SIGSEGV" }, 1000), /killed by SIGSEGV[\s\S]*yahir-tn ps/);
+  const eacces = formatRunFailure({ ...base, spawnError: "EACCES" }, 1000);
+  assert.match(eacces, /EACCES[\s\S]*yahir-tn ps/);
+  assert.ok(!/not installed/.test(eacces), eacces);
+
+  const root = makeProject();
+  const dir = tmp("gsd-doc-stub-");
+  writeFileSync(
+    join(dir, "yahir-tn"),
+    ["#!/bin/sh", "/usr/bin/head -c 2000000 /dev/zero"].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  const ctx = await runDoc(root, ".planning/notes.md", undefined, `${dir}${delimiter}${pathWithoutRealYahirTn()}`);
+  const msg = onlyError(ctx);
+  assert.match(msg, /MAXBUFFER|Could not run yahir-tn or read its output/i);
+  assert.ok(!msg.includes("Published:"), msg);
+});
+
 test("DOCS-01 failure: exit 5 is published-but-not-served with no openable URL", async () => {
   const root = makeProject();
   const slug = basename(root);
