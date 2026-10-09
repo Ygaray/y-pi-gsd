@@ -306,6 +306,20 @@ describe("handleDriversCommand stop", () => {
 		assert.ok(text.includes("is not running. This only records it as exited; no process is signalled."), text);
 	});
 
+	it("the stop confirmation says the supervisor is unknown, not absent, for a row without ownerPid", async () => {
+		const h = makeHarness();
+		const dir = mkdir(makeTempDir(), "gamma");
+		const { ownerPid: _omit, ...legacy } = liveRow(dir, 4242, 41 * MIN);
+		writeRegistry(h.registryPath, [legacy]);
+		h.probes.alive.add(4242);
+		await handleDriversCommand("/drivers", h.ctx);
+		await handleDriversCommand("/drivers stop 1", h.ctx);
+
+		const text = plain(h.selectors[0].component, 300).join("\n");
+		assert.ok(text.includes("Its supervising MCP server is unknown (older registry row)."), text);
+		assert.ok(!text.includes("No supervising MCP server is running."), text);
+	});
+
 	it("stop calls the port with the listed pid and start time and reports stopped only after a clean re-read", async () => {
 		const h = makeHarness({
 			port: {

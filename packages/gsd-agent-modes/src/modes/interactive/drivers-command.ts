@@ -253,10 +253,15 @@ function confirmationDescription(d: ClassifiedDriver): string {
 	if (!isLiveClaim(d)) {
 		return `Driver pid ${pid} for ${project} is not running. This only records it as exited; no process is signalled.`;
 	}
-	const supervisor =
-		d.supervisor === "alive" && d.row.ownerPid !== undefined
-			? `Its supervising MCP server (pid ${d.row.ownerPid}) is still running and will report the exit.`
-			: "No supervising MCP server is running.";
+	let supervisor: string;
+	if (d.supervisor === "alive" && d.row.ownerPid !== undefined) {
+		supervisor = `Its supervising MCP server (pid ${d.row.ownerPid}) is still running and will report the exit.`;
+	} else if (d.supervisor === "none") {
+		// No ownerPid on the row (written before supervisors were recorded): the supervisor is unknown, not absent.
+		supervisor = "Its supervising MCP server is unknown (older registry row).";
+	} else {
+		supervisor = "No supervising MCP server is running.";
+	}
 	return `Stops only the driver process (pid ${pid}) for ${project}, ${displayPath(d)}. ${supervisor} Its in-flight sub-processes are not tracked and may finish on their own.`;
 }
 
