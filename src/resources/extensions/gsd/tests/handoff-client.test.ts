@@ -317,7 +317,7 @@ test("HANDOFF-01 client: the runtime belt refuses to spawn from a test process w
   assert.equal(client.isTestProcess(), true);
   const project = makeTempGsdProject(tempDirs);
   const stub = makeHandoffStub(tempDirs, { create: { stdout: envelope(handoffEntry()) } });
-  const env = { ...process.env, PATH: `${stub}:${pathWithoutRealYahirHandoff()}` };
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${stub}:${pathWithoutRealYahirHandoff()}` };
   delete env.YAHIR_HANDOFF_ROOT;
   const run = await client.runYahirHandoff(["create", "--json"], { cwd: project, env, timeoutMs: 2000 });
   assert.ok(run.refused, "refused is set");
