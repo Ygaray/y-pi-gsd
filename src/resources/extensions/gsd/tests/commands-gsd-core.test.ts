@@ -67,6 +67,7 @@ import { withCommandCwd } from "../commands/context.ts";
 import { loadPrompt } from "../prompt-loader.ts";
 import { closeDatabase, getOpenPlanReviewCycle, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import { resolvePlanReviewMaxCycles } from "../preferences.ts";
+import { fakeHandoffRunner, handoffEntry, runOk } from "./handoff-test-helpers.ts";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -836,9 +837,19 @@ describe("Batch 4 handlers dispatch", () => {
     });
   });
   test("handlePauseWork report flag", async () => {
-    const pi = createMockPi(); const ctx = createMockCtx();
-    await handlePauseWork("--report", ctx as any, pi as any);
-    assert.match(pi.sent[0].content, /`--report` — ON/);
+    // Registration (HANDOFF-01) opens the project DB and calls the handoff CLI: run inside a
+    // temp project with an injected runner so neither this repo's .gsd/gsd.db nor the real
+    // handoff store is touched.
+    const { run } = fakeHandoffRunner({ create: runOk(handoffEntry()) });
+    try {
+      await withTempCommandCwd(async (ctx, _base) => {
+        const pi = createMockPi();
+        await handlePauseWork("--report", ctx as any, pi as any, { run });
+        assert.match(pi.sent[0].content, /`--report` — ON/);
+      });
+    } finally {
+      closeDatabase();
+    }
   });
   test("handleResumeWork dispatches", async () => {
     const pi = createMockPi(); const ctx = createMockCtx();

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { loadPrompt } from "./prompt-loader.js";
+import type { PauseHandoffDeps } from "./handoff-lifecycle.js";
 import { currentDirectoryRoot, GSDNoProjectError, projectRoot, withCommandCwd } from "./commands/context.js";
 import { getUnmergedMilestoneBlockMessageForBase } from "./unmerged-milestone-guard.js";
 import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
@@ -75,7 +76,7 @@ export const GSD_CORE_IMPLEMENTED_CATALOG: ReadonlyArray<{ cmd: string; desc: st
   { cmd: "ai-integration-phase", desc: "Produce an AI design contract (AI-SPEC) for AI milestones" },
   { cmd: "ultraplan-phase", desc: "Extended-reasoning plan pass, review, then import" },
   { cmd: "autonomous", desc: "Run all remaining lifecycle work continuously" },
-  { cmd: "pause-work", desc: "Create a context handoff when pausing mid-stream" },
+  { cmd: "pause-work", desc: "Create a context handoff (registered with yahir-handoff) when pausing mid-stream" },
   { cmd: "resume-work", desc: "Resume work with full context restoration" },
   { cmd: "manager", desc: "Interactive command center for multiple milestones" },
   { cmd: "phase", desc: "CRUD for milestone queue ordering" },
@@ -1057,7 +1058,20 @@ export async function handleAutonomous(args: string, ctx: ExtensionCommandContex
 }
 
 /** /gsd pause-work [--report] */
-export async function handlePauseWork(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+export async function handlePauseWork(
+  args: string,
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  deps: PauseHandoffDeps = {},
+): Promise<void> {
+  // HANDOFF-01 (D-01/D-03): register the handoff mechanically, in code, before the prompt is
+  // dispatched. Fail-open (D-09): a registration problem never blocks the pause-work prompt.
+  try {
+    const { registerPauseHandoff } = await import("./handoff-lifecycle.js");
+    await registerPauseHandoff(ctx, "pause-work", deps);
+  } catch {
+    /* fail-open */
+  }
   dispatchPrompt(
     {
       prompt: "pause-work",
