@@ -98,12 +98,33 @@ function cleanText(text: string): string {
 
 /**
  * Turn every markdown heading line into a `####` heading so folded text can never open a
- * canonical `## ` section in the receiving template.
+ * canonical `## ` section in the receiving template. Lines inside a properly closed code fence are
+ * left alone (yahir-handoff's parser ignores `## ` there too, and a shell comment must not be
+ * rewritten); fence state follows the same rules as `balanceFences`. A fence that never closes is
+ * not protected: its content is demoted like any other text, so no raw `## ` line survives a
+ * truncated or unbalanced fence.
  */
 export function demoteHeadings(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => (HEADING_RE.test(line) ? "#### " + line.replace(HEADING_RE, "") : line))
+  const lines = text.split("\n");
+  const protectedLine: boolean[] = new Array(lines.length).fill(false);
+  let fenced: string | null = null;
+  let openedAt = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const fm = FENCE_RE.exec(lines[i]);
+    if (fm) {
+      if (fenced === null) {
+        if (fm[1][0] !== "`" || !fm[2].includes("`")) {
+          fenced = fm[1];
+          openedAt = i;
+        }
+      } else if (fm[1][0] === fenced[0] && fm[1].length >= fenced.length && fm[2].trim() === "") {
+        for (let j = openedAt; j <= i; j++) protectedLine[j] = true;
+        fenced = null;
+      }
+    }
+  }
+  return lines
+    .map((line, i) => (!protectedLine[i] && HEADING_RE.test(line) ? "#### " + line.replace(HEADING_RE, "") : line))
     .join("\n");
 }
 

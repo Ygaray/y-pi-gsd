@@ -200,6 +200,12 @@ test("HANDOFF-01 body: folded notes cannot create a canonical heading - headings
   assert.ok(state.includes(`Notes from .gsd/HANDOFF.md (last written ${MTIME}`));
   assert.ok(state.includes("may predate this pause"));
   assert.equal(demoteHeadings("## A\ntext\n   ### B\n####### not a heading"), "#### A\ntext\n#### B\n####### not a heading");
+  assert.equal(
+    demoteHeadings("## A\n```sh\n## build\n```\n## B\n~~~\n# c\n~~~"),
+    "#### A\n```sh\n## build\n```\n#### B\n~~~\n# c\n~~~",
+    "headings inside closed code fences are left alone (IN-02)",
+  );
+  assert.equal(demoteHeadings("```\n## open\nno closer"), "```\n#### open\nno closer", "an unclosed fence is not protected");
 });
 
 test("HANDOFF-01 body: an unclosed fence in the notes is closed before the next section", () => {
