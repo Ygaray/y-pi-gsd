@@ -282,8 +282,9 @@ describe("DriverLivenessMonitor", () => {
 
 		h.probes.failPrefetch = true;
 		h.clock.now += 5_000;
-		assert.equal(await h.monitor.refresh(), false);
-		assert.equal(h.monitor.getSnapshot(), before, "previous snapshot kept");
+		assert.equal(await h.monitor.refresh(), true, "a failed refresh is a visible change, not a silent keep");
+		assert.notEqual(h.monitor.getSnapshot(), before, "the stale snapshot is not left on screen");
+		assert.deepEqual(h.monitor.getSnapshot(), { kind: "unreadable", path: h.registryPath }, "failure is loud");
 
 		h.probes.failPrefetch = false;
 		h.clock.now += 5_000;

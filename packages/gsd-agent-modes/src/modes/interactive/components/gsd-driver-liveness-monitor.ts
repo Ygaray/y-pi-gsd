@@ -183,7 +183,9 @@ export class DriverLivenessMonitor {
 			const summary = summarizeDrivers(drivers, nowMs);
 			return this.publish({ kind: "summary", summary, nowMs });
 		} catch {
-			return false;
+			// Never leave a stale "running" snapshot on screen when the pipeline itself fails: publish the loud
+			// "unreadable" state so the widget says it cannot observe, instead of silently keeping the old rows.
+			return this.publish({ kind: "unreadable", path: this.registryPath() });
 		}
 	}
 
