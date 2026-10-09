@@ -8,10 +8,16 @@ import type { NotificationPreferences } from "./types.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { sendRemoteNotification as _sendRemoteNotification } from "../remote-questions/notify.js";
 import { DEDUP_WINDOW_MS } from "./notification-store.js";
+import { emitAlertBotEvent, type AlertBotEvent } from "./alert-bot.js";
 
 /** Swappable dispatcher for remote notifications — exported so tests can mock it. */
 export const remoteNotificationDispatcher = {
   send: _sendRemoteNotification,
+};
+
+/** Swappable GSD-alert-bot emitter — exported so tests can mock it. */
+export const alertBotDispatcher = {
+  emit: emitAlertBotEvent,
 };
 
 export type NotifyLevel = "info" | "success" | "warning" | "error";
@@ -95,7 +101,11 @@ export function sendDesktopNotification(
   level: NotifyLevel = "info",
   kind: NotificationKind = "complete",
   projectName?: string,
-  deps: { notifications?: NotificationPreferences } = {},
+  deps: {
+    notifications?: NotificationPreferences;
+    /** Tee this notification to GSD-alert-bot as the given event (tagged per call site). */
+    alert?: AlertBotEvent;
+  } = {},
 ): void {
   // Throttle gate FIRST — upstream of the remote dispatch below (T-24-07):
   // that dispatch is deliberately upstream of the preference gate ("remote
@@ -115,6 +125,12 @@ export function sendDesktopNotification(
   // Remote notifications fire independently of desktop preferences.
   // sendRemoteNotification handles "not configured" gracefully (early return).
   void remoteNotificationDispatcher.send(title, message).catch(() => {});
+
+  // GSD-alert-bot fires independently of desktop preferences too, but only for call sites
+  // that tagged an event, and can be turned off with notifications.alert_bot: false.
+  if (deps.alert && notifications?.alert_bot !== false) {
+    alertBotDispatcher.emit({ event: deps.alert, project: projectName ?? "unknown", title: message });
+  }
 
   if (!shouldSendDesktopNotification(kind, notifications)) return;
 

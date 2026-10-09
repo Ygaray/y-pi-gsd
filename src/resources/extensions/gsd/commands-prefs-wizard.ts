@@ -424,7 +424,7 @@ export function buildCategorySummaries(prefs: Record<string, unknown>): Record<s
   const notif = prefs.notifications as Record<string, boolean> | undefined;
   let notifSummary = "(defaults)";
   if (notif && Object.keys(notif).length > 0) {
-    const allKeys = ["enabled", "local_bell", "on_complete", "on_error", "on_budget", "on_milestone", "on_attention"];
+    const allKeys = ["enabled", "local_bell", "on_complete", "on_error", "on_budget", "on_milestone", "on_attention", "alert_bot"];
     const defaults: Record<string, boolean> = {
       enabled: true,
       local_bell: false,
@@ -433,6 +433,7 @@ export function buildCategorySummaries(prefs: Record<string, unknown>): Record<s
       on_budget: true,
       on_milestone: true,
       on_attention: true,
+      alert_bot: true,
     };
     const masterEnabled = notif.enabled ?? defaults.enabled;
     const enabledCount = masterEnabled
@@ -1232,6 +1233,7 @@ async function configureNotifications(ctx: ExtensionCommandContext, prefs: Recor
     { key: "on_budget", label: "Notify on budget thresholds", defaultVal: true },
     { key: "on_milestone", label: "Notify on milestone completion", defaultVal: true },
     { key: "on_attention", label: "Notify when manual attention needed", defaultVal: true },
+    { key: "alert_bot", label: "Send run alerts to GSD-alert-bot (if installed)", defaultVal: true },
   ] as const;
 
   for (const field of notifFields) {

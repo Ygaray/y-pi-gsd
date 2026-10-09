@@ -88,6 +88,7 @@ const AskUserQuestionsParams = Type.Object({
 // same IDs but different text/options are treated as distinct.
 
 import { createHash } from "node:crypto";
+import { basename } from "node:path";
 
 interface CachedResult {
 	content: { type: "text"; text: string }[];
@@ -275,6 +276,47 @@ export async function playQuestionBell(
 	}
 }
 
+interface NeedsInputDeps {
+	isAutoActive?: () => Promise<boolean>;
+	alertBotEnabled?: () => Promise<boolean>;
+	emit?: (fields: { event: "needs_input"; project: string; title: string }) => void;
+	project?: string;
+}
+
+/**
+ * Tee a pending question to GSD-alert-bot as `needs_input` — only when nobody is watching:
+ * auto-mode is running, or there is no UI (headless). Interactive chat questions stay local.
+ * Best-effort: never throws, never delays the question.
+ *
+ * @internal Exported for testing only.
+ */
+export async function emitNeedsInputAlert(
+	questions: ReadonlyArray<{ question: string }>,
+	hasUI: boolean,
+	deps: NeedsInputDeps = {},
+): Promise<void> {
+	try {
+		const isAutoActive = deps.isAutoActive ?? (async () => {
+			const { isAutoActive: active } = await import("./gsd/auto-runtime-state.js");
+			return active();
+		});
+		if (hasUI && !(await isAutoActive())) return;
+		const alertBotEnabled = deps.alertBotEnabled ?? (async () => {
+			const { loadEffectiveGSDPreferences } = await import("./gsd/preferences.js");
+			return loadEffectiveGSDPreferences()?.preferences.notifications?.alert_bot !== false;
+		});
+		if (!(await alertBotEnabled())) return;
+		const emit = deps.emit ?? (await import("./gsd/alert-bot.js")).emitAlertBotEvent;
+		emit({
+			event: "needs_input",
+			project: deps.project ?? basename(process.cwd()),
+			title: questions[0]?.question ?? "Question waiting for an answer",
+		});
+	} catch {
+		// Best-effort: question rendering must never depend on alert delivery.
+	}
+}
+
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function AskUserQuestions(pi: ExtensionAPI) {
@@ -324,6 +366,7 @@ export default function AskUserQuestions(pi: ExtensionAPI) {
 			if (ctx.hasUI || hasRemote) {
 				await playQuestionBell();
 			}
+			void emitNeedsInputAlert(params.questions, ctx.hasUI);
 
 			// Case 1: Both remote and local UI available — race them.
 			// The first response wins; the loser is cancelled via AbortController.

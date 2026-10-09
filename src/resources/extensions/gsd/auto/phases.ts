@@ -89,6 +89,7 @@ export async function runGuards(
       deps.sendDesktopNotification(
         "GSD", label, "warning", "stop-directive",
         basename(s.originalBasePath || s.basePath),
+        { alert: "blocked" },
       );
 
       // Pause first — Ensures auto-mode stops even if later steps fail
@@ -203,7 +204,7 @@ export async function runGuards(
         // 100% — special enforcement logic (halt/pause/warn)
         const msg = `Budget ceiling ${deps.formatCost(budgetCeiling)} reached (spent ${deps.formatCost(totalCost)}).`;
         if (effectiveAction === "halt") {
-          deps.sendDesktopNotification("GSD", msg, "error", "budget", basename(s.originalBasePath || s.basePath));
+          deps.sendDesktopNotification("GSD", msg, "error", "budget", basename(s.originalBasePath || s.basePath), { alert: "blocked" });
           await deps.stopAuto(ctx, pi, "Budget ceiling reached");
           debugLog("autoLoop", { phase: "exit", reason: "budget-halt" });
           return { action: "break", reason: "budget-halt", inputPayload };
@@ -213,7 +214,7 @@ export async function runGuards(
             `${msg} Pausing auto-mode — /gsd auto to override and continue.`,
             "warning",
           );
-          deps.sendDesktopNotification("GSD", msg, "warning", "budget", basename(s.originalBasePath || s.basePath));
+          deps.sendDesktopNotification("GSD", msg, "warning", "budget", basename(s.originalBasePath || s.basePath), { alert: "blocked" });
           deps.logCmuxEvent(prefs, msg, "warning");
           await deps.pauseAuto(ctx, pi);
           debugLog("autoLoop", { phase: "exit", reason: "budget-pause" });
@@ -259,6 +260,7 @@ export async function runGuards(
         "warning",
         "attention",
         basename(s.originalBasePath || s.basePath),
+        { alert: "blocked" },
       );
       await deps.pauseAuto(ctx, pi);
       debugLog("autoLoop", { phase: "exit", reason: "context-window" });
