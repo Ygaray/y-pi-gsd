@@ -91,6 +91,7 @@ describe("injectAlertBotSessionContext", () => {
 		const servers = opts.mcpServers as Record<string, { env?: Record<string, string> }>;
 		assert.deepEqual(servers["gsd-workflow"].env, { KEEP: "1", GSD_UNATTENDED: "1", GSD_ALERT_PROJECT: "app" });
 		assert.equal(servers.other.env, undefined);
+		assert.equal((opts.env as Record<string, string>).GSD_UNATTENDED, "1");
 	});
 
 	test("clears a stale unattended flag from a previous query and records the opt-out", () => {
@@ -101,9 +102,32 @@ describe("injectAlertBotSessionContext", () => {
 		assert.equal(env.GSD_ALERT_BOT, "0");
 	});
 
-	test("is a no-op without a workflow server", () => {
-		const opts: Record<string, unknown> = base();
+	test("project .mcp.json config (workflow server not in sdkOptions.mcpServers) still reaches the server via the claude process env", () => {
+		// y-pi-gsd always declares gsd-workflow in the project .mcp.json, so the adapter strips it
+		// from sdkOptions.mcpServers; the server then inherits the spawned claude process env.
+		const opts: Record<string, unknown> = { env: { PATH: "/bin", KEEP: "1" }, mcpServers: { other: { command: "x" } } };
+		injectAlertBotSessionContext(opts, "gsd-workflow", { unattended: true, project: "app", enabled: true });
+		assert.deepEqual(opts.env, { PATH: "/bin", KEEP: "1", GSD_UNATTENDED: "1", GSD_ALERT_PROJECT: "app" });
+		assert.deepEqual(opts.mcpServers, { other: { command: "x" } });
+	});
+
+	test("also works with no mcpServers and no workflow server name at all", () => {
+		const opts: Record<string, unknown> = { env: {} };
+		injectAlertBotSessionContext(opts, undefined, { unattended: true, project: "app", enabled: false });
+		assert.deepEqual(opts.env, { GSD_UNATTENDED: "1", GSD_ALERT_PROJECT: "app", GSD_ALERT_BOT: "0" });
+	});
+
+	test("clears stale values inherited from the parent env when attended", () => {
+		const opts: Record<string, unknown> = { env: { GSD_UNATTENDED: "1", GSD_ALERT_BOT: "0", GSD_ALERT_PROJECT: "old" } };
+		injectAlertBotSessionContext(opts, "gsd-workflow", { unattended: false, project: "app", enabled: true });
+		assert.deepEqual(opts.env, { GSD_ALERT_PROJECT: "app" });
+	});
+
+	test("falls back to process.env as the base when the SDK options carry no env", () => {
+		const opts: Record<string, unknown> = {};
 		injectAlertBotSessionContext(opts, undefined, { unattended: true, project: "app", enabled: true });
-		assert.deepEqual(opts, base());
+		const env = opts.env as Record<string, string>;
+		assert.equal(env.GSD_UNATTENDED, "1");
+		assert.equal(env.PATH, process.env.PATH);
 	});
 });
