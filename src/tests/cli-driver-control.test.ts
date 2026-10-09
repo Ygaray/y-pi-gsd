@@ -45,6 +45,39 @@ test('OBS-01 the cli port stops a real registered process through the real Sessi
   }
 })
 
+test('the real stop acts on the registry the TUI lists even when GSD_HOME changes after the MCP server loaded', async () => {
+  // Make sure the MCP server module is loaded (and its own default path frozen) against the original GSD_HOME.
+  const original = process.env.GSD_HOME
+  const projectDir = mkdtempSync(join(tmpdir(), 'cli-driver-control-proj2-'))
+  const otherHome = mkdtempSync(join(tmpdir(), 'cli-driver-control-home2-'))
+  try {
+    const canon = realpathSync.native(projectDir)
+    const port = createDriverControlPort()
+    assert.deepEqual(await port.stopDriver(canon, { pid: 4242, startTime: 'T' }), { outcome: 'no-entry', pid: 4242 })
+
+    process.env.GSD_HOME = otherHome
+    const startTime = new Date(Date.now() - 1000).toISOString()
+    const tombstone = {
+      sessionId: 'uat-42-05',
+      projectDir: canon,
+      pid: 4242,
+      startTime,
+      status: 'exited',
+      exit: { reason: 'Agent process exited unexpectedly (signal SIGKILL)', code: null, signal: 'SIGKILL', at: startTime },
+    }
+    writeFileSync(join(otherHome, 'session-instances.json'), JSON.stringify({ [canon]: tombstone }, null, 2))
+
+    // A tombstone is a death record: the stop reconciles it without probing or signalling any pid.
+    const result = await port.stopDriver(canon, { pid: 4242, startTime })
+    assert.equal(result.outcome, 'dead-reconciled', 'the stop read the same registry file the TUI would list')
+  } finally {
+    if (original === undefined) delete process.env.GSD_HOME
+    else process.env.GSD_HOME = original
+    rmSync(projectDir, { recursive: true, force: true })
+    rmSync(otherHome, { recursive: true, force: true })
+  }
+})
+
 type StopResult = { outcome: DriverStopOutcome; entry?: { pid: number }; error?: string }
 
 test('maps every SessionManager outcome to the port result and propagates thrown errors', async () => {

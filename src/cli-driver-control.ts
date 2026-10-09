@@ -21,7 +21,16 @@ export type LoadDriverStopManager = () => Promise<DriverStopSessionManager>
 
 async function loadMcpSessionManager(): Promise<DriverStopSessionManager> {
   const { SessionManager } = await import('@opengsd/mcp-server')
-  return new SessionManager()
+  const { driverRegistryPath } = await import('@gsd/agent-modes/modes/interactive/components/gsd-driver-registry.js')
+  // mcp-server computes its default registry path once, when its module first loads. The TUI lists the registry
+  // from `driverRegistryPath()` on every call. Pin the stop to that same per-call rule via SessionManager's
+  // registry-path seam, so a stop can never act on a different file than the one the operator was looking at.
+  class RegistrySyncedSessionManager extends SessionManager {
+    protected getSessionRegistryPath(): string {
+      return driverRegistryPath()
+    }
+  }
+  return new RegistrySyncedSessionManager()
 }
 
 export function createDriverControlPort(load: LoadDriverStopManager = loadMcpSessionManager): DriverControlPort {
