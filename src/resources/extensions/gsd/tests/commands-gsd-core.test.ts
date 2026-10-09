@@ -852,9 +852,19 @@ describe("Batch 4 handlers dispatch", () => {
     }
   });
   test("handleResumeWork dispatches", async () => {
-    const pi = createMockPi(); const ctx = createMockCtx();
-    await handleResumeWork("", ctx as any, pi as any);
+    // HANDOFF-01: resume-work opens the project DB and may call the handoff CLI, so it runs in a
+    // temp project with an injected runner (no stored record means zero CLI calls).
+    const pi = createMockPi();
+    const { run, calls } = fakeHandoffRunner({});
+    try {
+      await withTempCommandCwd(async (ctx, _base) => {
+        await handleResumeWork("", ctx as any, pi as any, { run });
+      });
+    } finally {
+      closeDatabase();
+    }
     assert.equal(pi.sent[0].customType, "gsd-resume-work");
+    assert.equal(calls.length, 0);
   });
 });
 

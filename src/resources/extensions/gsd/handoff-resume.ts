@@ -6,12 +6,13 @@
 import { sanitizeCliText } from "./commands-doc.js";
 import {
   describeHandoffFailure,
+  isValidHandoffId,
   showHandoff,
   takeHandoff,
 } from "./handoff-client.js";
 import type { HandoffEntry, HandoffRunner } from "./handoff-client.js";
 import { balanceFences, demoteHeadings, oneLine } from "./handoff-body.js";
-import { readStoredHandoff } from "./handoff-record.js";
+import { clearStoredHandoff, readStoredHandoff } from "./handoff-record.js";
 
 export const RESUME_WORK_USAGE =
   "Usage: /gsd resume-work [<handoff-id>]  (no id: resume this project's own handoff; an id: pick up a handoff another harness wrote for any harness)";
@@ -80,13 +81,50 @@ function fitBody(text: string, budget: number): string {
 
 // ─── Args ───────────────────────────────────────────────────────────────────
 
+/** DP-13: nothing, or exactly one handoff id; anything else is a usage error. */
 export function parseResumeArgs(args: string): ResumeArgs {
   const tokens = args.trim().split(/\s+/).filter((t) => t !== "");
   if (tokens.length === 0) return { ok: true, id: null };
-  return { ok: true, id: tokens[0] };
+  if (tokens.length === 1 && isValidHandoffId(tokens[0])) return { ok: true, id: tokens[0] };
+  return { ok: false, message: `"${oneLine(args, 80)}" is not a handoff id. ${RESUME_WORK_USAGE}` };
 }
 
 // ─── Resolution ─────────────────────────────────────────────────────────────
+
+const CLOSED_STATES = ["done", "dropped", "superseded", "archived"];
+
+/**
+ * The stored own handoff (D-04, D-08): always shown before it is taken (D-11). An entry that
+ * is already taken counts as ours and is resumable without a re-take; a take conflict on our
+ * own open id is resumable too.
+ */
+async function resolveOwn(id: string, callOpts: ResumeCallOpts): Promise<ResumeDecision> {
+  const show = await showHandoff(id, callOpts);
+  if (!show.ok) {
+    if (show.kind === "not-found") {
+      clearStoredHandoff();
+      return { kind: "own-stale", id, state: "missing from the store" };
+    }
+    return { kind: "own-unavailable", id, warning: `handoff ${id} not taken — ${describeHandoffFailure(show)}` };
+  }
+  const state = show.value.state;
+  if (CLOSED_STATES.includes(state)) {
+    clearStoredHandoff();
+    return { kind: "own-stale", id, state };
+  }
+  if (state === "taken") return { kind: "own", id, entry: show.value };
+  const take = await takeHandoff(id, callOpts);
+  if (take.ok) return { kind: "own", id, entry: { ...take.value, body: take.value.body ?? show.value.body } };
+  if (take.kind === "conflict") {
+    return {
+      kind: "own",
+      id,
+      entry: show.value,
+      warning: `handoff ${id} is held by another session; resuming it here anyway (it is this project's own handoff)`,
+    };
+  }
+  return { kind: "own", id, entry: show.value, warning: `handoff ${id} not taken — ${describeHandoffFailure(take)}` };
+}
 
 /**
  * Decide which handoff this resume takes. Never throws; any unexpected error means "no handoff"
@@ -97,13 +135,7 @@ export async function resolveResumeHandoff(explicitId: string | null, callOpts: 
     const stored = readStoredHandoff();
     if (explicitId === null && stored === null) return { kind: "none" };
     if (stored !== null && (explicitId === null || explicitId === stored.id)) {
-      const show = await showHandoff(stored.id, callOpts);
-      if (show.ok && show.value.state === "open") {
-        const take = await takeHandoff(stored.id, callOpts);
-        return { kind: "own", id: stored.id, entry: take.ok ? take.value : show.value };
-      }
-      if (!show.ok) return { kind: "own-unavailable", id: stored.id, warning: describeHandoffFailure(show) };
-      return { kind: "own-stale", id: stored.id, state: show.value.state };
+      return await resolveOwn(stored.id, callOpts);
     }
     return { kind: "none" };
   } catch {
@@ -123,4 +155,22 @@ export function formatOwnHandoffContext(entry: HandoffEntry): string {
 
 export function formatNoHandoffContext(): string {
   return "No yahir-handoff entry was taken for this resume; rely on .gsd/HANDOFF.md and canonical state.";
+}
+
+/** Title plus the first lines of the Next steps section, for the paused-session resume notify. */
+export function summarizeHandoffForNotify(entry: HandoffEntry): string {
+  let text = `Resuming handoff ${entry.id}: ${oneLine(entry.title, 100)}`;
+  const lines = (entry.body ?? "").split("\n");
+  const start = lines.findIndex((l) => /^##\s+next steps\s*$/i.test(l));
+  if (start >= 0) {
+    const steps: string[] = [];
+    for (const line of lines.slice(start + 1)) {
+      if (/^##\s/.test(line)) break;
+      if (line.trim() === "") continue;
+      steps.push(oneLine(line, 200));
+      if (steps.length >= 5) break;
+    }
+    if (steps.length > 0) text += `\nNext steps:\n${steps.join("\n")}`;
+  }
+  return text;
 }

@@ -1148,17 +1148,64 @@ export async function handleResumeWork(
     const callOpts = { cwd: basePath, sessionId, run: deps.run, env: deps.env, timeoutMs: deps.timeoutMs };
 
     const decision = await resume.resolveResumeHandoff(parsed.id, callOpts);
-    if (decision.kind === "own") {
-      const ok = sendPrompt(resume.formatOwnHandoffContext(decision.entry));
-      if (ok) {
+    const closeOpts = {
+      sessionId,
+      run: deps.run,
+      env: deps.env,
+      timeoutMs: deps.timeoutMs,
+      onWarning: (m: string) => ctx.ui.notify(m, "warning"),
+    };
+
+    if (decision.kind === "refused") {
+      ctx.ui.notify(decision.message, "warning");
+      promptDispatched = true;
+      return;
+    }
+
+    if (decision.kind === "own" || decision.kind === "own-stale" || decision.kind === "own-unavailable") {
+      if (decision.kind === "own" && decision.warning) ctx.ui.notify(decision.warning, "warning");
+      if (decision.kind === "own-unavailable") ctx.ui.notify(decision.warning, "warning");
+      if (decision.kind === "own-stale") {
+        ctx.ui.notify(`handoff ${decision.id} was already ${decision.state}; resuming from project state`, "info");
+      }
+
+      let paused: { stepMode?: boolean } | null = null;
+      try {
+        const { readPausedSessionMetadata } = await import("./interrupted-session.js");
+        paused = readPausedSessionMetadata(basePath);
+      } catch {
+        paused = null;
+      }
+
+      if (paused !== null) {
+        // DP-1: a paused session re-enters auto mechanically (no triggerTurn prompt racing
+        // startAutoDetached); the handoff is closed by resume activation (45-04), which
+        // requires the record to be linked to the paused session.
+        if (decision.kind === "own") {
+          const { readStoredHandoff, writeStoredHandoff } = await import("./handoff-record.js");
+          const record = readStoredHandoff();
+          if (record && !record.hadPausedSession) writeStoredHandoff({ ...record, hadPausedSession: true });
+        }
+        ctx.ui.notify(
+          decision.kind === "own" ? resume.summarizeHandoffForNotify(decision.entry) : "Resuming the paused session.",
+          "info",
+        );
+        promptDispatched = true;
+        const command = paused.stepMode ? "next" : "auto";
+        try {
+          await (deps.dispatchCommand ?? ((c: string) => dispatchGSDCommand(c, ctx, pi)))(command);
+        } catch (err) {
+          ctx.ui.notify(`Failed to resume: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+        return;
+      }
+
+      const ok = sendPrompt(
+        decision.kind === "own" ? resume.formatOwnHandoffContext(decision.entry) : resume.formatNoHandoffContext(),
+      );
+      if (ok && decision.kind === "own") {
         const { closeStoredHandoff } = await import("./handoff-record.js");
-        await closeStoredHandoff("done", basePath, {
-          sessionId,
-          run: deps.run,
-          env: deps.env,
-          timeoutMs: deps.timeoutMs,
-          onWarning: (m) => ctx.ui.notify(m, "warning"),
-        });
+        await closeStoredHandoff("done", basePath, closeOpts);
       }
       return;
     }
