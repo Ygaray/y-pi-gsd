@@ -13,11 +13,13 @@ import { createAgentSession } from "./sdk.ts";
 import {
 	buildClaudeAuthStatusInvocation,
 	claudeConfigPath,
+	createUsageDashboardPoller,
 	identityMatchesLogin,
 	loginCandidates,
 	mapDashboardQuotaPayload,
 	parseClaudeAuthStatus,
 	parseClaudeConfigIdentity,
+	resolveUsageDashboardBaseUrl,
 	USAGE_DASHBOARD_BACKOFF_MS,
 	UsageDashboardPoller,
 	type ExecFileLike,
@@ -698,5 +700,360 @@ describe("usage dashboard identity chain (D-03, RESEARCH Pitfall 8)", () => {
 		} finally {
 			poller.stop();
 		}
+	});
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 30; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+const FAR_FUTURE_SEC = Math.round(Date.now() / 1000) + 86_400;
+
+function refWithFreshSdkWeekly(): RateLimitStatusRef {
+	return {
+		current: { session: null, weekly: { usedPercent: 40, resetsAtEpochSec: FAR_FUTURE_SEC } },
+		provider: "claude-code",
+		meta: { weekly: { source: "sdk", observedAtMs: Date.now() } },
+	};
+}
+
+function serverError(): Response {
+	return new Response("{}", { status: 503 });
+}
+
+describe("usage dashboard degradation (D-04)", () => {
+	afterEach(() => {
+		mock.timers.reset();
+	});
+
+	test("one failed poll keeps the dashboard values and the second consecutive failure clears only dashboard windows", async () => {
+		const ref = refWithFreshSdkWeekly();
+		const fetcher = fakeFetch((call) => (call === 1 ? okResponse() : serverError()));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			assert.equal(ref.current?.weekly?.usedPercent, 40, "a fresh SDK weekly window is not overwritten");
+			const afterOk = notified;
+
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			assert.equal(notified, afterOk);
+
+			await poller.refresh();
+			assert.equal(ref.current?.session, null);
+			assert.equal(ref.current?.weekly?.usedPercent, 40);
+			assert.equal(notified, afterOk + 1);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("an accepted poll resets the failure count", async () => {
+		const ref: RateLimitStatusRef = {};
+		const fetcher = fakeFetch((call) => (call === 2 ? okResponse() : serverError()));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 3);
+			assert.equal(ref.current?.session?.usedPercent, 8, "fail, ok, fail leaves the value shown");
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("each kind of non-accepted poll counts as a failure", async () => {
+		const bad: Array<[string, () => Response | Promise<Response>]> = [
+			["fetch rejection", () => Promise.reject(new Error("ECONNREFUSED"))],
+			["HTTP 500", () => new Response("{}", { status: 500 })],
+			["stale true", () => okResponse(okPayload({ stale: true }))],
+			["status error", () => okResponse(okPayload({ status: "error" }))],
+			["age_s 601", () => okResponse(okPayload({ age_s: 601 }))],
+			["malformed JSON", () => new Response("{not json", { status: 200 })],
+			["content-length over the cap", () => new Response("{}", { status: 200, headers: { "content-length": "300000" } })],
+			["300 KiB body without content-length", () => new Response(`{"pad":"${"x".repeat(300 * 1024)}"}`, { status: 200 })],
+		];
+		for (const [label, respond] of bad) {
+			const ref: RateLimitStatusRef = {
+				current: { session: { usedPercent: 5, resetsAtEpochSec: FAR_FUTURE_SEC }, weekly: null },
+				provider: "claude-code",
+				meta: { session: { source: "dashboard", observedAtMs: Date.now() } },
+			};
+			const poller = new UsageDashboardPoller(
+				{ ref, getProvider: () => "claude-code" },
+				{ fetchImpl: async () => respond(), execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+			);
+			try {
+				poller.start(() => {});
+				await poller.refresh();
+				assert.equal(ref.current?.session?.usedPercent, 5, `${label}: one failure keeps the value`);
+				await poller.refresh();
+				assert.equal(ref.current?.session, null, `${label}: second consecutive failure clears it`);
+			} finally {
+				poller.stop();
+			}
+		}
+	});
+
+	test("a dashboard window observed more than 600 s ago expires on the next tick while the dashboard is unreachable", async () => {
+		mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
+		const ref: RateLimitStatusRef = {};
+		const fetcher = fakeFetch((call) => (call === 1 ? okResponse(okPayload({ age_s: 590 })) : Promise.reject(new Error("down")) as never));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			const afterOk = notified;
+
+			mock.timers.tick(60_000);
+			await settle();
+			assert.equal(fetcher.calls.length, 2);
+			assert.equal(ref.current?.session, null, "expired at tick start, before the failure threshold");
+			assert.equal(notified, afterOk + 1);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("cadence: transient failures retry every 60 s and identity, 404, conflict and fingerprint failures wait 300 s", async () => {
+		const run = async (
+			label: string,
+			make: () => { exec: ExecFileLike; execCalls: () => number; respond: (call: number, url: string) => Response },
+			expected: { atStart: number; after60: number; after300: number; counter: "fetch" | "exec" },
+		): Promise<void> => {
+			mock.timers.reset();
+			mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
+			const { exec, execCalls, respond } = make();
+			const fetcher = fakeFetch((call) => respond(call, fetcher.calls[call - 1].url));
+			const poller = new UsageDashboardPoller(
+				{ ref: {}, getProvider: () => "claude-code" },
+				{ fetchImpl: fetcher.impl, execFileImpl: exec, env: {}, platform: "linux" },
+			);
+			const count = () => (expected.counter === "fetch" ? fetcher.calls.length : execCalls());
+			try {
+				poller.start(() => {});
+				await settle();
+				assert.equal(count(), expected.atStart, `${label}: first tick`);
+				mock.timers.tick(59_999);
+				await settle();
+				assert.equal(count(), expected.atStart, `${label}: nothing before 60 s`);
+				mock.timers.tick(1);
+				await settle();
+				assert.equal(count(), expected.after60, `${label}: at 60 s`);
+				mock.timers.tick(240_000);
+				await settle();
+				assert.equal(count(), expected.after300, `${label}: at 300 s`);
+			} finally {
+				poller.stop();
+			}
+		};
+		const loggedIn = () => {
+			const exec = fakeExec(LOGGED_IN);
+			return { exec: exec.impl, execCalls: () => exec.calls.length };
+		};
+		await run(
+			"transient 503",
+			() => ({ ...loggedIn(), respond: () => serverError() }),
+			{ atStart: 1, after60: 2, after300: 3, counter: "fetch" },
+		);
+		const loggedOut = () => {
+			const exec = failingExec(exitError(1, '{"loggedIn": false}'));
+			return { exec: exec.impl, execCalls: () => exec.calls.length };
+		};
+		await run(
+			"no identity",
+			() => ({ ...loggedOut(), respond: () => okResponse() }),
+			{ atStart: 1, after60: 1, after300: 2, counter: "exec" },
+		);
+		await run(
+			"404",
+			() => ({ ...loggedIn(), respond: () => new Response("{}", { status: 404 }) }),
+			{ atStart: 1, after60: 1, after300: 2, counter: "fetch" },
+		);
+		await run(
+			"all logins 409",
+			() => ({ ...loggedIn(), respond: () => new Response("{}", { status: 409 }) }),
+			{ atStart: 2, after60: 2, after300: 4, counter: "fetch" },
+		);
+		await run(
+			"fingerprint mismatch",
+			() => ({ ...loggedIn(), respond: () => okResponse(okPayload({ claude_org_uuid: "other" })) }),
+			{ atStart: 1, after60: 1, after300: 2, counter: "fetch" },
+		);
+	});
+
+	test("a request that never answers is aborted after fetchTimeoutMs and counted as a failure", async () => {
+		const ref: RateLimitStatusRef = {};
+		const signals: AbortSignal[] = [];
+		let call = 0;
+		const fetchImpl: FetchLike = (_url, init) => {
+			call += 1;
+			if (call === 1) return Promise.resolve(okResponse());
+			signals.push(init.signal);
+			return new Promise<Response>((_resolve, reject) => {
+				init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+			});
+		};
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl, execFileImpl: fakeExec(LOGGED_IN).impl, fetchTimeoutMs: 20, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+			await poller.refresh();
+			assert.equal(signals[0].aborted, true);
+			assert.equal(ref.current?.session?.usedPercent, 8, "one timeout alone changes nothing");
+			await poller.refresh();
+			assert.equal(signals[1].aborted, true);
+			assert.equal(ref.current?.session, null, "two timeouts clear the dashboard window");
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("stop aborts an in-flight request and nothing is written or notified", async () => {
+		const ref: RateLimitStatusRef = {};
+		const pending = deferred<Response>();
+		const signals: AbortSignal[] = [];
+		const fetchImpl: FetchLike = (_url, init) => {
+			signals.push(init.signal);
+			return pending.promise;
+		};
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		poller.start(() => assert.fail("must not notify"));
+		await waitFor(() => signals.length === 1);
+		poller.stop();
+		assert.equal(signals[0].aborted, true);
+		pending.resolve(okResponse());
+		await settle();
+		assert.deepEqual(ref, {});
+	});
+});
+
+describe("usage dashboard transport safety (T-43-06, T-43-08)", () => {
+	test("resolveUsageDashboardBaseUrl accepts only loopback http(s) bases and honours the off switch", () => {
+		const base = (explicit: string | undefined, env: NodeJS.ProcessEnv = {}) => resolveUsageDashboardBaseUrl(explicit, env);
+		assert.equal(base(undefined), "http://127.0.0.1:8820");
+		assert.equal(base(""), "http://127.0.0.1:8820");
+		assert.equal(base("   "), "http://127.0.0.1:8820");
+		assert.equal(base("http://localhost:9000/"), "http://localhost:9000");
+		assert.equal(base("http://[::1]:8820"), "http://[::1]:8820");
+		assert.equal(base("https://127.0.0.1:8820"), "https://127.0.0.1:8820");
+		assert.equal(base("off"), null);
+		assert.equal(base("OFF"), null);
+		assert.equal(base(undefined, { GSD_USAGE_DASHBOARD_URL: "Off" }), null);
+		assert.equal(base(undefined, { GSD_USAGE_DASHBOARD_URL: "http://localhost:9001" }), "http://localhost:9001");
+		assert.equal(base("http://127.0.0.1:7000", { GSD_USAGE_DASHBOARD_URL: "http://localhost:9001" }), "http://127.0.0.1:7000");
+		for (const rejected of [
+			"http://example.com:8820",
+			"http://10.0.0.5:8820",
+			"http://127.0.0.1.evil.test",
+			"http://user:pw@127.0.0.1:8820",
+			"http://127.0.0.1:8820/api",
+			"http://127.0.0.1:8820/?x=1",
+			"http://127.0.0.1:8820/#frag",
+			"file:///tmp/x",
+			"ftp://127.0.0.1",
+			"not a url",
+		]) {
+			assert.equal(base(rejected), null, rejected);
+			assert.equal(base(undefined, { GSD_USAGE_DASHBOARD_URL: rejected }), null, `env ${rejected}`);
+		}
+	});
+
+	test("createUsageDashboardPoller returns undefined when disabled by option, kill switch or a non-loopback URL, and a directly built poller with a remote base never requests", async () => {
+		const core = { ref: {} as RateLimitStatusRef, getProvider: () => "claude-code" as string | undefined };
+		assert.equal(createUsageDashboardPoller(false, core), undefined);
+		assert.equal(createUsageDashboardPoller({ baseUrl: "http://example.com:8820" }, core), undefined);
+		assert.equal(createUsageDashboardPoller({ baseUrl: "off" }, core), undefined);
+		assert.equal(createUsageDashboardPoller({ env: { GSD_USAGE_DASHBOARD_URL: "off" } }, core), undefined);
+		assert.equal(createUsageDashboardPoller({ env: { GSD_USAGE_DASHBOARD_URL: "http://10.0.0.5:8820" } }, core), undefined);
+		assert.ok(createUsageDashboardPoller({ env: {} }, core));
+
+		const exec = fakeExec(LOGGED_IN);
+		const fetcher = fakeFetch(() => okResponse());
+		const remote = new UsageDashboardPoller(core, {
+			baseUrl: "http://example.com:8820",
+			fetchImpl: fetcher.impl,
+			execFileImpl: exec.impl,
+			env: {},
+			platform: "linux",
+		});
+		try {
+			remote.start(() => assert.fail("must not notify"));
+			await remote.refresh();
+			assert.equal(fetcher.calls.length, 0);
+			assert.equal(exec.calls.length, 0);
+		} finally {
+			remote.stop();
+		}
+	});
+
+	test("debug output is silent by default and never contains identity values when enabled", async () => {
+		const run = async (env: NodeJS.ProcessEnv): Promise<string[]> => {
+			const lines: string[] = [];
+			const fetcher = fakeFetch((call) => {
+				if (call === 1) return new Response("{}", { status: 409 });
+				if (call === 2) return okResponse(okPayload({ claude_email: "me@example.test" }));
+				return new Response("{}", { status: 404 });
+			});
+			const poller = new UsageDashboardPoller(
+				{ ref: {}, getProvider: () => "claude-code" },
+				{
+					fetchImpl: fetcher.impl,
+					execFileImpl: fakeExec(LOGGED_IN).impl,
+					env,
+					platform: "linux",
+					debugLog: (line) => lines.push(line),
+				},
+			);
+			try {
+				poller.start(() => {});
+				await poller.refresh();
+				await poller.refresh();
+				assert.equal(fetcher.calls.length, 3);
+			} finally {
+				poller.stop();
+			}
+			return lines;
+		};
+		assert.deepEqual(await run({}), []);
+		assert.deepEqual(await run({ GSD_DEBUG_USAGE_DASHBOARD: "0" }), []);
+		const lines = await run({ GSD_DEBUG_USAGE_DASHBOARD: "1" });
+		assert.ok(lines.length > 0);
+		for (const line of lines) {
+			assert.ok(line.startsWith("[usage-dashboard] "), line);
+			for (const forbidden of ["org-test-uuid", "me@example.test", "%40", "login", "?"]) {
+				assert.ok(!line.includes(forbidden), `${JSON.stringify(line)} contains ${forbidden}`);
+			}
+		}
+		assert.ok(lines.includes("[usage-dashboard] accepted"));
+		assert.ok(lines.includes("[usage-dashboard] not-found"));
 	});
 });

@@ -22,6 +22,7 @@ import {
 	clearDashboardWindows,
 	DASHBOARD_PROVIDER,
 	type DashboardReading,
+	expireDashboardWindows,
 	type RateLimitFallbackProducer,
 	type RateLimitStatusRef,
 } from "./rate-limit-status-ref.js";
@@ -33,6 +34,14 @@ export const USAGE_DASHBOARD_FETCH_TIMEOUT_MS = 3_000;
 export const USAGE_DASHBOARD_MAX_AGE_S = 600;
 export const USAGE_DASHBOARD_SCHEMA_VERSION = 1;
 export const CLAUDE_AUTH_STATUS_TIMEOUT_MS = 15_000;
+/** Operator override for the dashboard base URL (loopback only); `off` disables the producer. */
+export const USAGE_DASHBOARD_URL_ENV = "GSD_USAGE_DASHBOARD_URL";
+/** `1` prints fixed outcome tokens (never identity) on stderr. */
+export const USAGE_DASHBOARD_DEBUG_ENV = "GSD_DEBUG_USAGE_DASHBOARD";
+/** A response body larger than this is a failure. The real payload is about 1 KiB. */
+export const USAGE_DASHBOARD_MAX_BODY_BYTES = 256 * 1024;
+/** Consecutive non-accepted polls before dashboard-sourced windows are cleared. */
+export const USAGE_DASHBOARD_FAILURES_BEFORE_CLEAR = 2;
 /** Wait before trying again after the dashboard cannot vouch for this session (no identity, 404, all-409, fingerprint). */
 export const USAGE_DASHBOARD_BACKOFF_MS = 300_000;
 /** The `.claude.json` fallback is skipped when the file is larger than this. */
@@ -67,6 +76,8 @@ export interface UsageDashboardPollerOptions {
 	intervalMs?: number;
 	fetchTimeoutMs?: number;
 	backoffMs?: number;
+	/** Debug sink (tests). Default: a line on stderr. Only used when GSD_DEBUG_USAGE_DASHBOARD is `1`. */
+	debugLog?: (line: string) => void;
 	/** Injected `.claude.json` reader (tests). Default: size-capped `fs.promises.readFile`. */
 	readClaudeConfigImpl?: (path: string) => Promise<string>;
 	env?: NodeJS.ProcessEnv;
@@ -254,6 +265,60 @@ const execFileAsync = promisify(execFile);
 const defaultExecFile: ExecFileLike = (file, args, options) =>
 	execFileAsync(file, [...args], { ...options, encoding: "utf8" });
 
+/**
+ * The dashboard base URL, or null when the producer must stay off. The session identity is sent in the
+ * query string, so only loopback http(s) origins qualify: no credentials, path, query or fragment.
+ * `off` (any case) is the kill switch.
+ */
+export function resolveUsageDashboardBaseUrl(explicit: string | undefined, env: NodeJS.ProcessEnv): string | null {
+	const raw = explicit?.trim() || env[USAGE_DASHBOARD_URL_ENV]?.trim() || USAGE_DASHBOARD_DEFAULT_BASE_URL;
+	if (raw.toLowerCase() === "off") return null;
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+	if (url.username !== "" || url.password !== "") return null;
+	if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]" && url.hostname !== "::1") return null;
+	if (url.pathname !== "" && url.pathname !== "/") return null;
+	if (url.search !== "" || url.hash !== "") return null;
+	return `${url.protocol}//${url.host}`;
+}
+
+/** Reads a response body as text, giving up (null) once it exceeds `maxBytes`. */
+async function readBoundedText(res: Response, maxBytes: number): Promise<string | null> {
+	const declared = Number(res.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > maxBytes) {
+		try {
+			await res.body?.cancel();
+		} catch {
+			// nothing to release
+		}
+		return null;
+	}
+	if (!res.body) return "";
+	const reader = res.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		total += value.byteLength;
+		if (total > maxBytes) {
+			try {
+				await reader.cancel();
+			} catch {
+				// nothing to release
+			}
+			return null;
+		}
+		chunks.push(value);
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
+
 const defaultFetch: FetchLike = (url, init) => fetch(url, init);
 
 export class UsageDashboardPoller implements RateLimitFallbackProducer {
@@ -262,12 +327,14 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 	private readonly fetchImpl: FetchLike;
 	private readonly execFileImpl: ExecFileLike;
 	private readonly now: () => number;
-	private readonly baseUrl: string;
+	/** Null = the configured base is not a loopback origin (or `off`): the poller stays inert. */
+	private readonly baseUrl: string | null;
 	private readonly intervalMs: number;
 	private readonly fetchTimeoutMs: number;
 	private readonly backoffMs: number;
 	private readonly readClaudeConfigImpl: ((path: string) => Promise<string>) | undefined;
 	private readonly env: NodeJS.ProcessEnv;
+	private readonly debugLog: (line: string) => void;
 	private readonly platform: NodeJS.Platform;
 
 	private running = false;
@@ -282,6 +349,7 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 	private preferredLogin: string | undefined;
 	/** While identity is null, the earliest time the CLI may be run again. */
 	private identityRetryAtMs = 0;
+	private consecutiveFailures = 0;
 
 	constructor(
 		core: { ref: RateLimitStatusRef; getProvider: () => string | undefined },
@@ -292,17 +360,18 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 		this.fetchImpl = options.fetchImpl ?? defaultFetch;
 		this.execFileImpl = options.execFileImpl ?? defaultExecFile;
 		this.now = options.now ?? (() => Date.now());
-		this.baseUrl = (options.baseUrl ?? USAGE_DASHBOARD_DEFAULT_BASE_URL).replace(/\/+$/, "");
+		this.env = options.env ?? process.env;
+		this.baseUrl = resolveUsageDashboardBaseUrl(options.baseUrl, this.env);
+		this.debugLog = options.debugLog ?? ((line) => void process.stderr.write(`${line}\n`));
 		this.intervalMs = options.intervalMs ?? USAGE_DASHBOARD_POLL_MS;
 		this.fetchTimeoutMs = options.fetchTimeoutMs ?? USAGE_DASHBOARD_FETCH_TIMEOUT_MS;
 		this.backoffMs = options.backoffMs ?? USAGE_DASHBOARD_BACKOFF_MS;
 		this.readClaudeConfigImpl = options.readClaudeConfigImpl;
-		this.env = options.env ?? process.env;
 		this.platform = options.platform ?? process.platform;
 	}
 
 	start(onChange: () => void): void {
-		if (this.running) return;
+		if (this.running || this.baseUrl === null) return;
 		this.running = true;
 		this.generation += 1;
 		this.onChange = onChange;
@@ -349,15 +418,35 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 		try {
 			return await this.tick(gen);
 		} catch {
-			return this.intervalMs;
+			this.debug("failure: network");
+			return this.transientFailure(gen);
 		}
+	}
+
+	/** Emits a fixed outcome token. Never pass identity fields, URLs or response text. */
+	private debug(token: string): void {
+		if (this.env[USAGE_DASHBOARD_DEBUG_ENV] !== "1") return;
+		this.debugLog(`[usage-dashboard] ${token}`);
+	}
+
+	private notifyIf(changed: boolean, token: string): void {
+		if (!changed) return;
+		this.debug(token);
+		this.onChange?.();
 	}
 
 	private async tick(gen: number): Promise<number> {
 		const delay = this.intervalMs;
+		// Whatever else happens, a dashboard number never outlives the dashboard's own trust limit.
+		this.notifyIf(expireDashboardWindows(this.ref, this.now(), USAGE_DASHBOARD_MAX_AGE_S * 1000), "expired: dashboard windows");
+
 		const controller = this.stopController;
-		if (!controller) return delay;
-		if (this.getProvider() !== DASHBOARD_PROVIDER) return delay;
+		const baseUrl = this.baseUrl;
+		if (!controller || baseUrl === null) return delay;
+		if (this.getProvider() !== DASHBOARD_PROVIDER) {
+			this.debug("idle: provider");
+			return delay;
+		}
 
 		if (this.identity === null && this.now() < this.identityRetryAtMs) {
 			return this.identityRetryAtMs - this.now();
@@ -371,11 +460,12 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 			});
 			if (!this.identity) this.identityRetryAtMs = this.now() + this.backoffMs;
 			if (gen !== this.generation) return delay;
+			this.debug(this.identity ? "identity: resolved" : "identity: unresolved");
 			if (!this.identity) return this.dropUnvouched();
 		}
 		const identity = this.identity;
 		const candidates = loginCandidates(identity);
-		if (candidates.length === 0) return delay;
+		if (candidates.length === 0) return this.dropUnvouched();
 		const preferred = this.preferredLogin?.toLowerCase();
 		const ordered = [
 			...candidates.filter((c) => c.toLowerCase() === preferred),
@@ -383,15 +473,18 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 		];
 
 		for (const login of ordered) {
-			const url = `${this.baseUrl}${USAGE_DASHBOARD_QUOTA_PATH}?login=${encodeURIComponent(login)}`;
+			const url = `${baseUrl}${USAGE_DASHBOARD_QUOTA_PATH}?login=${encodeURIComponent(login)}`;
+			this.debug("request");
 			const res = await this.fetchImpl(url, {
 				headers: { accept: "application/json" },
 				signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.fetchTimeoutMs)]),
 			});
 			if (gen !== this.generation) return delay;
+			this.debug(`http ${res.status}`);
 			if (res.status === 404) {
 				// This identity is unknown to the dashboard (or the operator logged in as someone else).
 				void res.body?.cancel().catch(() => {});
+				this.debug("not-found");
 				return this.forgetIdentity();
 			}
 			if (res.status === 409) {
@@ -399,26 +492,60 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 				void res.body?.cancel().catch(() => {});
 				continue;
 			}
-			if (!res.ok) return delay;
-			const body: unknown = await res.json();
+			if (!res.ok) {
+				void res.body?.cancel().catch(() => {});
+				this.debug("failure: network");
+				return this.transientFailure(gen);
+			}
+			const text = await readBoundedText(res, USAGE_DASHBOARD_MAX_BODY_BYTES);
 			if (gen !== this.generation) return delay;
-			if (!identityMatchesLogin(body, login)) return this.dropUnvouched();
+			let body: unknown;
+			try {
+				body = text === null ? undefined : JSON.parse(text);
+			} catch {
+				body = undefined;
+			}
+			if (body === undefined) {
+				this.debug("failure: body");
+				return this.transientFailure(gen);
+			}
+			if (!identityMatchesLogin(body, login)) {
+				this.debug("rejected: fingerprint");
+				return this.dropUnvouched();
+			}
 
 			const reading = mapDashboardQuotaPayload(body, this.now());
-			if (!reading) return delay;
+			if (!reading) {
+				this.debug("rejected: payload");
+				return this.transientFailure(gen);
+			}
 			// Switched away from claude-code while the request was in flight.
 			if (this.getProvider() !== DASHBOARD_PROVIDER) return delay;
 			this.preferredLogin = login;
+			this.consecutiveFailures = 0;
+			this.debug("accepted");
 			if (applyDashboardReading(this.ref, reading, this.now())) this.onChange?.();
 			return delay;
 		}
 		// Every key matched more than one account: no way to tell which one is ours.
+		this.debug("conflict: all logins");
 		return this.dropUnvouched();
+	}
+
+	/** A poll that produced nothing usable: one is tolerated, the second in a row clears the dashboard values. */
+	private transientFailure(gen: number): number {
+		if (gen !== this.generation) return this.intervalMs;
+		this.consecutiveFailures += 1;
+		if (this.consecutiveFailures >= USAGE_DASHBOARD_FAILURES_BEFORE_CLEAR) {
+			this.notifyIf(clearDashboardWindows(this.ref), "cleared: dashboard windows");
+		}
+		return this.intervalMs;
 	}
 
 	/** The dashboard cannot vouch for this session's account: show nothing rather than a neighbour's numbers. */
 	private dropUnvouched(): number {
-		if (clearDashboardWindows(this.ref)) this.onChange?.();
+		this.consecutiveFailures = 0;
+		this.notifyIf(clearDashboardWindows(this.ref), "cleared: dashboard windows");
 		return this.backoffMs;
 	}
 
@@ -437,5 +564,6 @@ export function createUsageDashboardPoller(
 	core: { ref: RateLimitStatusRef; getProvider: () => string | undefined },
 ): UsageDashboardPoller | undefined {
 	if (options === false) return undefined;
+	if (resolveUsageDashboardBaseUrl(options?.baseUrl, options?.env ?? process.env) === null) return undefined;
 	return new UsageDashboardPoller(core, options ?? {});
 }
