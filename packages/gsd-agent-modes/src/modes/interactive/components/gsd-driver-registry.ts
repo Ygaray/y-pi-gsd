@@ -487,11 +487,19 @@ export const MAX_DRIVER_TEXT_CHARS = 200;
 
 /**
  * Sanitise untrusted registry text before it reaches the terminal (T-42-01): CR/LF/TAB become spaces, every C0,
- * DEL and C1 control character is removed (stricter than sanitizeFooterText, which keeps BEL and C1), spaces are
- * collapsed, and the result is bounded to `max` characters with a trailing ellipsis when cut.
+ * DEL and C1 control character is removed (stricter than sanitizeFooterText, which keeps BEL and C1), Unicode
+ * bidi overrides/isolates and zero-width characters are removed (they can visually reorder or hide text), spaces
+ * are collapsed, and the result is bounded to `max` characters with a trailing ellipsis when cut.
  */
 export function sanitizeDriverText(text: string, max: number = MAX_DRIVER_TEXT_CHARS): string {
-	const cleaned = sanitizeFooterText(String(text).replace(/[\r\n\t]/g, " ").replace(/[\x00-\x1f\x7f-\x9f]/g, ""));
+	const cleaned = sanitizeFooterText(
+		String(text)
+			.replace(/[\r\n\t]/g, " ")
+			.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+			// zero-width + directional marks (U+200B-U+200F), bidi embeddings/overrides (U+202A-U+202E),
+			// word joiner .. bidi isolates (U+2060-U+2069) and the BOM / zero-width no-break space (U+FEFF)
+			.replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, ""),
+	);
 	return cleaned.length > max ? `${cleaned.slice(0, Math.max(0, max - 1))}\u2026` : cleaned;
 }
 

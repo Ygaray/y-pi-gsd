@@ -462,6 +462,8 @@ describe("gsd-driver-registry", () => {
 
 	it("sanitizeDriverText strips C0, DEL and C1 controls and bounds length", () => {
 		assert.equal(sanitizeDriverText("a\x07b\x9bc\x1b[31md\r\ne\tf\x7f"), "abc[31md e f");
+		// bidi overrides/isolates and zero-width characters cannot reorder or hide terminal text
+		assert.equal(sanitizeDriverText("ab\u202ecd\u2066ef\u2069g\u200bh\u200fi\u2060j\ufeffk"), "abcdefghijk");
 		const long = sanitizeDriverText("x".repeat(300));
 		assert.equal(long.length, 200);
 		assert.ok(long.endsWith("\u2026"));

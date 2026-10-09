@@ -9,8 +9,13 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, join, delimiter } from 'node:path';
 import { RpcClient } from '@opengsd/rpc-client';
-import type { SdkAgentEvent, RpcInitResult, RpcCostUpdateEvent, RpcExtensionUIRequest } from '@opengsd/contracts';
-import type { DriverStopOutcome } from '@opengsd/contracts';
+import type {
+  SdkAgentEvent,
+  RpcInitResult,
+  RpcCostUpdateEvent,
+  RpcExtensionUIRequest,
+  DriverStopOutcome,
+} from '@opengsd/contracts';
 import type {
   ManagedSession,
   ExecuteOptions,

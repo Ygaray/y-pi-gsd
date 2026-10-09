@@ -17,6 +17,24 @@ export function setupAutocomplete(host: InteractiveModeDelegateHost): void {
 		description: command.description,
 	}));
 
+	// `/drivers` is dispatched by the interactive input router but is not part of the shared built-in command table
+	// (owned by pi-coding-agent). List it here so it is discoverable and an extension cannot shadow it.
+	if (!slashCommands.some((command) => command.name === "drivers")) {
+		slashCommands.push({
+			name: "drivers",
+			description: "List registered drivers, stop one, or dismiss died drivers",
+			getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+				const options = [
+					{ value: "list", label: "list", description: "List every registered driver" },
+					{ value: "stop", label: "stop", description: "Stop a listed driver: /drivers stop <n>" },
+					{ value: "dismiss", label: "dismiss", description: "Hide died drivers for this session" },
+				];
+				const filtered = options.filter((o) => o.value.startsWith(prefix.trim().toLowerCase()));
+				return filtered.length > 0 ? filtered : null;
+			},
+		});
+	}
+
 	const modelCommand = slashCommands.find((command) => command.name === "model");
 	if (modelCommand) {
 		modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
