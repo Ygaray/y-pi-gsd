@@ -709,6 +709,40 @@ describe('Phase 41 driver registry lifecycle - D-02 registry-first stop (SC2)', 
 });
 
 // ---------------------------------------------------------------------------
+// Phase 42 / OBS-01 typed registry stop (SC4 server half)
+// ---------------------------------------------------------------------------
+
+describe('Phase 42 OBS-01 typed registry stop', () => {
+  it('OBS-01 stopRegisteredDriverByDir stops a live registered driver and returns a typed stopped outcome', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-typed-stop');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 42001, 'reg-42-1');
+    const listed = getSessionEntry(projectDir, sm.registryPath);
+    assert.ok(listed, 'the live row must be registered');
+
+    const result = await sm.stopRegisteredDriverByDir(projectDir, {
+      expectedPid: 42001,
+      expectedStartTime: listed.startTime,
+    });
+
+    assert.equal(result.outcome, 'stopped');
+    assert.equal(result.entry?.pid, 42001);
+    const signals = sm.killedPids.filter((k) => k.signal !== 0 && k.signal !== undefined);
+    assert.ok(signals.length > 0);
+    for (const k of signals) {
+      assert.ok(k.pid > 0, `no process-group (negative/zero) pid may be signalled, saw ${k.pid}`);
+      assert.equal(k.pid, 42001, 'only the registered pid may be signalled');
+    }
+    assert.ok(signals.some((k) => k.signal === 'SIGTERM'));
+    assert.ok(sm.order.indexOf('settle:42001') >= 0);
+    assert.ok(sm.order.indexOf('settle:42001') < sm.order.indexOf('SIGTERM:42001'), 'settle runs before SIGTERM');
+    assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
+    assert.deepEqual(sm.lockFallbackCalls, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // D-04 reconnect reconcile (SC4)
 // ---------------------------------------------------------------------------
 

@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve, join, delimiter } from 'node:path';
 import { RpcClient } from '@opengsd/rpc-client';
 import type { SdkAgentEvent, RpcInitResult, RpcCostUpdateEvent, RpcExtensionUIRequest } from '@opengsd/contracts';
+import type { DriverStopOutcome } from '@opengsd/contracts';
 import type {
   ManagedSession,
   ExecuteOptions,
@@ -224,6 +225,28 @@ export type RegisteredDriverStopOutcome = 'no-entry' | 'stopped' | 'dead-reconci
 export interface RegisteredDriverStopResult {
   outcome: RegisteredDriverStopOutcome;
   /** The registry row that was acted on (absent for `'no-entry'`). */
+  entry?: SessionRegistryEntry;
+  /** Underlying kill error (only for `'kill-failed'`). */
+  error?: string;
+}
+
+/**
+ * Result of `SessionManager.stopRegisteredDriverByDir` (Phase 42 / OBS-01: the
+ * operator stop the TUI drives). Widens the Phase-41 outcomes with two typed
+ * "nothing was signalled" cases so the caller never parses error text:
+ *
+ * - `'row-changed'` - the registry row for the dir no longer matches the
+ *   `expectedPid` / `expectedStartTime` the caller listed (a newer driver
+ *   replaced it); `entry` is the CURRENT row, untouched.
+ * - `'busy'` - a session start, reap or another stop holds the per-worktree
+ *   `startingLocks` reservation; nothing was signalled.
+ *
+ * `RegisteredDriverStopOutcome` / `RegisteredDriverStopResult` (Phase 41) stay
+ * unchanged for existing exhaustive handling.
+ */
+export interface RegisteredDriverStopByDirResult {
+  outcome: DriverStopOutcome;
+  /** The registry row that was acted on, or the current row for `'row-changed'`. */
   entry?: SessionRegistryEntry;
   /** Underlying kill error (only for `'kill-failed'`). */
   error?: string;
@@ -945,6 +968,51 @@ export class SessionManager {
       );
     }
     throw new Error(`Session not found for projectDir: ${projectDir}`);
+  }
+
+  /**
+   * The TUI's operator stop (Phase 42 / OBS-01, ROADMAP SC4): stop the driver
+   * the registry lists for `projectDir`, reporting a typed outcome.
+   *
+   * Registry row only - in-memory sessions are NOT consulted here
+   * (`cancelSessionByDir` handles them first). Stops the single registered pid
+   * via the Phase-41 path (`stopRegisteredDriver`), never a process group.
+   * Holds the same `startingLocks` reservation as `cancelSessionByDir`; while a
+   * start, reap or other stop holds it, returns `{ outcome: 'busy' }` instead of
+   * throwing. When `expectedPid` / `expectedStartTime` are given (the listing the
+   * operator acted on) and the current row differs, returns `'row-changed'`
+   * without signalling (list-then-stop TOCTOU guard).
+   *
+   * Never throws for a non-success outcome. Residuals: a peer MCP server can
+   * still rewrite the row between the pre-check and `stopRegisteredDriver`'s own
+   * read (microsecond window, the same accepted cross-process window as
+   * `registerSessionEntry`); the kill itself blocks the event loop up to ~250 ms
+   * (`killOrphanSessionPid`'s synchronous wait, Phase 41 accepted residual).
+   */
+  async stopRegisteredDriverByDir(
+    projectDir: string,
+    opts: { expectedPid?: number; expectedStartTime?: string } = {},
+  ): Promise<RegisteredDriverStopByDirResult> {
+    const resolvedDir = resolve(projectDir);
+    const lockKey = this.startLockKey(resolvedDir);
+    if (this.startingLocks.has(lockKey)) return { outcome: 'busy' };
+
+    this.startingLocks.add(lockKey);
+    try {
+      if (opts.expectedPid !== undefined || opts.expectedStartTime !== undefined) {
+        const held = getSessionEntry(resolvedDir, this.getSessionRegistryPath());
+        if (
+          held &&
+          ((opts.expectedPid !== undefined && held.pid !== opts.expectedPid) ||
+            (opts.expectedStartTime !== undefined && held.startTime !== opts.expectedStartTime))
+        ) {
+          return { outcome: 'row-changed', entry: held };
+        }
+      }
+      return await this.stopRegisteredDriver(resolvedDir);
+    } finally {
+      this.startingLocks.delete(lockKey);
+    }
   }
 
   /**
