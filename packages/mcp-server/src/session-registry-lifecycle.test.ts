@@ -17,7 +17,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { SessionDeclinedError, SessionManager, type OrphanReapOutcome } from './session-manager.js';
@@ -739,6 +739,113 @@ describe('Phase 42 OBS-01 typed registry stop', () => {
     assert.ok(sm.order.indexOf('settle:42001') < sm.order.indexOf('SIGTERM:42001'), 'settle runs before SIGTERM');
     assert.equal(getSessionEntry(projectDir, sm.registryPath), undefined);
     assert.deepEqual(sm.lockFallbackCalls, []);
+  });
+
+  it('OBS-01 stopRegisteredDriverByDir returns row-changed and signals nothing when the expected pid or start time differs', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-row-changed');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 42002, 'reg-42-2');
+    const before = structuredClone(getSessionEntry(projectDir, sm.registryPath));
+
+    const wrongPid = await sm.stopRegisteredDriverByDir(projectDir, { expectedPid: 42099 });
+    assert.equal(wrongPid.outcome, 'row-changed');
+    assert.equal(wrongPid.entry?.pid, 42002);
+
+    const wrongStart = await sm.stopRegisteredDriverByDir(projectDir, {
+      expectedPid: 42002,
+      expectedStartTime: '2000-01-01T00:00:00.000Z',
+    });
+    assert.equal(wrongStart.outcome, 'row-changed');
+    assert.equal(wrongStart.entry?.pid, 42002);
+
+    assert.deepEqual(nonZeroSignals(sm), [], 'a replaced row must never be signalled');
+    assert.deepEqual(sm.reconcileCalls, [], 'no Attempt settle on the row-changed path');
+    assert.deepEqual(getSessionEntry(projectDir, sm.registryPath), before, 'the row must be untouched');
+  });
+
+  it('OBS-01 stopRegisteredDriverByDir returns busy instead of throwing while a start or reap holds the lock', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-busy');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 42003, 'reg-42-3');
+
+    let release!: () => void;
+    sm.reconcileGate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    const start = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sm.reconcileCalls.length, 1, 'the start reap must be inside its settle');
+
+    const result = await sm.stopRegisteredDriverByDir(projectDir);
+    assert.deepEqual(result, { outcome: 'busy' });
+    assert.equal(nonZeroSignals(sm).filter((k) => k.signal === 'SIGTERM').length, 0, 'busy must not signal');
+
+    release();
+    await start;
+    assert.equal(sm.allClients.length, 1);
+  });
+
+  it('OBS-01 stopRegisteredDriverByDir returns no-entry, dead-reconciled and kill-failed without throwing', async () => {
+    const sm = createManager();
+
+    const emptyDir = join(tmp, 'proj-none');
+    mkdirSync(emptyDir);
+    assert.deepEqual(await sm.stopRegisteredDriverByDir(emptyDir), { outcome: 'no-entry' });
+
+    const deadDir = join(tmp, 'proj-typed-dead');
+    mkdirSync(deadDir);
+    registerSessionEntry(
+      {
+        sessionId: 'reg-42-4',
+        projectDir: deadDir,
+        pid: 42004, // not in alivePids -> probe reports ESRCH
+        startTime: new Date().toISOString(),
+        status: 'running',
+        ownerPid: 999999,
+      },
+      sm.registryPath,
+    );
+    const dead = await sm.stopRegisteredDriverByDir(deadDir);
+    assert.equal(dead.outcome, 'dead-reconciled');
+    assert.equal(getSessionEntry(deadDir, sm.registryPath)?.status, 'exited', 'the row is now a tombstone');
+    assert.deepEqual(nonZeroSignals(sm), [], 'a dead driver must not be signalled');
+
+    const failDir = join(tmp, 'proj-typed-kill-fail');
+    mkdirSync(failDir);
+    liveRow(sm, failDir, 42005, 'reg-42-5');
+    sm.killErrorOnSigterm = 'EPERM';
+    const failed = await sm.stopRegisteredDriverByDir(failDir);
+    assert.equal(failed.outcome, 'kill-failed');
+    assert.match(failed.error ?? '', /EPERM/);
+    const kept = getSessionEntry(failDir, sm.registryPath);
+    assert.equal(kept?.pid, 42005, 'the row is kept on an unconfirmed kill');
+    assert.equal(kept?.exit, undefined, 'and still a live claim');
+  });
+
+  it('OBS-01 cancelSessionByDir keeps its exact lock-held error text after delegating', async () => {
+    const sm = createManager();
+    const projectDir = join(tmp, 'proj-cancel-text');
+    mkdirSync(projectDir);
+    liveRow(sm, projectDir, 42006, 'reg-42-6');
+
+    let release!: () => void;
+    sm.reconcileGate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    const start = sm.startSession(projectDir, { cliPath: '/usr/bin/gsd' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sm.reconcileCalls.length, 1, 'the start reap must be inside its settle');
+
+    await assert.rejects(() => sm.cancelSessionByDir(projectDir), {
+      message: `Cannot cancel ${resolve(projectDir)}: a session start or reap for this projectDir is in progress; retry once it settles`,
+    });
+
+    release();
+    await start;
   });
 });
 

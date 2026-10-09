@@ -914,11 +914,13 @@ export class SessionManager {
    * 1. in-memory session -> `_cancelSessionObject()` -> `RpcClient.stop()` (a
    *    live, self-spawned handle; its process-group teardown is kept per D-03
    *    so per-unit grandchildren die with the driver);
-   * 2. persisted registry row -> `stopRegisteredDriver()`: settle the Attempt
-   *    (best-effort), kill exactly the registered pid (single pid, recycled-pid
-   *    guarded), remove the row only on confirmed death. Runs under the
-   *    `startingLocks` reservation for the canonical dir, so it cannot race a
-   *    `startSession()` on the same worktree;
+   * 2. persisted registry row -> `stopRegisteredDriverByDir()` (which runs
+   *    `stopRegisteredDriver()`): settle the Attempt (best-effort), kill exactly
+   *    the registered pid (single pid, recycled-pid guarded), remove the row
+   *    only on confirmed death. Runs under the `startingLocks` reservation for
+   *    the canonical dir, so it cannot race a `startSession()` on the same
+   *    worktree; a held reservation (`'busy'`) is rethrown here as the
+   *    unchanged lock-held error;
    * 3. legacy `.gsd/auto.lock` -> ONLY when the registry holds no live claim
    *    (unregistered, terminal-started `/gsd auto` drivers - D-02's carve-out);
    * 4. otherwise the unchanged `Session not found for projectDir: <dir>` error.
@@ -934,19 +936,12 @@ export class SessionManager {
     }
 
     const resolvedDir = resolve(projectDir);
-    const lockKey = this.startLockKey(resolvedDir);
-    if (this.startingLocks.has(lockKey)) {
+    const stop = await this.stopRegisteredDriverByDir(projectDir);
+
+    if (stop.outcome === 'busy') {
       throw new Error(
         `Cannot cancel ${resolvedDir}: a session start or reap for this projectDir is in progress; retry once it settles`,
       );
-    }
-
-    this.startingLocks.add(lockKey);
-    let stop: RegisteredDriverStopResult;
-    try {
-      stop = await this.stopRegisteredDriver(resolvedDir);
-    } finally {
-      this.startingLocks.delete(lockKey);
     }
 
     if (stop.outcome === 'stopped') return;
@@ -959,6 +954,8 @@ export class SessionManager {
 
     // 'no-entry' / 'dead-reconciled': the registry holds no live claim for this
     // dir - the legacy lock is the last resort (unregistered drivers only).
+    // ('row-changed' cannot occur: no expectations are passed above; it falls
+    // through like 'no-entry' so this stays exhaustive without a new string.)
     const stopped = await this.stopDetachedAutoProcess(projectDir);
     if (stopped) return;
 
