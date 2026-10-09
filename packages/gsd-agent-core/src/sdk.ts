@@ -402,13 +402,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								// helper keeps the previous reading only when it came from the *same*
 								// provider (CR-03) -- a provider switch must never let a stale window
 								// leak through the merge -- and stamps D-02 provenance for this window.
-								writePrimaryRateLimitWindows(
-									rateLimitStatusRef,
-									model.provider,
-									{ [windowKey]: window },
-									"sdk",
-									Date.now(),
-								);
+								writePrimaryRateLimitWindows(rateLimitStatusRef, model.provider, { [windowKey]: window }, "sdk", Date.now());
 							}
 						: undefined,
 			};
@@ -434,13 +428,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// helper merges per-window and only lets the previous reading fill a gap when it came
 				// from the *same* provider (CR-03) — a provider switch must never let a stale window
 				// leak through the merge. It also stamps D-02 provenance for the windows written.
-				writePrimaryRateLimitWindows(
-					rateLimitStatusRef,
-					model.provider,
-					{ session: parsedRateLimitStatus.session, weekly: parsedRateLimitStatus.weekly },
-					"headers",
-					Date.now(),
-				);
+				const { session, weekly } = parsedRateLimitStatus;
+				writePrimaryRateLimitWindows(rateLimitStatusRef, model.provider, { session, weekly }, "headers", Date.now());
 			}
 
 			// A-28-02 / T-28-08: a one-shot, prefix-allowlisted capture of the real
