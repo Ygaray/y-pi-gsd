@@ -68,4 +68,11 @@ declare module "@opengsd/mcp-server" {
 
   export const GSD_MODE_MCP_WORKFLOW_ADAPTER_TOOL_NAMES: readonly string[];
   export function createWorkflowMcpAdapterToolDefs(): Promise<GenericMcpToolDef[]>;
+
+  export class SessionManager {
+    stopRegisteredDriverByDir(
+      projectDir: string,
+      opts?: { expectedPid?: number; expectedStartTime?: string },
+    ): Promise<{ outcome: import("@opengsd/contracts").DriverStopOutcome; entry?: { pid: number }; error?: string }>;
+  }
 }

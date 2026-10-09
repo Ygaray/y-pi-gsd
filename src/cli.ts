@@ -22,6 +22,7 @@ import { applySecurityOverrides } from './security-overrides.js'
 import { validateConfiguredModel } from './startup-model-validation.js'
 import { migrateAnthropicDefaultToClaudeCode, migrateGeminiCliDefaultToAntigravity } from './provider-migrations.js'
 import { applyModelOverride } from './cli-model-override.js'
+import { createDriverControlPort } from './cli-driver-control.js'
 import {
   buildHeadlessCommandArgs,
   parseCliArgs,
@@ -1015,7 +1016,7 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 }
 
 const { InteractiveMode } = await loadInteractiveModeModule()
-const interactiveMode = new InteractiveMode(session)
+const interactiveMode = new InteractiveMode(session, { driverControl: createDriverControlPort() })
 markStartup('InteractiveMode')
 printStartupTimings()
 await interactiveMode.run()
