@@ -99,6 +99,14 @@ export async function checkRuntimeHealth(
       if (activeMilestoneId) {
         if (shouldFix("stale_paused_session")) {
           deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+          // HANDOFF-01 D-06: the stale pause is gone, so drop the handoff we registered for it.
+          // Fail-open (D-09): yahir-handoff never changes the doctor fix result.
+          try {
+            const { closeStoredHandoff } = await import("./handoff-record.js");
+            await closeStoredHandoff("drop", basePath, { requirePausedSessionLink: true });
+          } catch {
+            // Non-fatal — handoff close is best-effort
+          }
           fixesApplied.push(
             `cleared stale paused session for ${pausedSession.milestoneId} (active milestone: ${activeMilestoneId})`,
           );
