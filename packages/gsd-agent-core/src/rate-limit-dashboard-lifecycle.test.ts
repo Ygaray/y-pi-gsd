@@ -208,3 +208,143 @@ describe("USAGE-01 model switch", () => {
 		);
 	});
 });
+
+describe("USAGE-01 lifecycle", () => {
+	test("a claude-code session nobody subscribes to never spawns the CLI or requests the dashboard", async () => {
+		await withSession(async ({ session, fetchCalls, exec }) => {
+			await session._rateLimitFallbackProducer?.refresh();
+			await session.setModel(claudeCodeModel, { persist: false });
+			await session._rateLimitFallbackProducer?.refresh();
+			await session.agent.onResponse?.(
+				{ status: 200, headers: { "anthropic-ratelimit-unified-5h-used-percent": "40" } },
+				claudeCodeModel,
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+
+			assert.equal(fetchCalls.length, 0);
+			assert.equal(exec.count, 0);
+			assert.equal(session.getRateLimitStatus()?.session?.usedPercent, 40, "the header value still shows through");
+		});
+	});
+
+	test("usageDashboard false builds no producer", async () => {
+		await withSession(
+			async ({ session }) => {
+				assert.equal(session._rateLimitFallbackProducer, undefined);
+				const unsubscribe = session.onRateLimitStatusChange(() => {});
+				assert.equal(typeof unsubscribe, "function");
+				unsubscribe();
+			},
+			{ usageDashboard: false },
+		);
+	});
+
+	test("the last unsubscribe stops polling and a new subscriber starts a fresh cycle", async () => {
+		await withSession(async ({ session, fetchCalls, setFetch }) => {
+			let aCalls = 0;
+			let bCalls = 0;
+			const unsubscribeA = session.onRateLimitStatusChange(() => {
+				aCalls++;
+			});
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 1);
+			assert.equal(aCalls, 1);
+
+			unsubscribeA();
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 1, "stopped: no new request");
+
+			setFetch(() => okResponse(okPayload(50, 60)));
+			session.onRateLimitStatusChange(() => {
+				bCalls++;
+			});
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 2, "a new subscriber starts a fresh cycle");
+			assert.equal(bCalls, 1);
+			assert.equal(session.getRateLimitStatus()?.session?.usedPercent, 50);
+
+			unsubscribeA();
+			unsubscribeA();
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 3, "a repeated unsubscribe of A does not stop B's cycle");
+			assert.equal(aCalls, 1, "A is never called after its unsubscribe");
+		});
+	});
+
+	test("two listeners share one producer and both are notified", async () => {
+		await withSession(async ({ session, fetchCalls }) => {
+			let aCalls = 0;
+			let bCalls = 0;
+			const unsubscribeA = session.onRateLimitStatusChange(() => {
+				aCalls++;
+			});
+			const unsubscribeB = session.onRateLimitStatusChange(() => {
+				bCalls++;
+			});
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 1);
+			assert.equal(aCalls, 1);
+			assert.equal(bCalls, 1);
+
+			unsubscribeA();
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 2, "B still observes, so the producer keeps requesting");
+
+			unsubscribeB();
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 2, "no observers left: stopped");
+		});
+	});
+
+	test("a fetch that resolves after dispose writes nothing and notifies nobody", async () => {
+		await withSession(async ({ session, fetchCalls, fetchSignals, setFetch }) => {
+			const pending = deferred<Response>();
+			setFetch(() => pending.promise);
+			let notified = 0;
+			session.onRateLimitStatusChange(() => {
+				notified++;
+			});
+			await waitFor(() => fetchCalls.length === 1);
+
+			session.dispose();
+			assert.equal(fetchSignals[0]?.aborted, true, "dispose aborts the in-flight request");
+
+			pending.resolve(okResponse());
+			for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+
+			assert.equal(session.getRateLimitStatus(), undefined);
+			assert.equal(notified, 0);
+		});
+	});
+
+	test("subscribing after dispose is a no-op", async () => {
+		await withSession(async ({ session, fetchCalls }) => {
+			session.dispose();
+			const unsubscribe = session.onRateLimitStatusChange(() => {});
+			assert.equal(typeof unsubscribe, "function");
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 0);
+			unsubscribe();
+		});
+	});
+
+	test("a throwing listener does not stop other listeners or the producer", async () => {
+		await withSession(async ({ session, fetchCalls, setFetch }) => {
+			let bCalls = 0;
+			session.onRateLimitStatusChange(() => {
+				throw new Error("listener blew up");
+			});
+			session.onRateLimitStatusChange(() => {
+				bCalls++;
+			});
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(bCalls, 1);
+
+			setFetch(() => okResponse(okPayload(41, 52)));
+			await session._rateLimitFallbackProducer?.refresh();
+			assert.equal(fetchCalls.length, 2, "the producer kept running");
+			assert.equal(bCalls, 2);
+			assert.equal(session.getRateLimitStatus()?.session?.usedPercent, 41);
+		});
+	});
+});
