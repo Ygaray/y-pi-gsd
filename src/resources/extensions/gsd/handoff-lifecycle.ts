@@ -166,6 +166,10 @@ export async function registerPauseHandoff(
       timeoutMs: deps.timeoutMs,
     };
 
+    // The CLI calls below can take up to ~26 s in the worst case (8 s timeout + 5 s grace, up to
+    // three serial calls) and the caller awaits them, so signal progress before the first one.
+    say("Registering handoff…", "info");
+
     // D-04 / DP-12: supersede only a stored entry that is still open or taken, checked with
     // show first; any show failure other than "unknown id" keeps the old record and aborts.
     let supersedes: string | null = null;

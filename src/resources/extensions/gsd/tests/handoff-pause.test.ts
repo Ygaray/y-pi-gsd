@@ -410,6 +410,29 @@ test("HANDOFF-01 pause: .gsd/HANDOFF.md is folded into State when it is a file a
   assert.equal(lifecycle.readHandoffNotes(asDir), null);
 });
 
+test("HANDOFF-01 pause: a progress notify precedes the first CLI call (WR-05)", async () => {
+  const root = openProject();
+  const order: string[] = [];
+  const { run } = fakeHandoffRunner({ create: runOk(handoffEntry({ id: NEW_ID })) });
+  const ctx = makeHandoffCtx(root);
+  const origNotify = ctx.ui.notify.bind(ctx.ui);
+  ctx.ui.notify = ((message: string, level: string) => {
+    order.push(`notify:${message}`);
+    return origNotify(message, level as any);
+  }) as typeof ctx.ui.notify;
+  await cmdContext.withCommandCwd(root, () =>
+    core.handlePauseWork("", ctx as any, makeRecordingPi() as any, {
+      run: async (argv, opts) => {
+        order.push(`run:${argv[0]}`);
+        return run(argv, opts);
+      },
+    }),
+  );
+  const progress = order.findIndex((e) => e.startsWith("notify:Registering handoff"));
+  const firstRun = order.findIndex((e) => e.startsWith("run:"));
+  assert.ok(progress >= 0 && firstRun > progress, `progress before CLI call: ${order.join(" | ")}`);
+});
+
 test("HANDOFF-01 pause: a .gsd/HANDOFF.md symlink is never read into the handoff body (WR-01)", async () => {
   const root = openProject();
   const secret = join(root, "outside-secret.txt");
