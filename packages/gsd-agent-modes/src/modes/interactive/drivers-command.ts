@@ -214,12 +214,18 @@ function buildListingLines(
 	const anyDied = drivers.some((d) => d.liveness.kind === "died");
 	const footer: string[] = [];
 	if (stoppable.size > 0) footer.push("Stop one with /drivers stop <n>.");
+	// A died row with no recorded exit never ages out of the registry on its own; stopping it records the exit
+	// (no signal), after which the normal retention applies. Say so, since the TUI itself cannot clear it.
+	const unreconciledDied = [...stoppable.values()].some((d) => d.liveness.kind === "died");
 	if (anyDied) footer.push("Hide died drivers with /drivers dismiss.");
-	if (anyRunning || footer.length > 0) lines.push("");
+	if (anyRunning || footer.length > 0 || unreconciledDied) lines.push("");
 	if (anyRunning) {
 		lines.push(dim("● running = process alive and supervised; it does not mean the driver is making progress."));
 	}
 	if (footer.length > 0) lines.push(dim(footer.join(" ")));
+	if (unreconciledDied) {
+		lines.push(dim("A died driver with no recorded exit stays listed until you record it with /drivers stop <n>."));
+	}
 
 	return { lines, stoppable };
 }

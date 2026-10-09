@@ -186,9 +186,13 @@ describe("handleDriversCommand listing", () => {
 		assert.ok(lines[a + 1].includes("Agent process exited"), lines[a + 1]);
 		assert.ok(lines[a + 1].includes("exited 3m ago"), lines[a + 1]);
 
-		const tail = lines.slice(-2);
+		const tail = lines.slice(-3);
 		assert.ok(tail[0].startsWith("● running = process alive and supervised"), tail[0]);
 		assert.equal(tail[1], "Stop one with /drivers stop <n>. Hide died drivers with /drivers dismiss.");
+		assert.equal(
+			tail[2],
+			"A died driver with no recorded exit stays listed until you record it with /drivers stop <n>.",
+		);
 	});
 });
 
@@ -289,6 +293,11 @@ describe("handleDriversCommand stop", () => {
 		const dir = mkdir(makeTempDir(), "beta");
 		writeRegistry(h.registryPath, [liveRow(dir, 4150, 9 * MIN)]);
 		await handleDriversCommand("/drivers", h.ctx);
+		const listed = plain(h.blocks[0]).join("\n");
+		assert.ok(
+			listed.includes("A died driver with no recorded exit stays listed until you record it with /drivers stop <n>."),
+			`the listing must say how to clear an unreconciled row:\n${listed}`,
+		);
 		await handleDriversCommand("/drivers stop 1", h.ctx);
 
 		const text = plain(h.selectors[0].component, 300).join("\n");
