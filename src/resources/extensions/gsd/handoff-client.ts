@@ -4,7 +4,9 @@
 // shell, body on stdin, never throws. Handlers and lifecycle code call the typed ops here.
 
 import { execFile } from "node:child_process";
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { parseCliError, sanitizeCliText } from "./commands-doc.js";
 
@@ -130,12 +132,43 @@ export function buildChildEnv(base: NodeJS.ProcessEnv, sessionId: string | null 
 
 // ─── Runner ─────────────────────────────────────────────────────────────────
 
-/** True inside a node:test process (parent or isolated child). */
+/**
+ * True inside a node:test process (parent or isolated child). Mirrors the predicate of the
+ * resolve-ts.mjs / dist-test-resolve.mjs preloads, including a `*.test.[cm]?[jt]s` entry script.
+ */
 export function isTestProcess(): boolean {
   return (
     Boolean(process.env.NODE_TEST_CONTEXT) ||
-    process.execArgv.some((arg) => arg === "--test" || arg.startsWith("--test-"))
+    process.execArgv.some((arg) => arg === "--test" || arg.startsWith("--test-")) ||
+    /\.test\.[cm]?[jt]s$/.test(process.argv[1] ?? "")
   );
+}
+
+/** Marker the test preloads put in the isolated store directory name. */
+export const HANDOFF_TEST_STORE_MARKER = "gsd-test-yahir-handoff-";
+
+function realOrResolved(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+/**
+ * True when a store path is demonstrably a test store: it carries the preload marker, or sits
+ * under the OS temp dir. An operator-exported real store path (under their home) is not.
+ */
+export function isIsolatedHandoffPath(p: string | undefined): boolean {
+  if (!p) return false;
+  const abs = resolve(p);
+  if (abs.includes(HANDOFF_TEST_STORE_MARKER)) return true;
+  const candidate = realOrResolved(abs);
+  for (const tmp of new Set([resolve(tmpdir()), realOrResolved(tmpdir())])) {
+    const rel = relative(tmp, candidate);
+    if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) return true;
+  }
+  return false;
 }
 
 /**
@@ -163,13 +196,16 @@ export const runYahirHandoff: HandoffRunner = (argv, opts) =>
     });
     try {
       // Runtime belt (DP-5, T-45-02): under node:test never spawn without an isolated store.
-      if (isTestProcess() && (!opts.env.YAHIR_HANDOFF_ROOT || !opts.env.YAHIR_HANDOFF_STATE)) {
+      if (
+        isTestProcess() &&
+        !(isIsolatedHandoffPath(opts.env.YAHIR_HANDOFF_ROOT) && isIsolatedHandoffPath(opts.env.YAHIR_HANDOFF_STATE))
+      ) {
         finish({
           ok: false,
           exitCode: null,
           stdout: "",
           stderr: "",
-          refused: "test run without an isolated yahir-handoff store (YAHIR_HANDOFF_ROOT/YAHIR_HANDOFF_STATE unset)",
+          refused: "test run without an isolated yahir-handoff store (YAHIR_HANDOFF_ROOT/YAHIR_HANDOFF_STATE unset or not a temp-dir test store)",
         });
         return;
       }

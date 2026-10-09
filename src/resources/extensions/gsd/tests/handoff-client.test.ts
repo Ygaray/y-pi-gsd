@@ -6,7 +6,7 @@
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -323,6 +323,26 @@ test("HANDOFF-01 client: the runtime belt refuses to spawn from a test process w
   assert.ok(run.refused, "refused is set");
   assert.equal(client.classifyHandoffRun("create", run)?.kind, "refused-test-isolation");
   assert.equal(readStubCalls(stub).length, 0);
+});
+
+test("HANDOFF-01 client: the runtime belt refuses store paths that are set but not under the temp dir (WR-04)", async () => {
+  const project = makeTempGsdProject(tempDirs);
+  const stub = makeHandoffStub(tempDirs, { create: { stdout: envelope(handoffEntry()) } });
+  const realRoot = join(homedir(), ".local", "share", "yahir-handoff");
+  const realState = join(homedir(), ".local", "state", "yahir-handoff");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${stub}:${pathWithoutRealYahirHandoff()}`,
+    YAHIR_HANDOFF_ROOT: realRoot,
+    YAHIR_HANDOFF_STATE: realState,
+  };
+  const run = await client.runYahirHandoff(["create", "--json"], { cwd: project, env, timeoutMs: 2000 });
+  assert.ok(run.refused, "an operator-style real store path is refused");
+  assert.equal(readStubCalls(stub).length, 0);
+  assert.equal(client.isIsolatedHandoffPath(realRoot), false);
+  assert.equal(client.isIsolatedHandoffPath(join(tmpdir(), "anything", "store")), true);
+  assert.equal(client.isIsolatedHandoffPath(undefined), false);
+  assert.equal(client.isIsolatedHandoffPath(process.env.YAHIR_HANDOFF_ROOT), true);
 });
 
 test("HANDOFF-01 client: a rejecting or throwing runner yields spawn-error and never throws", async () => {
