@@ -441,9 +441,18 @@ function successRunner(extra: Record<string, unknown> = {}) {
   return { run, calls };
 }
 
-test("DOCS-01 input: a .gsd symlinked to external state publishes its real path", async () => {
+/** A state dir under <GSD_HOME>/projects, like the one ensureGsdSymlink points .gsd at. */
+function makeStateDir(): string {
+  const projects = join(tempGsdHome, "projects");
+  mkdirSync(projects, { recursive: true });
+  const dir = mkdtempSync(join(projects, "state-"));
+  tempDirs.add(dir);
+  return dir;
+}
+
+test("DOCS-01 input: a .gsd symlinked to GSD external state publishes its real path", async () => {
   const root = makeProject();
-  const external = tmp("gsd-doc-ext-");
+  const external = makeStateDir();
   writeFileSync(join(external, "STATE.md"), "# state\n");
   symlinkSync(external, join(root, ".gsd"));
   const { run, calls } = successRunner();
@@ -453,16 +462,30 @@ test("DOCS-01 input: a .gsd symlinked to external state publishes its real path"
   assert.equal(calls[0][2], realpathSync(join(external, "STATE.md")));
 });
 
-test("DOCS-01 input: a .planning symlinked to an external dir publishes its real path", async () => {
+test("DOCS-01 input: a .planning symlinked to GSD external state publishes its real path", async () => {
   const root = tmp("gsd-doc-");
   mkdirSync(join(root, ".git"));
-  const external = tmp("gsd-doc-ext-");
+  const external = makeStateDir();
   writeFileSync(join(external, "ROADMAP.md"), "# roadmap\n");
   symlinkSync(external, join(root, ".planning"));
   const { run, calls } = successRunner();
   const ctx = await runDoc(root, ".planning/ROADMAP.md", { run });
   assert.equal(ctx.notifications[0].level, "success", ctx.notifications[0].message);
   assert.equal(calls[0][2], realpathSync(join(external, "ROADMAP.md")));
+});
+
+test("DOCS-01 input (WR-01): a repo-shipped .planning/.gsd symlink to an arbitrary directory is rejected", async () => {
+  for (const name of [".planning", ".gsd"]) {
+    const root = tmp("gsd-doc-");
+    mkdirSync(join(root, ".git"));
+    const victim = tmp("gsd-doc-victim-");
+    writeFileSync(join(victim, "private.md"), "# private\n");
+    symlinkSync(victim, join(root, name));
+    const { run, calls } = successRunner();
+    const ctx = await runDoc(root, `${name}/private.md`, { run });
+    assert.match(onlyError(ctx), /outside this project/, name);
+    assert.equal(calls.length, 0, name);
+  }
 });
 
 test("DOCS-01 input: a file symlink escaping the project is rejected and never spawns", async () => {

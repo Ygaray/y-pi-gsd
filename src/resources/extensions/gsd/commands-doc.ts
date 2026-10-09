@@ -10,6 +10,7 @@ import { basename, isAbsolute, join, relative, resolve, sep, win32 } from "node:
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 import { projectRoot } from "./commands/context.js";
+import { externalProjectsRoot } from "./repo-identity.js";
 
 export const YAHIR_TN_BIN = "yahir-tn";
 /** yahir-tn spends up to 30 s on yahir-docs plus a 3 s loopback probe (D-08). */
@@ -201,15 +202,26 @@ export function checkPublishablePath(typedPath: string, baseDir: string, root: s
   if (!/\.md$/i.test(basename(realPath))) {
     return { ok: false, reason: `Only .md files can be published (got ${basename(realPath)})` };
   }
-  // Allowed real roots: the project, plus .gsd and .planning (each may be a symlink to
-  // external state, e.g. ~/.gsd/projects/<hash> via ensureGsdSymlink). A missing or
-  // dangling one is skipped.
+  // Allowed real roots: the project itself, plus .gsd and .planning ONLY when they are
+  // symlinks into GSD's own external state area (ensureGsdSymlink points .gsd at
+  // <gsd home>/projects/<hash>). A repo-shipped .planning/.gsd symlink aimed anywhere
+  // else (for example `.gsd -> ~`) must not widen the boundary (WR-01). A missing or
+  // dangling candidate is skipped.
   const allowedRoots: string[] = [];
-  for (const candidate of [root, join(root, ".gsd"), join(root, ".planning")]) {
+  const tryRealpath = (p: string): string | null => {
     try {
-      allowedRoots.push(realpathSync(candidate));
+      return realpathSync(p);
     } catch {
-      /* missing or dangling: skip */
+      return null;
+    }
+  };
+  const projectReal = tryRealpath(root);
+  if (projectReal) allowedRoots.push(projectReal);
+  const stateHome = tryRealpath(externalProjectsRoot());
+  if (stateHome) {
+    for (const dir of [join(root, ".gsd"), join(root, ".planning")]) {
+      const real = tryRealpath(dir);
+      if (real && isWithin(stateHome, real)) allowedRoots.push(real);
     }
   }
   if (!allowedRoots.some((allowed) => isWithin(allowed, realPath))) {
