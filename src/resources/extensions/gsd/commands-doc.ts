@@ -14,6 +14,8 @@ import { projectRoot } from "./commands/context.js";
 export const YAHIR_TN_BIN = "yahir-tn";
 /** yahir-tn spends up to 30 s on yahir-docs plus a 3 s loopback probe (D-08). */
 export const DEFAULT_DOC_TIMEOUT_MS = 45_000;
+export const YAHIR_TN_INSTALL_HINT =
+  "Install it by running the yahir-tn repo's install.sh (for example ~/Projects/yahir-agentic-tools/yahir-tn/install.sh, which links ~/.local/bin/yahir-tn), and make sure ~/.local/bin is on the PATH of the process running y-pi-gsd.";
 export const DOC_USAGE =
   "Usage: /gsd doc <path-to-.md> [--keep]  (relative to the current directory, or absolute; the file must be inside this project, its .gsd/ or its .planning/)";
 
@@ -245,6 +247,92 @@ export function buildYahirTnArgv(slug: string, realPath: string, keep: boolean):
 
 // ─── Formatting ─────────────────────────────────────────────────────────────
 
+/**
+ * Strip ANSI escape sequences (CSI, OSC, other ESC pairs) and control characters
+ * other than newline and tab from CLI-originated text before it reaches notify.
+ */
+export function sanitizeCliText(text: string): string {
+  return text
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b[\s\S]?/g, "")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+function tailChars(text: string, n: number): string {
+  const t = text.trim();
+  return t.length > n ? t.slice(t.length - n) : t;
+}
+
+export interface CliError {
+  code: number | null;
+  message: string;
+  hint: string | null;
+}
+
+function asCliError(value: unknown): CliError | null {
+  if (typeof value !== "object" || value === null) return null;
+  const err = (value as Record<string, unknown>).error;
+  if (typeof err !== "object" || err === null) return null;
+  const e = err as Record<string, unknown>;
+  if (typeof e.message !== "string") return null;
+  return {
+    code: typeof e.code === "number" ? e.code : null,
+    message: e.message,
+    hint: typeof e.hint === "string" ? e.hint : null,
+  };
+}
+
+/** Parse the CLI's one-line {"error":{code,message,hint}} from stderr (whole text, else its last non-empty line). */
+export function parseCliError(stderr: string): CliError | null {
+  const trimmed = stderr.trim();
+  if (trimmed === "") return null;
+  const candidates = [trimmed];
+  const lines = trimmed.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  if (lines.length > 0) candidates.push(lines[lines.length - 1]);
+  for (const c of candidates) {
+    try {
+      const parsed = asCliError(JSON.parse(c));
+      if (parsed) return parsed;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
+
+/** One message per failure class; no URL is ever presented as openable here. */
+export function formatRunFailure(run: YahirTnRun, timeoutMs: number): string {
+  if (run.spawnError === "ENOENT") {
+    return `yahir-tn is not installed or not on PATH, so nothing was published. ${YAHIR_TN_INSTALL_HINT}`;
+  }
+  if (run.spawnError) {
+    return `Could not run yahir-tn or read its output (${sanitizeCliText(run.spawnError)}). If it ran, the doc may have been published: check \`yahir-tn ps\`.`;
+  }
+  if (run.timedOut) {
+    return `yahir-tn doc did not finish within ${String(timeoutMs / 1000)} s and was stopped. The doc may still have been published: check \`yahir-tn ps\`.`;
+  }
+  if (run.signal) {
+    return `yahir-tn doc was killed by ${sanitizeCliText(run.signal)}. The doc may or may not have been published: check \`yahir-tn ps\`.`;
+  }
+  const cli = parseCliError(run.stderr);
+  if (run.exitCode === 5) {
+    const message = cli ? cli.message : tailChars(run.stderr, 300) || "(no output)";
+    const lines = [
+      "Published but NOT served: yahir-tn wrote the doc, but the docs server did not answer for it, so there is no URL to open.",
+      `Diagnostic (host-side loopback check, not openable from your laptop): ${sanitizeCliText(message)}`,
+    ];
+    if (cli?.hint) lines.push(`Hint: ${sanitizeCliText(cli.hint)}`);
+    return lines.join("\n");
+  }
+  if (cli) {
+    const head = `yahir-tn doc failed (exit ${run.exitCode}): ${sanitizeCliText(cli.message)}`;
+    return cli.hint ? `${head}\nHint: ${sanitizeCliText(cli.hint)}` : head;
+  }
+  const tail = tailChars(run.stderr, 300);
+  return `yahir-tn doc failed (exit ${run.exitCode}). Last output: ${tail ? sanitizeCliText(tail) : "(no output)"}`;
+}
+
 export function formatPublishSuccess(doc: PublishedDoc): string {
   const lines = [
     `Published: ${doc.url}`,
@@ -297,19 +385,28 @@ export async function handleDoc(
     const timeoutMs = opts.timeoutMs ?? DEFAULT_DOC_TIMEOUT_MS;
     const result = await run(buildYahirTnArgv(slug, checked.realPath, parsed.keep), timeoutMs);
     if (!result.ok) {
-      const why = result.exitCode ?? result.spawnError ?? (result.timedOut ? "timeout" : result.signal);
-      ctx.ui.notify(`yahir-tn doc failed (exit ${why}); no URL to open.`, "error");
+      ctx.ui.notify(formatRunFailure(result, timeoutMs), "error");
       return;
     }
     const published = parsePublishResult(result.stdout, checked.realPath);
     if (!published.ok) {
       ctx.ui.notify(
-        `yahir-tn doc returned output that cannot be used (${published.reason}), so no URL is shown.`,
+        `yahir-tn doc finished but its output cannot be used (${sanitizeCliText(published.reason)}), so no URL is shown. The doc may have been published: check \`yahir-tn ps\`.`,
         "error",
       );
       return;
     }
-    ctx.ui.notify(formatPublishSuccess(published.doc), "success");
+    const d = published.doc;
+    ctx.ui.notify(
+      formatPublishSuccess({
+        url: sanitizeCliText(d.url),
+        source: sanitizeCliText(d.source),
+        name: d.name === null ? null : sanitizeCliText(d.name),
+        expiresAt: d.expiresAt === null ? null : sanitizeCliText(d.expiresAt),
+        pinned: d.pinned,
+      }),
+      "success",
+    );
   } catch (err) {
     ctx.ui.notify(`/gsd doc failed unexpectedly: ${errMessage(err)}`, "error");
   }
