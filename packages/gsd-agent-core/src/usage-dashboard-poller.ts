@@ -190,6 +190,23 @@ export function identityMatchesLogin(body: unknown, login: string): boolean {
 	});
 }
 
+/**
+ * Cross-field check (WR-02). Quota windows are per account, but the org key matches every account in
+ * the org, so a 200 that echoes the login is not proof it is this session's account. Every identity
+ * field that both this session and the dashboard know must agree; a field either side lacks is skipped.
+ */
+export function identityConsistent(body: unknown, identity: ClaudeIdentity): boolean {
+	if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+	const payload = body as Record<string, unknown>;
+	const agrees = (dashboardValue: unknown, sessionValue: string | undefined): boolean =>
+		sessionValue === undefined || typeof dashboardValue !== "string" || dashboardValue.toLowerCase() === sessionValue.toLowerCase();
+	return (
+		agrees(payload.claude_org_uuid, identity.orgId) &&
+		agrees(payload.claude_email, identity.email) &&
+		agrees(payload.claude_account_uuid, identity.accountUuid)
+	);
+}
+
 /** `{CLAUDE_CONFIG_DIR or the home directory}/.claude.json`: where the CLI keeps the logged-in account block. */
 export function claudeConfigPath(env: NodeJS.ProcessEnv): string {
 	const dir = env.CLAUDE_CONFIG_DIR?.trim();
@@ -518,7 +535,7 @@ export class UsageDashboardPoller implements RateLimitFallbackProducer {
 				this.debug("failure: body");
 				return this.transientFailure(gen);
 			}
-			if (!identityMatchesLogin(body, login)) {
+			if (!identityMatchesLogin(body, login) || !identityConsistent(body, identity)) {
 				this.debug("rejected: fingerprint");
 				return this.dropUnvouched();
 			}

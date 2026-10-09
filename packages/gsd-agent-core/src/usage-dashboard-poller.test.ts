@@ -14,6 +14,7 @@ import {
 	buildClaudeAuthStatusInvocation,
 	claudeConfigPath,
 	createUsageDashboardPoller,
+	identityConsistent,
 	identityMatchesLogin,
 	loginCandidates,
 	mapDashboardQuotaPayload,
@@ -311,7 +312,7 @@ describe("usage dashboard login matching (D-03 / SC4)", () => {
 		const fetcher = fakeFetch((call) => {
 			const login = loginOf(fetcher.calls[call - 1].url);
 			if (login === "org-test-uuid") return new Response(JSON.stringify({ detail: "2 matches" }), { status: 409 });
-			return okResponse(okPayload({ claude_email: "me@example.test", claude_org_uuid: "org-shared" }));
+			return okResponse(okPayload({ claude_email: "me@example.test", claude_org_uuid: "org-test-uuid" }));
 		});
 		const poller = new UsageDashboardPoller(
 			{ ref, getProvider: () => "claude-code" },
@@ -406,7 +407,7 @@ describe("usage dashboard login matching (D-03 / SC4)", () => {
 		const ref: RateLimitStatusRef = {};
 		const stdout = JSON.stringify({ loggedIn: true, orgId: "org+id/1", email: "a@example.test" });
 		const fetcher = fakeFetch((call) =>
-			call === 1 ? new Response("{}", { status: 409 }) : okResponse(okPayload({ claude_email: "a@example.test" })),
+			call === 1 ? new Response("{}", { status: 409 }) : okResponse(okPayload({ claude_email: "a@example.test", claude_org_uuid: "org+id/1" })),
 		);
 		const poller = new UsageDashboardPoller(
 			{ ref, getProvider: () => "claude-code" },
@@ -442,6 +443,62 @@ describe("usage dashboard login matching (D-03 / SC4)", () => {
 		} finally {
 			poller.stop();
 		}
+	});
+
+	test("WR-02: a teammate's account that matches on the org key is rejected, not shown as this session's quota", async () => {
+		const ref: RateLimitStatusRef = {
+			current: { session: { usedPercent: 5, resetsAtEpochSec: 1 }, weekly: null },
+			provider: "claude-code",
+			meta: { session: { source: "dashboard", observedAtMs: Date.now() } },
+		};
+		// The dashboard tracks exactly one account in this org, and it is a teammate's: the org key answers 200.
+		const fetcher = fakeFetch(() =>
+			okResponse(okPayload({ claude_org_uuid: "org-test-uuid", claude_email: "teammate@example.test", claude_account_uuid: "acct-teammate" })),
+		);
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		let notified = 0;
+		try {
+			poller.start(() => {
+				notified += 1;
+			});
+			await poller.refresh();
+			assert.equal(fetcher.calls.length, 1);
+			assert.equal(ref.current?.session, null, "the dashboard-sourced window is cleared, never replaced by the teammate's");
+			assert.equal(notified, 1);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("WR-02: a 200 agreeing on every field both sides know is accepted, and a field the dashboard has not learned is skipped", async () => {
+		const ref: RateLimitStatusRef = {};
+		const fetcher = fakeFetch(() => okResponse(okPayload({ claude_email: "ME@example.test", claude_account_uuid: null })));
+		const poller = new UsageDashboardPoller(
+			{ ref, getProvider: () => "claude-code" },
+			{ fetchImpl: fetcher.impl, execFileImpl: fakeExec(LOGGED_IN).impl, env: {}, platform: "linux" },
+		);
+		try {
+			poller.start(() => {});
+			await poller.refresh();
+			assert.equal(ref.current?.session?.usedPercent, 8);
+		} finally {
+			poller.stop();
+		}
+	});
+
+	test("identityConsistent requires agreement on every identity field present on both sides", () => {
+		const id = { orgId: "Org-1", email: "me@x", accountUuid: "A-1" };
+		assert.equal(identityConsistent({ claude_org_uuid: "org-1", claude_email: "ME@x", claude_account_uuid: "a-1" }, id), true);
+		assert.equal(identityConsistent({ claude_org_uuid: "org-1", claude_email: null, claude_account_uuid: null }, id), true);
+		assert.equal(identityConsistent({ claude_org_uuid: "org-1", claude_email: "other@x" }, id), false);
+		assert.equal(identityConsistent({ claude_org_uuid: "org-2" }, id), false);
+		assert.equal(identityConsistent({ claude_account_uuid: "a-2" }, id), false);
+		assert.equal(identityConsistent({ claude_email: "other@x" }, { orgId: "org-1" }), true, "a field this session lacks is skipped");
+		assert.equal(identityConsistent([], id), false);
+		assert.equal(identityConsistent(null, id), false);
 	});
 
 	test("loginCandidates orders orgId, email, accountUuid and de-duplicates case-insensitively", () => {
