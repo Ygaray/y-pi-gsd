@@ -11,6 +11,8 @@ type RuntimeInteractiveMode = {
 	[key: string]: unknown;
 	stop(): void;
 	_themeChangeUnsub?: () => void;
+	_rateLimitChangeUnsub?: () => void;
+	subscribeToRateLimitStatus(): void;
 	getMarkdownThemeWithSettings(): unknown;
 };
 
@@ -39,6 +41,63 @@ describe("InteractiveMode lifecycle", () => {
 
 		assert.equal(unsubscribeCount, 1);
 		assert.equal(mode._themeChangeUnsub, undefined);
+	});
+
+	it("subscribeToRateLimitStatus requests a render on every rate-limit change", () => {
+		const mode = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
+		let captured: (() => void) | undefined;
+		let unsubCount = 0;
+		let renders = 0;
+		mode.session = {
+			onRateLimitStatusChange(cb: () => void) {
+				captured = cb;
+				return () => {
+					unsubCount++;
+				};
+			},
+		};
+		mode.ui = {
+			requestRender() {
+				renders++;
+			},
+		};
+
+		mode.subscribeToRateLimitStatus();
+		assert.equal(typeof mode._rateLimitChangeUnsub, "function");
+		captured?.();
+		captured?.();
+		assert.equal(renders, 2);
+		assert.equal(unsubCount, 0);
+
+		mode.subscribeToRateLimitStatus();
+		assert.equal(unsubCount, 1, "a re-subscribe releases the previous subscription first");
+	});
+
+	it("calls and clears the rate-limit change unsubscriber on stop", () => {
+		const mode = Object.create(InteractiveMode.prototype) as RuntimeInteractiveMode;
+		let unsubscribeCount = 0;
+
+		mode.loadingAnimation = undefined;
+		mode.extensionTerminalInputUnsubscribers = new Set();
+		mode.clearExtensionTerminalInputListeners = () => {};
+		mode._branchChangeUnsub = undefined;
+		mode._themeChangeUnsub = undefined;
+		mode._rateLimitChangeUnsub = () => {
+			unsubscribeCount++;
+		};
+		mode.onInputCallback = undefined;
+		mode.clearExtensionWidgets = () => {};
+		mode.customFooter = undefined;
+		mode.customHeader = undefined;
+		mode.footer = { dispose() {} };
+		mode.footerDataProvider = { dispose() {} };
+		mode.unsubscribe = undefined;
+		mode.isInitialized = false;
+
+		mode.stop();
+
+		assert.equal(unsubscribeCount, 1);
+		assert.equal(mode._rateLimitChangeUnsub, undefined);
 	});
 
 	it("stop disposes the driver liveness widget", () => {

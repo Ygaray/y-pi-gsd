@@ -149,6 +149,7 @@ export class InteractiveMode {
 	private unsubscribe?: () => void;
 	private _branchChangeUnsub?: () => void;
 	private _gitStatusChangeUnsub?: () => void;
+	private _rateLimitChangeUnsub?: () => void;
 	private _themeChangeUnsub?: () => void;
 	private markdownThemeCache?: MarkdownTheme;
 	private markdownThemeCacheIndent?: string;
@@ -324,7 +325,20 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
+		this.subscribeToRateLimitStatus();
+
 		await this.updateAvailableProviderCount();
+	}
+
+	/**
+	 * Phase 43 USAGE-01 - the footer has no timer, so a dashboard poll that lands while the TUI is idle
+	 * must repaint. Subscribing is also what activates the agent-core dashboard producer.
+	 */
+	private subscribeToRateLimitStatus(): void {
+		this._rateLimitChangeUnsub?.();
+		this._rateLimitChangeUnsub = this.session.onRateLimitStatusChange(() => {
+			this.ui.requestRender();
+		});
 	}
 
 	async run(): Promise<void> {
@@ -479,6 +493,8 @@ export class InteractiveMode {
 		this._branchChangeUnsub = undefined;
 		this._gitStatusChangeUnsub?.();
 		this._gitStatusChangeUnsub = undefined;
+		this._rateLimitChangeUnsub?.();
+		this._rateLimitChangeUnsub = undefined;
 		this._themeChangeUnsub?.();
 		this._themeChangeUnsub = undefined;
 		stopThemeWatcher();

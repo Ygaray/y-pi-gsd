@@ -355,12 +355,13 @@ export class AgentSession implements AgentSessionHost {
 		return this._model.getRequiredRequestAuth(model);
 	}
 
-	emitModelSelect(
+	async emitModelSelect(
 		nextModel: Model<any>,
 		previousModel: Model<any> | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
-		return this._model.emitModelSelect(nextModel, previousModel, source);
+		await this._model.emitModelSelect(nextModel, previousModel, source);
+		this._refreshRateLimitFallback();
 	}
 
 	findLastAssistantMessage(): AssistantMessage | undefined {
@@ -456,6 +457,17 @@ export class AgentSession implements AgentSessionHost {
 		};
 	}
 
+	/**
+	 * Phase 43 D-01: re-evaluate the dashboard producer's claude-code gate right after a model change
+	 * (setModel, cycleModel, restore) so a switch onto claude-code shows values at once instead of
+	 * waiting for the next timer tick. The producer's refresh() is a no-op while it is not running,
+	 * so sessions nobody observes stay silent.
+	 */
+	private _refreshRateLimitFallback(): void {
+		if (this._rateLimitDisposed) return;
+		void this._rateLimitFallbackProducer?.refresh();
+	}
+
 	_notifyRateLimitStatusChange(): void {
 		for (const listener of [...this._rateLimitChangeListeners]) {
 			try {
@@ -524,12 +536,15 @@ export class AgentSession implements AgentSessionHost {
 		this._prompt.abortRetry();
 	}
 
-	setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void> {
-		return this._model.setModel(model, options);
+	async setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void> {
+		await this._model.setModel(model, options);
+		this._refreshRateLimitFallback();
 	}
 
-	cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		return this._model.cycleModel(direction);
+	async cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
+		const result = await this._model.cycleModel(direction);
+		if (result) this._refreshRateLimitFallback();
+		return result;
 	}
 
 	cycleThinkingLevel(): ThinkingLevel | undefined {
